@@ -124,8 +124,8 @@ const VOLUME_SHOW: Duration = Duration::from_millis(1200);
 /// Qué sigue moviéndose después de dibujar un cuadro.
 #[derive(Default)]
 struct Motion {
-    /// Un texto largo se desplaza (isla expandida).
-    scrolling: bool,
+    /// Un texto largo se desplaza (isla expandida): en cuántos ms dibujar el cuadro siguiente.
+    scroll_ms: Option<u32>,
     /// Las barras de audio bailan (isla contraída y música sonando).
     bars: bool,
     /// La barra de progreso avanza (isla expandida y música sonando).
@@ -1495,7 +1495,7 @@ impl App {
             projecting = projector.render(lyric, cx, top);
         }
 
-        let mut scrolling = false;
+        let mut scroll_ms = None;
         if let (Some(areas), Some(text)) = (areas, self.text.as_mut()) {
             let (title, subtitle) = match (notice, media) {
                 (Some(n), _) => (n.title.clone(), n.subtitle.clone()),
@@ -1526,6 +1526,10 @@ impl App {
                     "Pon música en cualquier app".to_string(),
                 ),
             };
+            scroll_ms = text.draw(
+                self.surface.dc,
+                self.surface.width,
+                self.surface.height,
             scrolling = text.draw(
                 self.surface.dib(),
                 sw,
@@ -1597,7 +1601,7 @@ impl App {
             }
         }
         Motion {
-            scrolling,
+            scroll_ms,
             bars,
             progress,
             edge_ms,
@@ -1612,11 +1616,16 @@ impl App {
     }
 }
 
+/// Intervalo del temporizador según lo que se mueve: 60 fps para la isla, un cuadro por píxel
+/// de avance de un texto largo (y ninguno durante sus pausas), 30 fps si solo bailan las barras,
+/// 4 fps si solo avanza la barra de progreso, un cuadro por píxel de avance si la isla está
+/// oculta y solo crece la línea del borde, y apagado si todo está quieto. Con letra, además, a más tardar cuando empieza el verso siguiente.
 /// Intervalo del temporizador según lo que se mueve: 60 fps para la isla y los textos,
 /// 30 fps si solo bailan las barras, 20 fps si se pinta el verso, 4 fps si solo avanza la barra de progreso, un cuadro por
 /// píxel de avance si la isla está oculta y solo crece la línea del borde, y apagado si todo
 /// está quieto. Con letra, además, a más tardar cuando empieza el verso siguiente.
 fn timer_for(motion: &Motion, moving: bool) -> Option<u32> {
+    let base = if moving || motion.pressing || motion.projecting {
     let base = if moving
         || motion.scrolling
         || motion.pressing
@@ -1634,10 +1643,10 @@ fn timer_for(motion: &Motion, moving: bool) -> Option<u32> {
     } else {
         motion.edge_ms
     };
-    match (base, motion.lyric_ms) {
-        (Some(a), Some(b)) => Some(a.min(b)),
-        (a, b) => a.or(b),
-    }
+    [base, motion.lyric_ms, motion.scroll_ms]
+        .into_iter()
+        .flatten()
+        .min()
 }
 
 /// Calcula escala, superficie de dibujo y posición (arriba al centro) para un monitor.
