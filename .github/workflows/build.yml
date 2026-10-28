@@ -4,6 +4,10 @@
 # tiene configurada la variable SIGNPATH_ORGANIZATION_ID y el secreto SIGNPATH_API_TOKEN
 # (Settings > Secrets and variables > Actions). Sin ellos, se publican los archivos sin firmar.
 #
+# Las acciones van fijadas al commit exacto (con su versión en el comentario): si alguien
+# moviera la etiqueta "v4" de una acción a código malicioso, este workflow no lo usaría.
+# Dependabot (.github/dependabot.yml) propone las actualizaciones.
+#
 # Orden: se firma primero el .exe y recién después se arma el instalador con ese .exe, así la
 # app instalada también queda firmada. Luego se firma el instalador.
 
@@ -23,12 +27,17 @@ jobs:
   build:
     runs-on: windows-latest
     env:
-      SIGNING: ${{ vars.SIGNPATH_ORGANIZATION_ID != '' }}
+      # Nunca se firma el código de un pull request: solo lo que ya está en main o en una
+      # etiqueta de versión (que solo puede crear el dueño del repo).
+      SIGNING: ${{ vars.SIGNPATH_ORGANIZATION_ID != '' && github.event_name != 'pull_request' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # El token de GitHub no queda guardado en la copia para los pasos siguientes.
+          persist-credentials: false
 
       - name: Caché de Cargo
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/registry
@@ -44,14 +53,14 @@ jobs:
 
       - name: Subir el .exe sin firmar
         id: unsigned-exe
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: notch-isla-exe-sin-firmar
           path: target/release/notch-isla.exe
 
       - name: Firmar el .exe (SignPath)
         if: env.SIGNING == 'true'
-        uses: signpath/github-action-submit-signing-request@v1
+        uses: signpath/github-action-submit-signing-request@ced31329c0317e779dad2eec2a7c3bb46ea1343e # v1
         with:
           api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
           organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
@@ -76,14 +85,14 @@ jobs:
 
       - name: Subir el instalador sin firmar
         id: unsigned-setup
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: notch-isla-setup-sin-firmar
           path: target/installer/*.exe
 
       - name: Firmar el instalador (SignPath)
         if: env.SIGNING == 'true'
-        uses: signpath/github-action-submit-signing-request@v1
+        uses: signpath/github-action-submit-signing-request@ced31329c0317e779dad2eec2a7c3bb46ea1343e # v1
         with:
           api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
           organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
@@ -107,7 +116,7 @@ jobs:
           Get-ChildItem dist | Format-Table Name, Length
 
       - name: Subir los archivos finales
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: notch-isla-${{ github.sha }}
           path: dist/*.exe

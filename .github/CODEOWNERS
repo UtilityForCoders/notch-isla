@@ -1,0 +1,13 @@
+# Todo cambio necesita la revisión del dueño del repo antes de entrar a main.
+* @gportal21
+
+# Lo más sensible, explícito: lo que se compila o se ejecuta en tu PC o en la de los usuarios
+# (dependencias, scripts de compilación, instalador, workflows y actualizaciones automáticas).
+/Cargo.toml @gportal21
+/Cargo.lock @gportal21
+/build.rs @gportal21
+/app.rc @gportal21
+/app.manifest @gportal21
+/installer/ @gportal21
+/.github/ @gportal21
+/src/update.rs @gportal21

@@ -53,6 +53,9 @@ pub struct Update {
     pub version: String,
     /// Instalador ya descargado y verificado; `None` si hay que ir a la página de descarga.
     pub installer: Option<PathBuf>,
+    /// Huella SHA-256 que publicó GitHub para el instalador: se vuelve a comprobar justo antes
+    /// de ejecutarlo, por si el archivo cambió desde la descarga.
+    digest: String,
 }
 
 struct Handle(*mut core::ffi::c_void);
@@ -114,15 +117,35 @@ fn lookup(current: &str) -> std::result::Result<Option<Update>, ()> {
         .ok_or(())?;
     let tag = json_string(&json, "tag_name").ok_or(())?;
     let version = tag.trim_start_matches('v').to_string();
+    // La versión se usa en el nombre del archivo y en la dirección: solo números y puntos.
+    if !is_plain_version(&version) || tag != format!("v{version}") {
+        return Err(());
+    }
     if !is_newer(&version, current) {
         return Ok(None);
     }
-    let installer = if is_installed() {
-        download_installer(&json, tag, &version)
-    } else {
-        None
+    // La versión portable no descarga nada: solo avisa y abre la página.
+    let downloaded = is_installed()
+        .then(|| download_installer(&json, tag, &version))
+        .flatten();
+    let (installer, digest) = match downloaded {
+        Some((path, digest)) => (Some(path), digest),
+        None => (None, String::new()),
     };
-    Ok(Some(Update { version, installer }))
+    Ok(Some(Update {
+        version,
+        installer,
+        digest,
+    }))
+}
+
+/// "1.2.3": de 1 a 4 números de hasta 5 cifras separados por puntos, nada más.
+fn is_plain_version(v: &str) -> bool {
+    let parts: Vec<&str> = v.split('.').collect();
+    (1..=4).contains(&parts.len())
+        && parts
+            .iter()
+            .all(|p| (1..=5).contains(&p.len()) && p.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// Mensaje con el resultado de "Buscar actualizaciones" cuando no hay versión nueva:
@@ -186,7 +209,7 @@ impl Update {
     /// si no, abre la página de descarga.
     pub fn apply(&self) -> bool {
         if let Some(installer) = &self.installer {
-            if install(installer, &self.version) {
+            if install(installer, &self.version, &self.digest) {
                 return true;
             }
         }
@@ -215,6 +238,18 @@ const SILENT: [&str; 4] = ["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/S
 /// Argumento con el que la app arranca como ayudante de la actualización (ver `run_updater`).
 pub const UPDATER_FLAG: &str = "--actualizar";
 
+/// Las dos únicas opciones de tareas que se le pasan al instalador.
+const TASKS: [&str; 2] = ["/MERGETASKS=autostart", "/MERGETASKS=!autostart"];
+
+/// El archivo existe y su SHA-256 es `digest` (en hexadecimal, sin importar mayúsculas).
+fn file_matches(path: &Path, digest: &str) -> bool {
+    !digest.is_empty()
+        && std::fs::read(path)
+            .ok()
+            .and_then(|data| sha256_hex(&data))
+            .is_some_and(|hash| hash.eq_ignore_ascii_case(digest))
+}
+
 /// Instala `installer` (la versión `version`) sin ventanas. Devuelve `true` si arrancó:
 /// entonces la app debe cerrarse para dejar instalar.
 ///
@@ -222,12 +257,17 @@ pub const UPDATER_FLAG: &str = "--actualizar";
 /// temporal como ayudante (`run_updater`), que espera al instalador y se asegura de que la isla
 /// vuelva a abrirse, aunque la instalación falle. Antes se anota qué versión se está
 /// instalando: al abrirse de nuevo, la isla compara y avisa si se actualizó o no.
-fn install(installer: &Path, version: &str) -> bool {
+fn install(installer: &Path, version: &str, digest: &str) -> bool {
+    // El instalador estuvo un rato en la carpeta temporal: si alguien lo cambió, no se ejecuta.
+    if !file_matches(installer, digest) {
+        let _ = std::fs::remove_file(installer);
+        return false;
+    }
     // Respeta "Iniciar con Windows" tal como está ahora, aunque se haya cambiado desde la bandeja.
     let tasks = if autostart::is_enabled() {
-        "/MERGETASKS=autostart"
+        TASKS[0]
     } else {
-        "/MERGETASKS=!autostart"
+        TASKS[1]
     };
     settings::set_pending_update(Some(version));
     // La copia va fuera de la carpeta de la app: el instalador reemplaza ese .exe.
@@ -239,6 +279,7 @@ fn install(installer: &Path, version: &str) -> bool {
                 .arg(UPDATER_FLAG)
                 .arg(installer)
                 .arg(tasks)
+                .arg(digest)
                 .spawn()
         })
         .is_ok()
@@ -258,10 +299,31 @@ fn install(installer: &Path, version: &str) -> bool {
 /// Modo ayudante: la isla ya se cerró. Corre el instalador, espera a que termine y, si la isla
 /// no volvió a abrirse (la instalación falló, o el instalador no la abrió), la abre. Así nunca
 /// queda cerrada sin avisar; al abrirse, la isla dice si se actualizó.
+///
+/// Para que nadie pueda usar este modo (en un .exe firmado) para lanzar otro programa, solo
+/// ejecuta un instalador de Notch Isla en la carpeta temporal, con las opciones conocidas y
+/// cuya huella coincide con la recibida (la que publicó GitHub, comprobada por la isla).
 pub fn run_updater(args: &[String]) {
-    let (Some(installer), Some(tasks)) = (args.first(), args.get(1)) else {
+    let (Some(installer), Some(tasks), Some(digest)) = (args.first(), args.get(1), args.get(2))
+    else {
         return;
     };
+    let installer = Path::new(installer);
+    let expected_place = installer.parent().and_then(|d| d.canonicalize().ok())
+        == std::env::temp_dir().canonicalize().ok();
+    let expected_name = installer
+        .file_name()
+        .and_then(|n| n.to_str())
+        .and_then(|n| n.strip_prefix("notch-isla-setup-"))
+        .and_then(|n| n.strip_suffix(".exe"))
+        .is_some_and(is_plain_version);
+    if !expected_place
+        || !expected_name
+        || !TASKS.contains(&tasks.as_str())
+        || !file_matches(installer, digest)
+    {
+        return;
+    }
     let _ = std::process::Command::new(installer)
         .args(SILENT)
         .arg(tasks)
@@ -364,7 +426,8 @@ fn is_installed() -> bool {
 
 /// Descarga el instalador de `version` a la carpeta temporal y lo verifica contra el tamaño y
 /// la huella SHA-256 que informa GitHub. Si ya estaba descargado y es correcto, lo reutiliza.
-fn download_installer(json: &str, tag: &str, version: &str) -> Option<PathBuf> {
+/// Devuelve dónde quedó y su huella.
+fn download_installer(json: &str, tag: &str, version: &str) -> Option<(PathBuf, String)> {
     let name = format!("notch-isla-setup-{version}.exe");
     // Datos del archivo en la lista de "assets": vienen después de su nombre.
     let asset = &json[json.find(&format!("\"{name}\""))?..];
@@ -378,7 +441,7 @@ fn download_installer(json: &str, tag: &str, version: &str) -> Option<PathBuf> {
         data.len() as u64 == size && sha256_hex(data).as_deref() == Some(digest.as_str())
     };
     if std::fs::read(&path).is_ok_and(|data| valid(&data)) {
-        return Some(path);
+        return Some((path, digest));
     }
     // Siempre desde github.com y la ruta del repo; la redirección al almacenamiento de GitHub
     // la sigue WinHTTP.
@@ -391,7 +454,7 @@ fn download_installer(json: &str, tag: &str, version: &str) -> Option<PathBuf> {
         return None;
     }
     std::fs::write(&path, &data).ok()?;
-    Some(path)
+    Some((path, digest))
 }
 
 /// Huella SHA-256 en hexadecimal (minúsculas).
@@ -402,6 +465,9 @@ fn sha256_hex(data: &[u8]) -> Option<String> {
         .is_ok()
         .then(|| hash.iter().map(|b| format!("{b:02x}")).collect())
 }
+
+/// Tamaño máximo de una descarga: el instalador pesa unos 2,5 MB y las respuestas JSON, pocos KB.
+const MAX_DOWNLOAD: usize = 32 * 1024 * 1024;
 
 /// GET por HTTPS. `json` = pedir la respuesta de la API de GitHub. Lo usa también la letra.
 pub(crate) fn get(host: &str, path: &str, json: bool) -> Option<Vec<u8>> {
@@ -477,6 +543,10 @@ pub(crate) fn get(host: &str, path: &str, json: bool) -> Option<Vec<u8>> {
                 break;
             }
             body.extend_from_slice(&chunk[..read as usize]);
+            // Un servidor que manda de más (por error o a propósito) no llena la memoria.
+            if body.len() > MAX_DOWNLOAD {
+                return None;
+            }
         }
         Some(body)
     }
@@ -517,6 +587,44 @@ mod tests {
     use super::*;
 
     #[test]
+    fn solo_versiones_simples() {
+        assert!(is_plain_version("0.4.5"));
+        assert!(is_plain_version("1.0"));
+        assert!(!is_plain_version(""));
+        assert!(!is_plain_version("0.4.5-beta"));
+        assert!(!is_plain_version("..\\..\\x"));
+        assert!(!is_plain_version("0.4.5/../../evil"));
+        assert!(!is_plain_version("1.2.3.4.5"));
+    }
+
+    /// El modo ayudante no ejecuta nada que no sea un instalador de Notch Isla verificado.
+    #[test]
+    fn ayudante_rechaza_otros_programas() {
+        let dir = std::env::temp_dir();
+        let fake = dir.join("notch-isla-setup-9.9.9.exe");
+        std::fs::write(&fake, b"no es un instalador").unwrap();
+        let real_digest = sha256_hex(b"no es un instalador").unwrap();
+        let arg = |p: &Path| p.to_string_lossy().to_string();
+        assert!(file_matches(&fake, &real_digest));
+        assert!(!file_matches(&fake, "00"));
+        assert!(!file_matches(&fake, ""));
+        // Huella equivocada, nombre o carpeta ajenos, tareas inventadas: no se ejecuta nada
+        // (si se ejecutara, `status` fallaría igual; lo que importa es que vuelve enseguida).
+        for args in [
+            vec![arg(&fake), TASKS[0].into(), "00".into()],
+            vec![arg(&fake), "/TASKS=otra".into(), real_digest.clone()],
+            vec![
+                "C:\\Windows\\System32\\calc.exe".into(),
+                TASKS[0].into(),
+                real_digest.clone(),
+            ],
+        ] {
+            run_updater(&args);
+        }
+        let _ = std::fs::remove_file(&fake);
+    }
+
+    #[test]
     fn compara_versiones() {
         assert!(is_newer("0.3.0", "0.2.1"));
         assert!(is_newer("0.2.10", "0.2.9"));
@@ -554,8 +662,10 @@ mod tests {
         let tag = json_string(&json, "tag_name").unwrap();
         let version = tag.trim_start_matches('v');
         assert!(is_newer(version, "0.0.0"), "versión rara: {version}");
-        let path =
+        assert!(is_plain_version(version));
+        let (path, digest) =
             download_installer(&json, tag, version).expect("descarga o verificación fallida");
-        assert!(path.exists());
+        // Lo mismo que comprueba la isla justo antes de ejecutarlo.
+        assert!(file_matches(&path, &digest));
     }
 }

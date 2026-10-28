@@ -1,0 +1,15 @@
+# Dependabot propone por pull request las versiones nuevas de las dependencias de Rust y de las
+# acciones del workflow (que van fijadas a un commit exacto). Cada propuesta pasa por la misma
+# revisión que cualquier otro cambio.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
