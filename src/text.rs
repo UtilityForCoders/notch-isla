@@ -201,9 +201,6 @@ impl TextRenderer {
 
     /// Dibuja textos encima de lo que ya hay en el DIB `dib` (BGRA premultiplicado de
     /// `width` x `height`), solo dentro de `zone` (x0, y0, x1, y1): fuera no cambia nada.
-    /// `t` = segundos desde que empezó el desplazamiento. Devuelve `true` si alguna línea
-    /// no cabe y por tanto se está desplazando (hay que seguir redibujando).
-    /// Dibuja textos encima de lo que ya hay en el DIB seleccionado en `dc`.
     /// `t` = segundos desde que empezó el desplazamiento. Si alguna línea no cabe y se
     /// desplaza, devuelve en cuántos ms hay que dibujar el cuadro siguiente: lo que tarda en
     /// avanzar un píxel, o lo que falta para que termine la pausa en un extremo (quieta, no
@@ -219,23 +216,22 @@ impl TextRenderer {
         title: &str,
         subtitle: &str,
         t: f32,
-    ) -> bool {
+    ) -> Option<u32> {
         let (x0, y0, x1, y1) = zone;
         if x0 >= x1 || y0 >= y1 || dib.len() < (width * height * 4) as usize {
-            return false;
+            return None;
         }
         if self.canvas_size != (width, height) && self.resize(width, height).is_err() {
-            return false;
+            return None;
         }
         // Mismos textos en el mismo lugar que el cuadro anterior (se movió la barra, un botón,
         // las barras de audio...): la imagen ya los tiene, solo se vuelven a mezclar.
         let signature = signature(areas, title, subtitle);
         if self.drawn == Some((signature, zone)) {
             self.blend_into(dib, width, zone);
-            return false;
+            return None;
         }
         self.drawn = None;
-    ) -> Option<u32> {
         let s = self.scale;
         let title_line = line_for(&self.dwrite, &self.title, &mut self.title_line, title);
         let subtitle_line = line_for(
@@ -259,9 +255,6 @@ impl TextRenderer {
             }
         };
         unsafe {
-            if self.target.BindDC(dc, &full).is_err() {
-                return None;
-            }
             self.target.BeginDraw();
             self.target.SetTransform(&Matrix3x2::identity());
             // Solo la zona que cambió: se borra el texto del cuadro anterior y se dibuja el nuevo.
@@ -475,17 +468,14 @@ impl TextRenderer {
             if self.target.EndDraw(None, None).is_err() {
                 // El destino se perdió (pasa muy rara vez): se vuelve a crear en el próximo cuadro.
                 self.canvas_size = (0, 0);
-                return scrolling;
+                return still.map(|_| SCROLL_FRAME_MS.0);
             }
         }
-        // Un texto que se desplaza cambia en cada cuadro: no se reutiliza.
-        if !scrolling {
+        // Un texto que se desplaza depende de `t`: no se reutiliza.
+        if still.is_none() {
             self.drawn = Some((signature, zone));
         }
         self.blend_into(dib, width, zone);
-        scrolling
-            let _ = self.target.EndDraw(None, None);
-        }
         still.map(|secs| {
             if secs <= 0.0 {
                 // Un cuadro por píxel físico de avance: igual de suave y sin cuadros repetidos.
