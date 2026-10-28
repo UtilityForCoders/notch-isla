@@ -1527,10 +1527,6 @@ impl App {
                 ),
             };
             scroll_ms = text.draw(
-                self.surface.dc,
-                self.surface.width,
-                self.surface.height,
-            scrolling = text.draw(
                 self.surface.dib(),
                 sw,
                 sh,
@@ -1618,16 +1614,11 @@ impl App {
 
 /// Intervalo del temporizador según lo que se mueve: 60 fps para la isla, un cuadro por píxel
 /// de avance de un texto largo (y ninguno durante sus pausas), 30 fps si solo bailan las barras,
-/// 4 fps si solo avanza la barra de progreso, un cuadro por píxel de avance si la isla está
-/// oculta y solo crece la línea del borde, y apagado si todo está quieto. Con letra, además, a más tardar cuando empieza el verso siguiente.
-/// Intervalo del temporizador según lo que se mueve: 60 fps para la isla y los textos,
-/// 30 fps si solo bailan las barras, 20 fps si se pinta el verso, 4 fps si solo avanza la barra de progreso, un cuadro por
-/// píxel de avance si la isla está oculta y solo crece la línea del borde, y apagado si todo
-/// está quieto. Con letra, además, a más tardar cuando empieza el verso siguiente.
+/// 20 fps si se pinta el verso, 4 fps si solo avanza la barra de progreso, un cuadro por píxel
+/// de avance si la isla está oculta y solo crece la línea del borde, y apagado si todo está
+/// quieto. Con letra, además, a más tardar cuando empieza el verso siguiente.
 fn timer_for(motion: &Motion, moving: bool) -> Option<u32> {
-    let base = if moving || motion.pressing || motion.projecting {
     let base = if moving
-        || motion.scrolling
         || motion.pressing
         || motion.projecting
         || motion.lyric_sliding
