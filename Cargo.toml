@@ -1,6 +1,6 @@
 [package]
 name = "notch-isla"
-version = "0.4.5"
+version = "0.4.6"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/gportal21/notch-isla"
