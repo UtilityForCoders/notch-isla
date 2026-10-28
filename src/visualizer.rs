@@ -301,6 +301,9 @@ fn process_client(pid: u32) -> Result<IAudioClient> {
 /// Convierte muestras en el nivel de cada barra.
 struct Analyzer {
     window: Vec<f32>,
+    /// Búferes de la transformada, reutilizados en cada análisis (30 por segundo).
+    re: Vec<f32>,
+    im: Vec<f32>,
     /// Pico reciente de cada banda (baja de a poco): las barras se adaptan al volumen.
     peaks: [f32; BARS],
     /// Pico reciente de la banda más fuerte.
@@ -315,6 +318,8 @@ impl Analyzer {
             window: (0..FFT)
                 .map(|i| 0.5 - 0.5 * (2.0 * PI * i as f32 / FFT as f32).cos())
                 .collect(),
+            re: vec![0.0; FFT],
+            im: vec![0.0; FFT],
             peaks: [1e-3; BARS],
             global: 1e-3,
             levels: [0.0; BARS],
@@ -322,13 +327,12 @@ impl Analyzer {
     }
 
     fn analyze(&mut self, samples: &[f32]) -> [f32; BARS] {
-        let mut re: Vec<f32> = samples
-            .iter()
-            .zip(&self.window)
-            .map(|(s, w)| s * w)
-            .collect();
-        let mut im = vec![0.0; FFT];
-        fft(&mut re, &mut im);
+        for ((r, s), w) in self.re.iter_mut().zip(samples).zip(&self.window) {
+            *r = s * w;
+        }
+        self.im.fill(0.0);
+        fft(&mut self.re, &mut self.im);
+        let (re, im) = (&self.re, &self.im);
         let hz_per_bin = RATE as f32 / FFT as f32;
         let energies: [f32; BARS] = std::array::from_fn(|i| {
             let (lo, hi) = BANDS[i];
@@ -458,6 +462,23 @@ mod tests {
         }
         println!("niveles: {seen:?}");
         assert!(seen.is_some(), "la captura no arrancó");
+    }
+
+    /// El análisis corre 30 veces por segundo mientras suenan las barras: tiene que costar
+    /// muy poco (con margen para equipos lentos; sin optimizar, 20 veces más).
+    #[test]
+    fn analizar_es_barato() {
+        let slack = if cfg!(debug_assertions) { 20.0 } else { 1.0 };
+        let mut analyzer = Analyzer::new();
+        let noise: Vec<f32> = (0..FFT).map(|i| ((i * 7919) % 200) as f32 / 400.0 - 0.25).collect();
+        let runs = 300;
+        let start = std::time::Instant::now();
+        for _ in 0..runs {
+            std::hint::black_box(analyzer.analyze(&noise));
+        }
+        let ms = start.elapsed().as_secs_f64() * 1000.0 / runs as f64;
+        println!("analisis: {ms:.4} ms");
+        assert!(ms < 0.2 * slack, "analisis: {ms:.4} ms");
     }
 
     #[test]

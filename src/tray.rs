@@ -41,6 +41,7 @@ const CMD_HOTKEY_DEFAULT: usize = 9;
 const CMD_HOTKEY_OFF: usize = 10;
 const CMD_REAL_BARS: usize = 11;
 const CMD_CHECK_UPDATES: usize = 12;
+const CMD_LYRICS_PROJECTOR: usize = 13;
 /// Las opciones de los submenús van numeradas a partir de estas bases.
 const CMD_HIDE_DELAY: usize = 100;
 const CMD_MONITOR: usize = 200;
@@ -65,7 +66,10 @@ pub enum Command {
     CancelTimer,
     ToggleNotices,
     ToggleFullscreen,
-    ToggleLyrics,
+    /// Letra dentro de la isla expandida.
+    ToggleLyricsIsland,
+    /// Letra en el proyector bajo la isla encogida.
+    ToggleLyricsProjector,
     ToggleRealBars,
     CheckUpdates,
     /// Escuchar la próxima combinación de teclas como atajo nuevo.
@@ -231,13 +235,19 @@ pub fn show_menu(state: &MenuState) -> Option<Command> {
     });
 
     items.push(Item::Separator);
-    items.push(action(
-        CMD_LYRICS,
-        "Mostrar letra de la canción",
-        settings.lyrics,
-    ));
     // La letra se pide a internet: se dice a quién, para que cada uno decida activarla.
-    items.push(Item::Label("Se busca en lrclib.net".to_string()));
+    items.push(Item::Group {
+        label: "Mostrar letra de la canción".to_string(),
+        items: vec![
+            action(CMD_LYRICS, "Con la isla expandida", settings.lyrics_island),
+            action(
+                CMD_LYRICS_PROJECTOR,
+                "Con la isla encogida",
+                settings.lyrics_projector,
+            ),
+            Item::Label("Se busca en lrclib.net".to_string()),
+        ],
+    });
     items.push(action(
         CMD_REAL_BARS,
         "Barras con el sonido real",
@@ -289,7 +299,8 @@ pub fn show_menu(state: &MenuState) -> Option<Command> {
         CMD_NOTICES => Some(Command::ToggleNotices),
         CMD_FULLSCREEN => Some(Command::ToggleFullscreen),
         CMD_CANCEL_TIMER => Some(Command::CancelTimer),
-        CMD_LYRICS => Some(Command::ToggleLyrics),
+        CMD_LYRICS => Some(Command::ToggleLyricsIsland),
+        CMD_LYRICS_PROJECTOR => Some(Command::ToggleLyricsProjector),
         CMD_REAL_BARS => Some(Command::ToggleRealBars),
         CMD_CHECK_UPDATES => Some(Command::CheckUpdates),
         CMD_HOTKEY_CHANGE => Some(Command::ChangeHotkey),

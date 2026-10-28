@@ -25,8 +25,10 @@ pub struct Settings {
     pub hide_fullscreen: bool,
     /// Avisa al cambiar la salida de audio (audífonos, parlantes).
     pub notices: bool,
-    /// Muestra la letra sincronizada (la pide a lrclib.net); apagada si no se activa.
-    pub lyrics: bool,
+    /// Letra sincronizada dentro de la isla expandida y en el proyector bajo la isla encogida.
+    /// Se activan por separado; apagadas si no se activan (la letra se pide a lrclib.net).
+    pub lyrics_island: bool,
+    pub lyrics_projector: bool,
     /// Las barras de la isla siguen el sonido real de la app (si no, una animación).
     pub real_bars: bool,
     /// Atajo para mostrar u ocultar la isla; `None` = desactivado.
@@ -44,12 +46,15 @@ impl Settings {
                 vk,
             }),
         };
+        // Antes había una sola opción de letra: quien la tenía activada conserva las dos.
+        let lyrics = read_dword(w!("Lyrics")).is_some_and(|v| v != 0);
         Self {
             hide_delay: read_dword(w!("HideDelay")).unwrap_or(3),
             monitor: read_string(w!("Monitor")).unwrap_or_default(),
             hide_fullscreen: read_dword(w!("HideFullscreen")).is_none_or(|v| v != 0),
             notices: read_dword(w!("Notices")).is_none_or(|v| v != 0),
-            lyrics: read_dword(w!("Lyrics")).is_some_and(|v| v != 0),
+            lyrics_island: read_dword(w!("LyricsIsland")).map_or(lyrics, |v| v != 0),
+            lyrics_projector: read_dword(w!("LyricsProjector")).map_or(lyrics, |v| v != 0),
             real_bars: read_dword(w!("RealBars")).is_none_or(|v| v != 0),
             hotkey,
         }
@@ -60,10 +65,16 @@ impl Settings {
         write_string(w!("Monitor"), &self.monitor);
         write_dword(w!("HideFullscreen"), self.hide_fullscreen as u32);
         write_dword(w!("Notices"), self.notices as u32);
-        write_dword(w!("Lyrics"), self.lyrics as u32);
+        write_dword(w!("LyricsIsland"), self.lyrics_island as u32);
+        write_dword(w!("LyricsProjector"), self.lyrics_projector as u32);
         write_dword(w!("RealBars"), self.real_bars as u32);
         write_dword(w!("HotkeyMods"), self.hotkey.map_or(0, |h| h.mods));
         write_dword(w!("HotkeyKey"), self.hotkey.map_or(0, |h| h.vk));
+    }
+
+    /// Alguna de las dos letras está activada: hay que pedirla.
+    pub fn lyrics(&self) -> bool {
+        self.lyrics_island || self.lyrics_projector
     }
 }
 

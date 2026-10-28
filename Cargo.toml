@@ -31,6 +31,7 @@ features = [
     "Win32_Graphics_Dxgi_Common",
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
+    "Win32_Graphics_Imaging",
     "Win32_System_LibraryLoader",
     # Bandeja, instancia única e inicio con Windows.
     "Win32_Security",

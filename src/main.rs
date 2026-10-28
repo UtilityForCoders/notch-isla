@@ -53,14 +53,16 @@ use windows::Win32::UI::HiDpi::{
     GetDpiForMonitor, SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
     MDT_EFFECTIVE_DPI,
 };
-use windows::Win32::UI::Input::KeyboardAndMouse::{TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT,
+};
 use windows::Win32::UI::Shell::NIN_BALLOONUSERCLICK;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, KillTimer,
     LoadCursorW, PostQuitMessage, RegisterClassExW, SetTimer, ShowWindow, TranslateMessage,
-    UpdateLayeredWindow, IDC_ARROW, MA_NOACTIVATE, MB_ICONASTERISK, MSG, SW_HIDE,
+    UpdateLayeredWindow, UpdateLayeredWindowIndirect, IDC_ARROW, UPDATELAYEREDWINDOWINFO, MA_NOACTIVATE, MB_ICONASTERISK, MSG, SW_HIDE,
     SW_SHOWNOACTIVATE, ULW_ALPHA, WM_CONTEXTMENU, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED,
-    WM_HOTKEY, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONUP, WM_TIMER,
+    WM_CAPTURECHANGED, WM_HOTKEY, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONUP, WM_TIMER,
     WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
@@ -108,6 +110,9 @@ const RED: [u8; 3] = [255, 69, 58];
 const FRAME_MS: u32 = 15;
 /// ~30 fps para las barras de audio de la isla contraída: se ven fluidas y cuestan la mitad.
 const BARS_MS: u32 = 33;
+/// 20 fps para pintar el verso que se canta: el borde avanza unas pocas letras por segundo,
+/// así se ve continuo, y cada cuadro con letra es el más caro (hay que dibujar los textos).
+const PAINT_MS: u32 = 50;
 /// 4 fps para la barra de progreso: avanza pocos píxeles por segundo, no hace falta más.
 const PROGRESS_MS: u32 = 250;
 
@@ -117,6 +122,7 @@ const VOLUME_STEP: f32 = 0.02;
 const VOLUME_SHOW: Duration = Duration::from_millis(1200);
 
 /// Qué sigue moviéndose después de dibujar un cuadro.
+#[derive(Default)]
 struct Motion {
     /// Un texto largo se desplaza (isla expandida).
     scrolling: bool,
@@ -132,6 +138,70 @@ struct Motion {
     projecting: bool,
     /// Con letra, cada cuántos ms empieza el verso siguiente (para mostrarlo a tiempo).
     lyric_ms: Option<u32>,
+    /// La letra de la isla expandida está subiendo al verso siguiente.
+    lyric_sliding: bool,
+    /// El verso que se canta se está pintando (isla expandida con letra y música sonando).
+    lyric_painting: bool,
+    /// La isla cambia entre la forma de aviso y la de la música.
+    reshaping: bool,
+}
+
+/// Tiempo de la canción como minutos y segundos ("03:07").
+fn clock(secs: f32) -> String {
+    let secs = secs.max(0.0).round() as u32;
+    format!("{:02}:{:02}", secs / 60, secs % 60)
+}
+
+/// Cuánto tarda el carrusel de la letra en subir al verso siguiente.
+const LYRIC_SLIDE_SECS: f32 = 0.5;
+
+/// Último verso mostrado en la isla y la animación con la que llegó.
+struct LyricSlide {
+    /// Canción (`lyrics::key`) y verso que se canta (-1 = antes del primero).
+    key: String,
+    index: isize,
+    /// Versos que faltaban por subir al empezar, y cuándo empezó.
+    from: f32,
+    at: Instant,
+}
+
+impl LyricSlide {
+    /// Versos que aún faltan por subir: frena al llegar (ease-out cúbico).
+    fn shift(&self, now: Instant) -> f32 {
+        let t = now.duration_since(self.at).as_secs_f32() / LYRIC_SLIDE_SECS;
+        if t >= 1.0 {
+            0.0
+        } else {
+            self.from * (1.0 - t).powi(3)
+        }
+    }
+}
+
+/// Cuánto le falta al carrusel para llegar a su sitio, en versos. Al pasar al verso siguiente
+/// todo arranca un verso más abajo y sube; al volver al anterior (arrastrando la barra hacia
+/// atrás), arranca uno más arriba y baja. Si ya venía moviéndose, sigue desde donde estaba.
+/// Un salto de varios versos u otra canción se muestra directo, sin animación.
+fn slide_shift(slide: &mut Option<LyricSlide>, key: &str, index: isize) -> f32 {
+    let now = Instant::now();
+    match slide {
+        Some(s) if s.key == key && s.index == index => {}
+        Some(s) if s.key == key && (s.index - index).abs() == 1 => {
+            let step = (index - s.index) as f32;
+            let from = (s.shift(now) + step).clamp(-2.0, 2.0);
+            s.index = index;
+            s.from = from;
+            s.at = now;
+        }
+        _ => {
+            *slide = Some(LyricSlide {
+                key: key.to_string(),
+                index,
+                from: 0.0,
+                at: now,
+            })
+        }
+    }
+    slide.as_ref().map_or(0.0, |s| s.shift(now))
 }
 
 fn main() -> Result<()> {
@@ -258,8 +328,11 @@ struct App {
     media: Option<NowPlaying>,
     /// Botón bajo el mouse, para resaltarlo.
     hovered_button: Option<Button>,
-    /// El mouse está sobre la barra de progreso.
-    seek_hovered: bool,
+    /// El mouse está sobre la barra de progreso: en qué fracción de la canción.
+    seek_hover: Option<f32>,
+    /// Se está arrastrando la barra: fracción bajo el mouse. Mientras dura, la barra, los
+    /// tiempos y la letra muestran ese momento; el salto se pide al soltar.
+    dragging: Option<f32>,
     /// El mouse está sobre la carátula y se puede cambiar de app.
     cover_hovered: bool,
     /// El mouse está sobre el punto de actualización.
@@ -277,6 +350,8 @@ struct App {
     presence: Spring,
     /// Transición suave de anchura: 0 = reproductor compacto, 1 = tarjeta amplia con letra.
     lyrics_spring: Spring,
+    /// Cambio de forma con los avisos: 0 = tarjeta de la música, 1 = fila del aviso.
+    notice_spring: Spring,
     /// Última canción, para dibujarla mientras la isla sale si la música terminó.
     last_media: Option<NowPlaying>,
     /// Control del volumen; se crea la primera vez que se gira la rueda.
@@ -308,9 +383,11 @@ struct App {
     /// El mouse acaba de salir: sigue expandida hasta que vence `COLLAPSE_TIMER`.
     lingering: bool,
     /// Letras ya consultadas, por canción (`lyrics::key`); vacía = esa canción no tiene.
-    lyrics: HashMap<String, Vec<(f32, String)>>,
+    lyrics: HashMap<String, Vec<lyrics::Verse>>,
     /// Canciones cuya letra se está pidiendo ahora.
     lyrics_pending: HashSet<String>,
+    /// Carrusel de la letra en la isla expandida.
+    lyric_slide: Option<LyricSlide>,
     /// Proyector de la letra bajo la isla. Se crea la primera vez que hay un verso que mostrar
     /// (con la letra apagada no ocupa memoria); si no se pudiera crear, la isla sigue igual.
     projector: Option<Projector>,
@@ -341,7 +418,8 @@ impl App {
             text: TextRenderer::new(scale).ok(),
             media: None,
             hovered_button: None,
-            seek_hovered: false,
+            seek_hover: None,
+            dragging: None,
             cover_hovered: false,
             update_hovered: false,
             tray: Tray::new(hwnd),
@@ -350,7 +428,8 @@ impl App {
             visible: false,
             shown: false,
             presence: Spring::new(0.0, 260.0, 22.0),
-            lyrics_spring: Spring::new(if settings.lyrics { 1.0 } else { 0.0 }, 260.0, 22.0),
+            lyrics_spring: Spring::new(if settings.lyrics_island { 1.0 } else { 0.0 }, 260.0, 22.0),
+            notice_spring: Spring::new(0.0, 260.0, 22.0),
             last_media: None,
             volume: None,
             volume_level: 0.0,
@@ -369,14 +448,15 @@ impl App {
             lingering: false,
             lyrics: HashMap::new(),
             lyrics_pending: HashSet::new(),
+            lyric_slide: None,
             projector: None,
             visualizer: Visualizer::default(),
         })
     }
 
-    /// Pide la letra de la canción actual si está activada y aún no se pidió.
+    /// Pide la letra de la canción actual si alguna de las dos está activada y aún no se pidió.
     fn request_lyrics(&mut self) {
-        if !self.settings.lyrics {
+        if !self.settings.lyrics() {
             return;
         }
         let Some(m) = &self.media else { return };
@@ -741,7 +821,7 @@ impl App {
         }
         // Recién activada: se pide la letra de lo que suena ahora.
         self.request_lyrics();
-        self.lyrics_spring.set_target(if self.settings.lyrics { 1.0 } else { 0.0 });
+        self.lyrics_spring.set_target(if self.settings.lyrics_island { 1.0 } else { 0.0 });
         self.start_animation();
         if delay_changed {
             if self.idle_hidden && self.settings.hide_delay == 0 {
@@ -780,12 +860,11 @@ impl App {
     /// Clic en un botón: manda la orden a la app y anima el botón.
     fn press(&mut self, button: Button) {
         if button == Button::Lyrics {
-            self.settings.lyrics = !self.settings.lyrics;
+            // El botón está en la isla expandida: cambia la letra de la isla, no la del proyector.
+            self.settings.lyrics_island = !self.settings.lyrics_island;
             self.settings.save();
-            self.lyrics_spring.set_target(if self.settings.lyrics { 1.0 } else { 0.0 });
-            if self.settings.lyrics {
-                self.request_lyrics();
-            }
+            self.lyrics_spring.set_target(if self.settings.lyrics_island { 1.0 } else { 0.0 });
+            self.request_lyrics();
         } else {
             media::press(button);
         }
@@ -946,7 +1025,7 @@ impl App {
             self.hovered = false;
             self.lingering = false;
             self.hovered_button = None;
-            self.seek_hovered = false;
+            self.seek_hover = None;
             self.cover_hovered = false;
             self.update_hovered = false;
             self.aim_expansion(false);
@@ -972,7 +1051,7 @@ impl App {
             self.scale,
             self.spring.value,
             self.presence.value,
-            self.lyrics_spring.value,
+            self.shape(),
             // Mientras se muestra el volumen, la barra no sirve para saltar.
             media.timeline.is_some() && !self.volume_showing(),
             media.sessions.1 > 1,
@@ -987,20 +1066,73 @@ impl App {
             Some(Hit::Button(b)) => Some(b),
             _ => None,
         };
-        let seek = matches!(hit, Some(Hit::Seek(_)));
+        // Sobre la barra importa también dónde: el globo muestra ese tiempo.
+        let seek = match hit {
+            Some(Hit::Seek(fraction)) => Some(fraction),
+            _ => None,
+        };
         let cover = hit == Some(Hit::Cover);
         let update = hit == Some(Hit::Update);
         if self.hovered_button == button
-            && self.seek_hovered == seek
+            && self.seek_hover == seek
             && self.cover_hovered == cover
             && self.update_hovered == update
         {
             return;
         }
         self.hovered_button = button;
-        self.seek_hovered = seek;
+        self.seek_hover = seek;
         self.cover_hovered = cover;
         self.update_hovered = update;
+        self.redraw();
+    }
+
+    /// Botón apretado sobre la barra: empieza a arrastrarla. El mouse queda capturado, así
+    /// sigue llegando aunque salga de la isla.
+    fn begin_drag(&mut self, fraction: f32) {
+        self.dragging = Some(fraction);
+        self.seek_hover = Some(fraction);
+        unsafe {
+            SetCapture(self.hwnd);
+        }
+        self.redraw();
+    }
+
+    /// El mouse se movió arrastrando la barra: muestra ese momento de la canción.
+    fn drag_to(&mut self, x: f32) {
+        let fraction = island::seek_fraction(
+            self.surface.width as f32,
+            self.surface.height as f32,
+            self.scale,
+            self.spring.value,
+            self.presence.value,
+            self.shape(),
+            x,
+        );
+        if self.dragging != Some(fraction) {
+            self.dragging = Some(fraction);
+            self.seek_hover = Some(fraction);
+            self.redraw();
+        }
+    }
+
+    /// Se soltó el botón (`seek` = saltar ahí) o se perdió el mouse (Alt+Tab, por ejemplo:
+    /// no salta).
+    fn end_drag(&mut self, seek: bool) {
+        let Some(fraction) = self.dragging.take() else {
+            return;
+        };
+        unsafe {
+            let _ = ReleaseCapture();
+        }
+        if seek {
+            self.seek(fraction);
+        }
+        // Si se soltó fuera de la isla, Windows avisa enseguida que el mouse ya no está.
+        if self.hovered {
+            self.hovered = false;
+            self.set_hovered(true);
+        }
         self.redraw();
     }
 
@@ -1094,7 +1226,8 @@ impl App {
         let expanding = self.spring.step(dt);
         let entering = self.presence.step(dt);
         let lyrics_moving = self.lyrics_spring.step(dt);
-        let moving = expanding || entering || lyrics_moving;
+        let reshaping = self.notice_spring.step(dt);
+        let moving = expanding || entering || lyrics_moving || reshaping;
         let motion = self.render();
 
         // Terminó de salir: ahora sí se oculta la ventana (salvo que deba quedar la franja).
@@ -1107,6 +1240,11 @@ impl App {
 
         // El temporizador sigue solo mientras algo se mueve, y al ritmo que eso necesita.
         self.set_timer(timer_for(&motion, moving));
+    }
+
+    /// Forma de la isla expandida para `island`: (ancho con letra, forma de aviso).
+    fn shape(&self) -> (f32, f32) {
+        (self.lyrics_spring.value, self.notice_spring.value)
     }
 
     /// Dibuja el cuadro actual y dice qué sigue moviéndose.
@@ -1128,6 +1266,10 @@ impl App {
             self.last_notice = None;
         }
         let notice = self.notice.as_ref().or(self.last_notice.as_ref());
+        // Con un aviso la isla toma su forma de una fila; al terminar vuelve a la de la música.
+        let notice_shape = if notice.is_some() { 1.0 } else { 0.0 };
+        self.notice_spring.set_target(notice_shape);
+        let reshaping = self.notice_spring.value != notice_shape;
         let playing = self.visible && self.media.as_ref().is_some_and(|m| m.playing);
         let bars = playing && island::mini_alpha(self.spring.value) > 0.0;
         // Se escucha el audio de la app solo mientras se ven las barras.
@@ -1143,15 +1285,20 @@ impl App {
             pressed,
             playing: m.playing,
             hovered: self.hovered_button,
-            seek_hovered: self.seek_hovered,
+            seek_hover: self
+                .seek_hover
+                .zip(m.timeline)
+                .map(|(fraction, t)| (fraction, clock(fraction * t.duration))),
             accent: cover.map_or([255, 255, 255], |c| c.accent),
-            progress: m.timeline.map(|t| t.progress(m.playing)),
+            progress: m
+                .timeline
+                .map(|t| self.dragging.unwrap_or_else(|| t.progress(m.playing))),
             volume,
             sessions: m.sessions,
             cover_hovered: self.cover_hovered,
             update: self.update.is_some(),
             update_hovered: self.update_hovered,
-            lyrics_active: self.settings.lyrics,
+            lyrics_active: self.settings.lyrics_island,
         });
         // El contenido expandido (y con él la barra) se ve a partir de ~55 % de la expansión.
         // Mientras se muestra el volumen también hace falta redibujar: para quitarlo a tiempo.
@@ -1165,62 +1312,103 @@ impl App {
             _ => 0.0,
         };
         let time_info = media.and_then(|m| m.timeline).map(|t| {
-            let cur_secs = t.current_position(playing).round() as u32;
-            let rem_secs = (t.duration - t.current_position(playing)).max(0.0).round() as u32;
+            // Arrastrando la barra, los tiempos y la letra muestran el momento elegido.
+            let current = self
+                .dragging
+                .map_or_else(|| t.current_position(playing), |f| f * t.duration);
             island::TimeInfo {
-                current: format!("{:02}:{:02}", cur_secs / 60, cur_secs % 60),
-                remaining: format!("-{:02}:{:02}", rem_secs / 60, rem_secs % 60),
+                current: clock(current),
+                remaining: format!("-{}", clock(t.duration - current)),
             }
         });
+        let mut lyric_painting = false;
         let lyrics_info = media.map(|m| {
             let key = lyrics::key(&m.title, &m.artist);
-            let lines = self.lyrics.get(&key);
-            let (prev, current, next, next2, status) = if !self.settings.lyrics && self.lyrics_spring.value <= 0.01 {
-                (None, None, None, None, None)
-            } else if let Some(lines) = lines {
+            let mut info = island::LyricsInfo {
+                lines: Vec::new(),
+                shift: 0.0,
+                sung: None,
+                status: None,
+            };
+            if !self.settings.lyrics_island && self.lyrics_spring.value <= 0.01 {
+                // Apagada y ya desvanecida: nada que dibujar.
+            } else if let Some(lines) = self.lyrics.get(&key) {
                 if lines.is_empty() {
-                    if self.settings.lyrics {
-                        (None, None, None, None, Some("Sin letra sincronizada".to_string()))
-                    } else {
-                        (None, None, None, None, None)
+                    if self.settings.lyrics_island {
+                        info.status = Some("Sin letra sincronizada".to_string());
                     }
                 } else if let Some(t) = m.timeline {
-                    let secs = t.current_position(m.playing);
-                    let next_i = lines.partition_point(|(start, _)| *start <= secs);
-                    let curr_i = next_i.checked_sub(1);
-                    let prev = curr_i.and_then(|i| i.checked_sub(1)).and_then(|i| lines.get(i)).map(|(_, s)| s.clone());
-                    let curr = curr_i.and_then(|i| lines.get(i)).map(|(_, s)| s.clone());
-                    let next = curr_i.map(|i| i + 1).and_then(|i| lines.get(i)).map(|(_, s)| s.clone());
-                    let next2 = curr_i.map(|i| i + 2).and_then(|i| lines.get(i)).map(|(_, s)| s.clone());
-                    (prev, curr, next, next2, None)
-                } else {
-                    (None, None, None, None, None)
+                    let secs = self
+                        .dragging
+                        .map_or_else(|| t.current_position(m.playing), |f| f * t.duration);
+                    // Verso que se canta; -1 = aún no empieza: el primero espera abajo.
+                    let current = lyrics::index_at(lines, secs);
+                    let index = current.map_or(-1, |i| i as isize);
+                    info.shift = slide_shift(&mut self.lyric_slide, &key, index);
+                    // Dos de más arriba y abajo: entran y salen durante la subida.
+                    // La intro (antes del primer verso) cuenta como un verso vacío: ahí va la
+                    // nota musical, y sube como los demás cuando empieza la letra.
+                    info.lines = (-2..=3)
+                        .filter_map(|offset: isize| {
+                            let text = match index + offset {
+                                -1 => String::new(),
+                                i => lines.get(usize::try_from(i).ok()?)?.text.clone(),
+                            };
+                            Some((offset as i32, text))
+                        })
+                        .collect();
+                    // El verso que se canta se va pintando al ritmo de la voz.
+                    if let Some(i) = current {
+                        let (pos, len) = lyrics::sung(lines, i, secs);
+                        info.sung = Some(pos);
+                        lyric_painting = m.playing && pos < len;
+                    }
                 }
-            } else if self.lyrics_pending.contains(&key) {
-                if self.settings.lyrics {
-                    (None, None, None, None, Some("Buscando letra...".to_string()))
+            } else if self.settings.lyrics_island {
+                let status = if self.lyrics_pending.contains(&key) {
+                    "Buscando letra..."
                 } else {
-                    (None, None, None, None, None)
-                }
-            } else if self.settings.lyrics {
-                (None, None, None, None, Some("Sin letra sincronizada".to_string()))
-            } else {
-                (None, None, None, None, None)
-            };
-            island::LyricsInfo {
-                prev,
-                current,
-                next,
-                next2,
-                status,
+                    "Sin letra sincronizada"
+                };
+                info.status = Some(status.to_string());
             }
+            info
         });
+        let shape = self.shape();
+        let strip = self.edge_strip();
+        // Solo se trabaja la zona donde se dibuja ahora y donde se dibujó antes (para borrarlo):
+        // con la isla contraída es una parte mínima de la ventana.
+        let (sw, sh) = (self.surface.width, self.surface.height);
+        let mut drawn = Area::new(
+            island::bounds(
+                sw as f32,
+                sh as f32,
+                self.scale,
+                self.spring.value,
+                self.presence.value,
+                shape,
+            ),
+            sw,
+            sh,
+        );
+        if strip {
+            drawn = drawn.union(Area::new(
+                island::edge_strip_bounds(sw as f32, self.scale),
+                sw,
+                sh,
+            ));
+        }
+        let dirty = match self.surface.drawn {
+            Some(previous) => previous.union(drawn),
+            None => self.surface.full(),
+        };
+        self.surface.clear(dirty);
         let areas = island::draw(
             &mut self.surface.pixmap,
             self.scale,
             self.spring.value,
             self.presence.value,
-            self.lyrics_spring.value,
+            shape,
             controls,
             notice.map(|n| (&n.view, notice_text_w)),
             cover.map(|c| c.image.as_ref()),
@@ -1231,7 +1419,10 @@ impl App {
             time_info,
             lyrics_info,
         );
-        let strip = self.edge_strip();
+        let lyrics_area = areas.as_ref().and_then(|a| a.lyrics.as_ref());
+        let lyric_sliding = lyrics_area.is_some_and(|l| l.shift != 0.0);
+        // Solo se repinta si la letra se ve.
+        let lyric_painting = lyric_painting && lyrics_area.is_some();
         let mut edge_ms = None;
         if let (true, Some(m)) = (strip, self.media.as_ref()) {
             let accent = m.cover.as_ref().map_or([255, 255, 255], |c| c.accent);
@@ -1250,11 +1441,15 @@ impl App {
                 edge_ms = Some(ms.clamp(PROGRESS_MS, 5000));
             }
         }
-        self.surface.copy_to_dib();
+        self.surface.copy_area(dirty);
+        self.surface.drawn = Some(drawn);
 
         // Proyector de la letra debajo de la isla (solo si la isla está contraída u oculta en el borde):
         let mut lyric_ms = None;
-        let should_project = self.spring.value < 0.4 && self.settings.lyrics && playing && (self.visible || strip);
+        let should_project = self.spring.value < 0.4
+            && self.settings.lyrics_projector
+            && playing
+            && (self.visible || strip);
         let lyric = if should_project {
             self.media.as_ref().and_then(|m| {
                 let lines = self.lyrics.get(&lyrics::key(&m.title, &m.artist))?;
@@ -1264,7 +1459,7 @@ impl App {
                     .map(|next| (((next - secs) * 1000.0) as u32).clamp(FRAME_MS, 5000));
                 lyrics::line_at(lines, secs)
             })
-        } else if playing && self.settings.lyrics {
+        } else if playing && self.settings.lyrics_island {
             if let Some(m) = &self.media {
                 if let (Some(lines), Some(t)) = (
                     self.lyrics.get(&lyrics::key(&m.title, &m.artist)),
@@ -1291,7 +1486,7 @@ impl App {
                 self.scale,
                 self.spring.value,
                 self.presence.value,
-                self.lyrics_spring.value,
+                shape,
             );
             // Oculta en el borde, el proyector queda bajo la línea de tiempo.
             let bottom = island_bottom.max(4.0 * self.scale);
@@ -1332,9 +1527,10 @@ impl App {
                 ),
             };
             scrolling = text.draw(
-                self.surface.dc,
-                self.surface.width,
-                self.surface.height,
+                self.surface.dib(),
+                sw,
+                sh,
+                (dirty.x0, dirty.y0, dirty.x1, dirty.y1),
                 &areas,
                 &title,
                 &subtitle,
@@ -1360,19 +1556,45 @@ impl App {
             SourceConstantAlpha: opacity,
             AlphaFormat: AC_SRC_ALPHA as u8,
         };
+        // Windows solo vuelve a componer la zona que cambió.
+        let rect = RECT {
+            left: dirty.x0 as i32,
+            top: dirty.y0 as i32,
+            right: dirty.x1 as i32,
+            bottom: dirty.y1 as i32,
+        };
+        let info = UPDATELAYEREDWINDOWINFO {
+            cbSize: std::mem::size_of::<UPDATELAYEREDWINDOWINFO>() as u32,
+            hdcDst: HDC::default(),
+            pptDst: &self.pos,
+            psize: &size,
+            hdcSrc: self.surface.dc,
+            pptSrc: &src,
+            crKey: COLORREF(0),
+            pblend: &blend,
+            dwFlags: ULW_ALPHA,
+            prcDirty: if dirty.is_empty() {
+                std::ptr::null()
+            } else {
+                &rect
+            },
+        };
         unsafe {
             // Los píxeles 100 % transparentes dejan pasar los clics a lo que hay debajo.
-            let _ = UpdateLayeredWindow(
-                self.hwnd,
-                None,
-                Some(&self.pos),
-                Some(&size),
-                Some(self.surface.dc),
-                Some(&src),
-                COLORREF(0),
-                Some(&blend),
-                ULW_ALPHA,
-            );
+            if !UpdateLayeredWindowIndirect(self.hwnd, &info).as_bool() {
+                // Si Windows no acepta la zona, la ventana entera.
+                let _ = UpdateLayeredWindow(
+                    self.hwnd,
+                    None,
+                    Some(&self.pos),
+                    Some(&size),
+                    Some(self.surface.dc),
+                    Some(&src),
+                    COLORREF(0),
+                    Some(&blend),
+                    ULW_ALPHA,
+                );
+            }
         }
         Motion {
             scrolling,
@@ -1383,19 +1605,30 @@ impl App {
             pressing: pressed.is_some(),
             projecting,
             lyric_ms,
+            lyric_sliding,
+            lyric_painting,
+            reshaping,
         }
     }
 }
 
 /// Intervalo del temporizador según lo que se mueve: 60 fps para la isla y los textos,
-/// 30 fps si solo bailan las barras, 4 fps si solo avanza la barra de progreso, un cuadro por
+/// 30 fps si solo bailan las barras, 20 fps si se pinta el verso, 4 fps si solo avanza la barra de progreso, un cuadro por
 /// píxel de avance si la isla está oculta y solo crece la línea del borde, y apagado si todo
 /// está quieto. Con letra, además, a más tardar cuando empieza el verso siguiente.
 fn timer_for(motion: &Motion, moving: bool) -> Option<u32> {
-    let base = if moving || motion.scrolling || motion.pressing || motion.projecting {
+    let base = if moving
+        || motion.scrolling
+        || motion.pressing
+        || motion.projecting
+        || motion.lyric_sliding
+        || motion.reshaping
+    {
         Some(FRAME_MS)
     } else if motion.bars {
         Some(BARS_MS)
+    } else if motion.lyric_painting {
+        Some(PAINT_MS)
     } else if motion.progress {
         Some(PROGRESS_MS)
     } else {
@@ -1441,6 +1674,69 @@ struct Surface {
     width: u32,
     height: u32,
     pixmap: Pixmap,
+    /// Zona dibujada en el cuadro anterior (`None` = todavía ninguno: el próximo es completo).
+    drawn: Option<Area>,
+}
+
+/// Rectángulo de píxeles [x0, x1) x [y0, y1) dentro de una superficie; puede estar vacío.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Area {
+    x0: u32,
+    y0: u32,
+    x1: u32,
+    y1: u32,
+}
+
+impl Area {
+    /// Redondea hacia afuera (x0, y0, x1, y1) y lo recorta a una superficie de `w` x `h`.
+    fn new((x0, y0, x1, y1): (f32, f32, f32, f32), w: u32, h: u32) -> Self {
+        let clip = |v: f32, max: u32| (v.max(0.0) as u32).min(max);
+        let area = Self {
+            x0: clip(x0.floor(), w),
+            y0: clip(y0.floor(), h),
+            x1: clip(x1.ceil(), w),
+            y1: clip(y1.ceil(), h),
+        };
+        if area.is_empty() {
+            Self::EMPTY
+        } else {
+            area
+        }
+    }
+
+    const EMPTY: Self = Self {
+        x0: 0,
+        y0: 0,
+        x1: 0,
+        y1: 0,
+    };
+
+    fn is_empty(&self) -> bool {
+        self.x0 >= self.x1 || self.y0 >= self.y1
+    }
+
+    /// El menor rectángulo que cubre a los dos.
+    fn union(self, other: Self) -> Self {
+        match (self.is_empty(), other.is_empty()) {
+            (true, _) => other,
+            (_, true) => self,
+            _ => Self {
+                x0: self.x0.min(other.x0),
+                y0: self.y0.min(other.y0),
+                x1: self.x1.max(other.x1),
+                y1: self.y1.max(other.y1),
+            },
+        }
+    }
+
+    #[cfg(test)]
+    fn pixels(&self) -> u32 {
+        if self.is_empty() {
+            0
+        } else {
+            (self.x1 - self.x0) * (self.y1 - self.y0)
+        }
+    }
 }
 
 impl Surface {
@@ -1478,24 +1774,62 @@ impl Surface {
                 width,
                 height,
                 pixmap,
+                drawn: None,
             })
+        }
+    }
+
+    fn full(&self) -> Area {
+        Area {
+            x0: 0,
+            y0: 0,
+            x1: self.width,
+            y1: self.height,
         }
     }
 
     /// tiny-skia guarda RGBA premultiplicado; Windows espera BGRA premultiplicado.
     fn copy_to_dib(&mut self) {
-        let len = (self.width * self.height * 4) as usize;
+        self.copy_area(self.full());
+    }
+
+    /// Deja transparente la zona `area` del dibujo.
+    fn clear(&mut self, area: Area) {
+        if area.is_empty() {
+            return;
+        }
+        let stride = self.width as usize * 4;
+        let data = self.pixmap.data_mut();
+        for y in area.y0 as usize..area.y1 as usize {
+            data[y * stride + area.x0 as usize * 4..y * stride + area.x1 as usize * 4].fill(0);
+        }
+    }
+
+    /// Los píxeles del DIB (BGRA premultiplicado, fila tras fila), lo que muestra Windows.
+    fn dib(&mut self) -> &mut [u8] {
+        let len = self.width as usize * 4 * self.height as usize;
+        unsafe { std::slice::from_raw_parts_mut(self.bits, len) }
+    }
+
+    /// Como `copy_to_dib`, solo la zona `area`.
+    fn copy_area(&mut self, area: Area) {
+        if area.is_empty() {
+            return;
+        }
+        let stride = self.width as usize * 4;
+        let len = stride * self.height as usize;
         let dst = unsafe { std::slice::from_raw_parts_mut(self.bits, len) };
-        for (d, s) in dst
-            .as_chunks_mut::<4>()
-            .0
-            .iter_mut()
-            .zip(self.pixmap.data().as_chunks::<4>().0)
-        {
-            d[0] = s[2];
-            d[1] = s[1];
-            d[2] = s[0];
-            d[3] = s[3];
+        let src = self.pixmap.data();
+        for y in area.y0 as usize..area.y1 as usize {
+            let row = y * stride + area.x0 as usize * 4..y * stride + area.x1 as usize * 4;
+            for (d, s) in dst[row.clone()]
+                .as_chunks_mut::<4>()
+                .0
+                .iter_mut()
+                .zip(src[row].as_chunks::<4>().0)
+            {
+                *d = [s[2], s[1], s[0], s[3]];
+            }
         }
     }
 }
@@ -1613,6 +1947,10 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                     app.reveal();
                     return;
                 }
+                if app.dragging.is_some() {
+                    app.drag_to(x);
+                    return;
+                }
                 app.set_hovered(true);
                 let hit = app.hit_at(x, y);
                 app.set_hover(hit);
@@ -1621,9 +1959,26 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
         }
         WM_MOUSELEAVE => {
             with_app(|app| {
-                app.set_hovered(false);
-                app.set_hover(None);
+                // Arrastrando la barra, la isla sigue abierta aunque el mouse salga.
+                if app.dragging.is_none() {
+                    app.set_hovered(false);
+                    app.set_hover(None);
+                }
             });
+            LRESULT(0)
+        }
+        WM_LBUTTONDOWN => {
+            let (x, y) = mouse_pos(lparam);
+            with_app(|app| {
+                if let (None, Some(Hit::Seek(fraction))) = (&app.notice, app.hit_at(x, y)) {
+                    app.begin_drag(fraction);
+                }
+            });
+            LRESULT(0)
+        }
+        // Otra ventana se quedó con el mouse a mitad del arrastre: se cancela sin saltar.
+        WM_CAPTURECHANGED => {
+            with_app(|app| app.end_drag(false));
             LRESULT(0)
         }
         // Llega a la isla aunque no tenga el foco gracias a la opción de Windows
@@ -1641,6 +1996,8 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             // WM_DESTROY necesita el estado de la app libre.
             let mut pending = None;
             with_app(|app| match app.hit_at(x, y) {
+                // Fin del arrastre (o de un clic simple en la barra): salta al punto elegido.
+                _ if app.dragging.is_some() => app.end_drag(true),
                 _ if app.notice.is_some() => app.end_notice(),
                 Some(Hit::Button(button)) => app.press(button),
                 Some(Hit::Seek(fraction)) => app.seek(fraction),
@@ -1817,7 +2174,12 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                             Command::HideDelay(secs) => settings.hide_delay = secs,
                             Command::Monitor(i) => settings.monitor = monitors[i].device.clone(),
                             Command::ToggleNotices => settings.notices = !settings.notices,
-                            Command::ToggleLyrics => settings.lyrics = !settings.lyrics,
+                            Command::ToggleLyricsIsland => {
+                                settings.lyrics_island = !settings.lyrics_island
+                            }
+                            Command::ToggleLyricsProjector => {
+                                settings.lyrics_projector = !settings.lyrics_projector
+                            }
                             Command::ToggleRealBars => settings.real_bars = !settings.real_bars,
                             Command::SetHotkey(h) => settings.hotkey = h,
                             Command::ToggleFullscreen => {
@@ -1852,5 +2214,340 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             LRESULT(0)
         }
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+    }
+}
+
+/// Pruebas de rendimiento: la isla tiene que quedar en 0 % de CPU en reposo y trabajar lo
+/// mínimo cuando algo se mueve.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn en_reposo_no_hay_temporizador() {
+        // Nada se mueve: el temporizador se apaga (0 % de CPU).
+        assert_eq!(timer_for(&Motion::default(), false), None);
+        // Cada cosa pide solo el ritmo que necesita.
+        let only = |m: Motion| timer_for(&m, false);
+        let progress = Motion {
+            progress: true,
+            ..Default::default()
+        };
+        assert_eq!(only(progress), Some(PROGRESS_MS));
+        let bars = Motion {
+            bars: true,
+            ..Default::default()
+        };
+        assert_eq!(only(bars), Some(BARS_MS));
+        let painting = Motion {
+            lyric_painting: true,
+            ..Default::default()
+        };
+        assert_eq!(only(painting), Some(PAINT_MS));
+        let sliding = Motion {
+            lyric_sliding: true,
+            ..Default::default()
+        };
+        assert_eq!(only(sliding), Some(FRAME_MS));
+        assert_eq!(timer_for(&Motion::default(), true), Some(FRAME_MS));
+        // Con letra, despierta justo al verso siguiente aunque no haya otra cosa.
+        let verse = Motion {
+            lyric_ms: Some(1200),
+            ..Default::default()
+        };
+        assert_eq!(only(verse), Some(1200));
+        let both = Motion {
+            progress: true,
+            lyric_ms: Some(100),
+            ..Default::default()
+        };
+        assert_eq!(only(both), Some(100));
+    }
+
+    #[test]
+    fn zonas_se_unen_y_recortan() {
+        let a = Area::new((-5.0, 2.2, 10.5, 8.0), 100, 50);
+        assert_eq!(
+            a,
+            Area {
+                x0: 0,
+                y0: 2,
+                x1: 11,
+                y1: 8
+            }
+        );
+        assert!(Area::new((200.0, 0.0, 300.0, 10.0), 100, 50).is_empty());
+        let b = Area {
+            x0: 20,
+            y0: 0,
+            x1: 30,
+            y1: 4,
+        };
+        assert_eq!(
+            a.union(b),
+            Area {
+                x0: 0,
+                y0: 0,
+                x1: 30,
+                y1: 8
+            }
+        );
+        assert_eq!(Area::EMPTY.union(b), b);
+    }
+
+    #[test]
+    fn contraida_trabaja_una_parte_minima_de_la_ventana() {
+        let scale = 1.25;
+        let (lw, lh) = island::window_size();
+        let (w, h) = ((lw * scale).ceil() as u32, (lh * scale).ceil() as u32);
+        let zone = |p: f32| {
+            let b = island::bounds(w as f32, h as f32, scale, p, 1.0, (0.0, 0.0));
+            Area::new(b, w, h)
+        };
+        let collapsed = zone(0.0).pixels() as f32 / (w * h) as f32;
+        // Las barras de la isla contraída (30 veces por segundo) tocan menos del 6 % de la ventana.
+        assert!(collapsed < 0.06, "contraida: {:.1} %", collapsed * 100.0);
+        // Expandida cubre la isla entera.
+        assert!(zone(1.0).pixels() > zone(0.0).pixels() * 5);
+    }
+
+    extern "system" fn default_proc(h: HWND, m: u32, w: WPARAM, l: LPARAM) -> LRESULT {
+        unsafe { DefWindowProcW(h, m, w, l) }
+    }
+
+    /// Mide cuánto cuesta mandar un cuadro a Windows (se ignora por defecto: crea una
+    /// ventana de verdad un momento).
+    #[test]
+    #[ignore]
+    fn medir_envio_a_windows() {
+        unsafe {
+            let class = w!("NotchIslaPrueba");
+            let wc = WNDCLASSEXW {
+                cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+                lpfnWndProc: Some(default_proc),
+                hInstance: GetModuleHandleW(None).unwrap().into(),
+                lpszClassName: class,
+                ..Default::default()
+            };
+            RegisterClassExW(&wc);
+            let hwnd = CreateWindowExW(
+                WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                class,
+                w!(""),
+                WS_POPUP,
+                0,
+                0,
+                1,
+                1,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+            let (w, h) = (723u32, 217u32);
+            let mut surface = Surface::new(w, h).unwrap();
+            for px in surface.pixmap.data_mut().as_chunks_mut::<4>().0.iter_mut().take(5000) {
+                *px = [20, 20, 20, 255];
+            }
+            surface.copy_to_dib();
+            let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+            let pos = POINT { x: -2000, y: -2000 };
+            let size = SIZE { cx: w as i32, cy: h as i32 };
+            let src = POINT::default();
+            let blend = BLENDFUNCTION {
+                BlendOp: AC_SRC_OVER as u8,
+                BlendFlags: 0,
+                SourceConstantAlpha: 255,
+                AlphaFormat: AC_SRC_ALPHA as u8,
+            };
+            let small = RECT { left: 300, top: 0, right: 420, bottom: 60 };
+            let runs = 300;
+            let cases: [(&str, Option<&RECT>); 2] =
+                [("ventana entera", None), ("solo la isla", Some(&small))];
+            for (name, dirty) in cases {
+                let start = Instant::now();
+                for _ in 0..runs {
+                    let info = UPDATELAYEREDWINDOWINFO {
+                        cbSize: std::mem::size_of::<UPDATELAYEREDWINDOWINFO>() as u32,
+                        hdcDst: HDC::default(),
+                        pptDst: &pos,
+                        psize: &size,
+                        hdcSrc: surface.dc,
+                        pptSrc: &src,
+                        crKey: COLORREF(0),
+                        pblend: &blend,
+                        dwFlags: ULW_ALPHA,
+                        prcDirty: dirty.map_or(std::ptr::null(), |r| r as *const RECT),
+                    };
+                    assert!(UpdateLayeredWindowIndirect(hwnd, &info).as_bool());
+                }
+                let ms = start.elapsed().as_secs_f64() * 1000.0 / runs as f64;
+                println!("{name}: {ms:.3} ms por cuadro");
+            }
+            let _ = DestroyWindow(hwnd);
+        }
+    }
+
+    /// Mide un cuadro completo de la isla expandida con letra: fondo, textos y versos
+    /// (se ignora por defecto: es una medición, no una prueba).
+    #[test]
+    #[ignore]
+    fn medir_cuadro_con_letra() {
+        let scale = 1.25;
+        let (lw, lh) = island::window_size();
+        let (w, h) = ((lw * scale).ceil() as u32, (lh * scale).ceil() as u32);
+        let mut surface = Surface::new(w, h).unwrap();
+        // Como en `main`: WIC (la imagen del texto) necesita COM en el hilo.
+        let _ = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+        let mut text = TextRenderer::new(scale).unwrap();
+        let verse = |i: i32| (i, format!("Y soy solamente un perdedor numero {i}"));
+        let runs = 200;
+        let mut totals = [0.0f64; 2];
+        for i in 0..runs {
+            let start = Instant::now();
+            surface.clear(surface.full());
+            let areas = island::draw(
+                &mut surface.pixmap,
+                scale,
+                1.0,
+                1.0,
+                (1.0, 0.0),
+                Some(island::Controls {
+                    playing: true,
+                    hovered: None,
+                    seek_hover: None,
+                    accent: [200, 120, 60],
+                    progress: Some(0.4),
+                    volume: None,
+                    sessions: (0, 1),
+                    cover_hovered: false,
+                    pressed: None,
+                    update: false,
+                    update_hovered: false,
+                    levels: None,
+                    lyrics_active: true,
+                }),
+                None,
+                None,
+                None,
+                0.0,
+                Some(island::TimeInfo {
+                    current: "01:10".into(),
+                    remaining: "-01:57".into(),
+                }),
+                Some(island::LyricsInfo {
+                    lines: (-2..=3).map(verse).collect(),
+                    shift: 0.3,
+                    sung: Some(10.0 + (i % 20) as f32),
+                    status: None,
+                }),
+            )
+            .unwrap();
+            surface.copy_to_dib();
+            let mid = Instant::now();
+            let island = Area::new(
+                island::bounds(w as f32, h as f32, scale, 1.0, 1.0, (1.0, 0.0)),
+                w,
+                h,
+            );
+            let zone = (island.x0, island.y0, island.x1, island.y1);
+            text.draw(surface.dib(), w, h, zone, &areas, "Para No Verte Mas", "La Mosca", 0.0);
+            totals[0] += (mid - start).as_secs_f64();
+            totals[1] += mid.elapsed().as_secs_f64();
+        }
+        let ms = |t: f64| t * 1000.0 / runs as f64;
+        println!(
+            "fondo y copia: {:.3} ms, textos: {:.3} ms por cuadro",
+            ms(totals[0]),
+            ms(totals[1])
+        );
+        // Desglose: solo título (sin letra ni tiempos) y nada de texto.
+        let only_title = island::LayoutAreas {
+            text: island::TextArea {
+                x: 100.0,
+                w: 200.0,
+                cy: 60.0,
+                alpha: 1.0,
+            },
+            time: None,
+            lyrics: None,
+            seek: None,
+        };
+        for (name, title) in [("solo titulo", "Para No Verte Mas"), ("sin texto", "")] {
+            let start = Instant::now();
+            for _ in 0..runs {
+                text.draw(surface.dib(), w, h, (0, 0, w, h), &only_title, title, "", 0.0);
+            }
+            println!("{name}: {:.3} ms", ms(start.elapsed().as_secs_f64()));
+        }
+    }
+
+    #[test]
+    fn el_texto_se_dibuja_y_se_reutiliza() {
+        let _ = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+        let (w, h) = (300u32, 80u32);
+        let mut surface = Surface::new(w, h).unwrap();
+        // Fondo negro opaco, como la isla.
+        for px in surface.pixmap.data_mut().as_chunks_mut::<4>().0 {
+            *px = [0, 0, 0, 255];
+        }
+        let mut text = TextRenderer::new(1.0).unwrap();
+        let areas = island::LayoutAreas {
+            text: island::TextArea {
+                x: 10.0,
+                w: 280.0,
+                cy: 40.0,
+                alpha: 1.0,
+            },
+            time: None,
+            lyrics: None,
+            seek: None,
+        };
+        let frame = |surface: &mut Surface, text: &mut TextRenderer| {
+            surface.copy_to_dib();
+            let start = Instant::now();
+            text.draw(surface.dib(), w, h, (0, 0, w, h), &areas, "Notch Isla", "Prueba", 0.0);
+            start.elapsed()
+        };
+        let first = frame(&mut surface, &mut text);
+        // El título se ve: hay píxeles claros sobre el negro.
+        let bright = surface.dib().as_chunks::<4>().0.iter().filter(|p| p[1] > 128).count();
+        assert!(bright > 30, "pixeles de texto: {bright}");
+        // El mismo cuadro otra vez: se reutiliza lo dibujado (igual de claro y más barato).
+        let mut again = Duration::ZERO;
+        for _ in 0..20 {
+            again += frame(&mut surface, &mut text);
+        }
+        let repeat_bright = surface.dib().as_chunks::<4>().0.iter().filter(|p| p[1] > 128).count();
+        assert_eq!(repeat_bright, bright);
+        assert!(again / 20 < first, "repetido: {:?}, primero: {first:?}", again / 20);
+    }
+
+    #[test]
+    fn copia_solo_la_zona_pedida() {
+        let mut surface = Surface::new(8, 4).unwrap();
+        surface.pixmap.data_mut().fill(9);
+        surface.copy_to_dib();
+        // Rojo opaco (RGBA) en toda la imagen, y se copia solo el centro.
+        for px in surface.pixmap.data_mut().as_chunks_mut::<4>().0 {
+            *px = [255, 0, 0, 255];
+        }
+        let area = Area {
+            x0: 2,
+            y0: 1,
+            x1: 5,
+            y1: 3,
+        };
+        surface.copy_area(area);
+        let dib = unsafe { std::slice::from_raw_parts(surface.bits, 8 * 4 * 4) };
+        let at = |x: usize, y: usize| dib[(y * 8 + x) * 4..(y * 8 + x) * 4 + 4].to_vec();
+        // BGRA dentro de la zona; fuera, lo de antes sin tocar.
+        assert_eq!(at(3, 2), [0, 0, 255, 255]);
+        assert_eq!(at(0, 0), [9, 9, 9, 9]);
+        surface.clear(area);
+        let px = |x: usize, y: usize| surface.pixmap.data()[(y * 8 + x) * 4..][..4].to_vec();
+        assert_eq!(px(3, 2), [0, 0, 0, 0]);
+        assert_eq!(px(0, 0), [255, 0, 0, 255]);
     }
 }
