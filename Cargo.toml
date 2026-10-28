@@ -12,7 +12,7 @@ tiny-skia = { version = "0.12", default-features = false, features = ["std", "si
 # Vector2 para Direct2D (ya viene con `windows`; aquí solo se nombra el tipo).
 windows-numerics = "0.3"
 # El macro `implement` (avisos de volumen y de salida de audio) genera código que la nombra.
-windows-core = "0.62"
+windows-core = "0.100"
 
 [dependencies.windows]
 version = "0.62"
