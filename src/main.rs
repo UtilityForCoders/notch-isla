@@ -275,6 +275,8 @@ struct App {
     shown: bool,
     /// Entrada y salida de la pantalla: 0 = escondida arriba, 1 = en su sitio.
     presence: Spring,
+    /// Transición suave de anchura: 0 = reproductor compacto, 1 = tarjeta amplia con letra.
+    lyrics_spring: Spring,
     /// Última canción, para dibujarla mientras la isla sale si la música terminó.
     last_media: Option<NowPlaying>,
     /// Control del volumen; se crea la primera vez que se gira la rueda.
@@ -348,6 +350,7 @@ impl App {
             visible: false,
             shown: false,
             presence: Spring::new(0.0, 260.0, 22.0),
+            lyrics_spring: Spring::new(if settings.lyrics { 1.0 } else { 0.0 }, 260.0, 22.0),
             last_media: None,
             volume: None,
             volume_level: 0.0,
@@ -738,6 +741,8 @@ impl App {
         }
         // Recién activada: se pide la letra de lo que suena ahora.
         self.request_lyrics();
+        self.lyrics_spring.set_target(if self.settings.lyrics { 1.0 } else { 0.0 });
+        self.start_animation();
         if delay_changed {
             if self.idle_hidden && self.settings.hide_delay == 0 {
                 // Con "Nunca", la que estaba oculta vuelve.
@@ -774,7 +779,16 @@ impl App {
 
     /// Clic en un botón: manda la orden a la app y anima el botón.
     fn press(&mut self, button: Button) {
-        media::press(button);
+        if button == Button::Lyrics {
+            self.settings.lyrics = !self.settings.lyrics;
+            self.settings.save();
+            self.lyrics_spring.set_target(if self.settings.lyrics { 1.0 } else { 0.0 });
+            if self.settings.lyrics {
+                self.request_lyrics();
+            }
+        } else {
+            media::press(button);
+        }
         self.pressed = Some((button, Instant::now()));
         self.start_animation();
     }
@@ -958,6 +972,7 @@ impl App {
             self.scale,
             self.spring.value,
             self.presence.value,
+            self.lyrics_spring.value,
             // Mientras se muestra el volumen, la barra no sirve para saltar.
             media.timeline.is_some() && !self.volume_showing(),
             media.sessions.1 > 1,
@@ -1078,7 +1093,8 @@ impl App {
 
         let expanding = self.spring.step(dt);
         let entering = self.presence.step(dt);
-        let moving = expanding || entering;
+        let lyrics_moving = self.lyrics_spring.step(dt);
+        let moving = expanding || entering || lyrics_moving;
         let motion = self.render();
 
         // Terminó de salir: ahora sí se oculta la ventana (salvo que deba quedar la franja).
@@ -1135,6 +1151,7 @@ impl App {
             cover_hovered: self.cover_hovered,
             update: self.update.is_some(),
             update_hovered: self.update_hovered,
+            lyrics_active: self.settings.lyrics,
         });
         // El contenido expandido (y con él la barra) se ve a partir de ~55 % de la expansión.
         // Mientras se muestra el volumen también hace falta redibujar: para quitarlo a tiempo.
@@ -1147,11 +1164,63 @@ impl App {
             (Some(n), Some(text)) => text.measure(&n.title, &n.subtitle),
             _ => 0.0,
         };
-        let area = island::draw(
+        let time_info = media.and_then(|m| m.timeline).map(|t| {
+            let cur_secs = t.current_position(playing).round() as u32;
+            let rem_secs = (t.duration - t.current_position(playing)).max(0.0).round() as u32;
+            island::TimeInfo {
+                current: format!("{:02}:{:02}", cur_secs / 60, cur_secs % 60),
+                remaining: format!("-{:02}:{:02}", rem_secs / 60, rem_secs % 60),
+            }
+        });
+        let lyrics_info = media.map(|m| {
+            let key = lyrics::key(&m.title, &m.artist);
+            let lines = self.lyrics.get(&key);
+            let (prev, current, next, next2, status) = if !self.settings.lyrics && self.lyrics_spring.value <= 0.01 {
+                (None, None, None, None, None)
+            } else if let Some(lines) = lines {
+                if lines.is_empty() {
+                    if self.settings.lyrics {
+                        (None, None, None, None, Some("Sin letra sincronizada".to_string()))
+                    } else {
+                        (None, None, None, None, None)
+                    }
+                } else if let Some(t) = m.timeline {
+                    let secs = t.current_position(m.playing);
+                    let next_i = lines.partition_point(|(start, _)| *start <= secs);
+                    let curr_i = next_i.checked_sub(1);
+                    let prev = curr_i.and_then(|i| i.checked_sub(1)).and_then(|i| lines.get(i)).map(|(_, s)| s.clone());
+                    let curr = curr_i.and_then(|i| lines.get(i)).map(|(_, s)| s.clone());
+                    let next = curr_i.map(|i| i + 1).and_then(|i| lines.get(i)).map(|(_, s)| s.clone());
+                    let next2 = curr_i.map(|i| i + 2).and_then(|i| lines.get(i)).map(|(_, s)| s.clone());
+                    (prev, curr, next, next2, None)
+                } else {
+                    (None, None, None, None, None)
+                }
+            } else if self.lyrics_pending.contains(&key) {
+                if self.settings.lyrics {
+                    (None, None, None, None, Some("Buscando letra...".to_string()))
+                } else {
+                    (None, None, None, None, None)
+                }
+            } else if self.settings.lyrics {
+                (None, None, None, None, Some("Sin letra sincronizada".to_string()))
+            } else {
+                (None, None, None, None, None)
+            };
+            island::LyricsInfo {
+                prev,
+                current,
+                next,
+                next2,
+                status,
+            }
+        });
+        let areas = island::draw(
             &mut self.surface.pixmap,
             self.scale,
             self.spring.value,
             self.presence.value,
+            self.lyrics_spring.value,
             controls,
             notice.map(|n| (&n.view, notice_text_w)),
             cover.map(|c| c.image.as_ref()),
@@ -1159,6 +1228,8 @@ impl App {
                 .and_then(|m| m.app_icon.as_ref())
                 .map(|i| i.0.as_ref()),
             self.started.elapsed().as_secs_f32(),
+            time_info,
+            lyrics_info,
         );
         let strip = self.edge_strip();
         let mut edge_ms = None;
@@ -1181,22 +1252,34 @@ impl App {
         }
         self.surface.copy_to_dib();
 
-        // Proyector de la letra, debajo de la isla (o de la línea del borde si está oculta):
-        // el verso que se canta ahora, si la letra está activada y la canción la tiene.
+        // Proyector de la letra debajo de la isla (solo si la isla está contraída u oculta en el borde):
         let mut lyric_ms = None;
-        let lyric = self
-            .media
-            .as_ref()
-            .filter(|m| self.settings.lyrics && m.playing && (self.visible || strip))
-            .and_then(|m| {
+        let should_project = self.spring.value < 0.4 && self.settings.lyrics && playing && (self.visible || strip);
+        let lyric = if should_project {
+            self.media.as_ref().and_then(|m| {
                 let lines = self.lyrics.get(&lyrics::key(&m.title, &m.artist))?;
                 let t = m.timeline?;
-                let secs = t.progress(true) * t.duration;
-                // Se vuelve a dibujar justo cuando empieza el verso siguiente.
+                let secs = t.current_position(true);
                 lyric_ms = lyrics::next_start(lines, secs)
                     .map(|next| (((next - secs) * 1000.0) as u32).clamp(FRAME_MS, 5000));
                 lyrics::line_at(lines, secs)
-            });
+            })
+        } else if playing && self.settings.lyrics {
+            if let Some(m) = &self.media {
+                if let (Some(lines), Some(t)) = (
+                    self.lyrics.get(&lyrics::key(&m.title, &m.artist)),
+                    m.timeline,
+                ) {
+                    let secs = t.current_position(true);
+                    // Despierta al comenzar el próximo verso, también con la letra dentro de la isla.
+                    lyric_ms = lyrics::next_start(lines, secs)
+                        .map(|next| (((next - secs) * 1000.0) as u32).clamp(FRAME_MS, 5000));
+                }
+            }
+            None
+        } else {
+            None
+        };
         let mut projecting = false;
         if lyric.is_some() && self.projector.is_none() {
             self.projector = Projector::new(self.scale).ok();
@@ -1208,6 +1291,7 @@ impl App {
                 self.scale,
                 self.spring.value,
                 self.presence.value,
+                self.lyrics_spring.value,
             );
             // Oculta en el borde, el proyector queda bajo la línea de tiempo.
             let bottom = island_bottom.max(4.0 * self.scale);
@@ -1217,7 +1301,7 @@ impl App {
         }
 
         let mut scrolling = false;
-        if let (Some(area), Some(text)) = (area, self.text.as_mut()) {
+        if let (Some(areas), Some(text)) = (areas, self.text.as_mut()) {
             let (title, subtitle) = match (notice, media) {
                 (Some(n), _) => (n.title.clone(), n.subtitle.clone()),
                 (None, Some(m)) => {
@@ -1251,7 +1335,7 @@ impl App {
                 self.surface.dc,
                 self.surface.width,
                 self.surface.height,
-                &area,
+                &areas,
                 &title,
                 &subtitle,
                 self.scroll_start.elapsed().as_secs_f32(),

@@ -85,6 +85,15 @@ impl Timeline {
         }
         (position / self.duration).clamp(0.0, 1.0)
     }
+
+    /// Posición actual en segundos (0 a duration).
+    pub fn current_position(&self, playing: bool) -> f32 {
+        let mut position = self.position;
+        if playing {
+            position += self.read_at.elapsed().as_secs_f32();
+        }
+        position.clamp(0.0, self.duration)
+    }
 }
 
 /// Unidades de los tiempos de WinRT: 100 ns.
@@ -348,6 +357,7 @@ pub fn press(button: Button) {
             Button::Prev => s.TrySkipPreviousAsync(),
             Button::PlayPause => s.TryTogglePlayPauseAsync(),
             Button::Next => s.TrySkipNextAsync(),
+            Button::Lyrics => return,
         };
     }
 }
