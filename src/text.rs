@@ -36,6 +36,8 @@ use crate::island::{LayoutAreas, TextArea};
 const SCROLL_SPEED: f32 = 30.0;
 /// Pausa en cada extremo, en segundos.
 const SCROLL_PAUSE: f32 = 1.5;
+/// Límites del intervalo entre cuadros mientras el texto avanza (~60 y ~30 fps).
+const SCROLL_FRAME_MS: (u32, u32) = (15, 33);
 
 /// Una línea ya maquetada, guardada mientras el texto no cambie.
 struct Line {
@@ -160,8 +162,10 @@ impl TextRenderer {
     }
 
     /// Dibuja textos encima de lo que ya hay en el DIB seleccionado en `dc`.
-    /// `t` = segundos desde que empezó el desplazamiento. Devuelve `true` si alguna línea
-    /// no cabe y por tanto se está desplazando (hay que seguir redibujando).
+    /// `t` = segundos desde que empezó el desplazamiento. Si alguna línea no cabe y se
+    /// desplaza, devuelve en cuántos ms hay que dibujar el cuadro siguiente: lo que tarda en
+    /// avanzar un píxel, o lo que falta para que termine la pausa en un extremo (quieta, no
+    /// hace falta redibujarla). `None` si todo cabe.
     #[allow(clippy::too_many_arguments)]
     pub fn draw(
         &mut self,
@@ -172,7 +176,7 @@ impl TextRenderer {
         title: &str,
         subtitle: &str,
         t: f32,
-    ) -> bool {
+    ) -> Option<u32> {
         let s = self.scale;
         let title_line = line_for(&self.dwrite, &self.title, &mut self.title_line, title);
         let subtitle_line = line_for(
@@ -188,16 +192,22 @@ impl TextRenderer {
             right: width as i32,
             bottom: height as i32,
         };
-        let mut scrolling = false;
+        // Segundos hasta que alguna línea vuelva a moverse (0 = se está moviendo).
+        let mut still: Option<f32> = None;
+        let mut track = |next: Option<f32>| {
+            if let Some(n) = next {
+                still = Some(still.map_or(n, |prev| prev.min(n)));
+            }
+        };
         unsafe {
             if self.target.BindDC(dc, &full).is_err() {
-                return false;
+                return None;
             }
             self.target.BeginDraw();
 
             // 1. Título y artista
             if let Some(line) = title_line {
-                scrolling |= draw_line(
+                track(draw_line(
                     &self.target,
                     &self.brush,
                     line,
@@ -207,10 +217,10 @@ impl TextRenderer {
                     (1.0, 1.0, 1.0),
                     s,
                     t,
-                );
+                ));
             }
             if let Some(line) = subtitle_line {
-                scrolling |= draw_line(
+                track(draw_line(
                     &self.target,
                     &self.brush,
                     line,
@@ -220,7 +230,7 @@ impl TextRenderer {
                     (0.65, 0.65, 0.68),
                     s,
                     t,
-                );
+                ));
             }
 
             // 2. Tiempos actual y restante
@@ -352,7 +362,15 @@ impl TextRenderer {
 
             let _ = self.target.EndDraw(None, None);
         }
-        scrolling
+        still.map(|secs| {
+            if secs <= 0.0 {
+                // Un cuadro por píxel físico de avance: igual de suave y sin cuadros repetidos.
+                let ms = 1000.0 / (SCROLL_SPEED * s);
+                (ms as u32).clamp(SCROLL_FRAME_MS.0, SCROLL_FRAME_MS.1)
+            } else {
+                (secs * 1000.0).ceil() as u32
+            }
+        })
     }
 }
 
@@ -418,7 +436,8 @@ fn line_for<'a>(
     cache.as_ref()
 }
 
-/// Dibuja una línea recortada a su columna. Devuelve `true` si se está desplazando.
+/// Dibuja una línea recortada a su columna. Si no cabe, devuelve los segundos que seguirá
+/// quieta (0 = se está desplazando); `None` si cabe.
 #[allow(clippy::too_many_arguments)]
 fn draw_line(
     target: &ID2D1DCRenderTarget,
@@ -430,12 +449,13 @@ fn draw_line(
     (r, g, b): (f32, f32, f32),
     scale: f32,
     t: f32,
-) -> bool {
+) -> Option<f32> {
     let overflow = line.width - area.w;
-    let offset = if overflow > 0.0 {
-        scroll_offset(overflow, SCROLL_SPEED * scale, t)
+    let (offset, still) = if overflow > 0.0 {
+        let (offset, still) = scroll_offset(overflow, SCROLL_SPEED * scale, t);
+        (offset, Some(still))
     } else {
-        0.0
+        (0.0, None)
     };
     let color = D2D1_COLOR_F {
         r,
@@ -463,22 +483,25 @@ fn draw_line(
         );
         target.PopAxisAlignedClip();
     }
-    overflow > 0.0
+    still
 }
 
 /// Ida y vuelta: pausa, avanza `overflow` píxeles, pausa, regresa. Se repite.
-fn scroll_offset(overflow: f32, speed: f32, t: f32) -> f32 {
+/// Devuelve el desplazamiento y cuántos segundos faltan para que termine la pausa actual
+/// (0 mientras avanza o regresa).
+fn scroll_offset(overflow: f32, speed: f32, t: f32) -> (f32, f32) {
     let travel = overflow / speed;
     let cycle = 2.0 * (SCROLL_PAUSE + travel);
     let phase = t % cycle;
     if phase < SCROLL_PAUSE {
-        0.0
+        (0.0, SCROLL_PAUSE - phase)
     } else if phase < SCROLL_PAUSE + travel {
-        (phase - SCROLL_PAUSE) * speed
+        ((phase - SCROLL_PAUSE) * speed, 0.0)
     } else if phase < 2.0 * SCROLL_PAUSE + travel {
-        overflow
+        (overflow, 2.0 * SCROLL_PAUSE + travel - phase)
     } else {
-        overflow - (phase - 2.0 * SCROLL_PAUSE - travel) * speed
+        let back = phase - 2.0 * SCROLL_PAUSE - travel;
+        (overflow - back * speed, 0.0)
     }
 }
 
