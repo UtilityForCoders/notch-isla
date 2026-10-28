@@ -17,6 +17,14 @@ updates:
       windows:
         patterns:
           - "windows*"
+    # Microsoft publicó la 0.100 de los crates pequeños pero todavía no la de `windows`, que
+    # necesita `windows-core` 0.62: mezclarlos no compila. `windows` no se ignora, así que cuando
+    # salga su 0.100 llega el PR que avisa que es hora de migrar (y de quitar esta regla).
+    ignore:
+      - dependency-name: "windows-core"
+        versions: [">= 0.100"]
+      - dependency-name: "windows-numerics"
+        versions: [">= 0.100"]
   - package-ecosystem: github-actions
     directory: /
     schedule:
