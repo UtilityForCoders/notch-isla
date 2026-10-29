@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{mpsc, Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tiny_skia::{IntSize, Pixmap};
@@ -192,18 +192,44 @@ fn lock() -> MutexGuard<'static, Option<Watcher>> {
     WATCHER.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Recién iniciada la sesión de Windows, el servicio de música puede no estar listo: pedirlo
+/// falla o no responde. Se espera un tiempo y se reintenta con espera creciente (1 s, 2 s,
+/// 4 s... hasta 30 s), sin rendirse: si no, la isla no vería la música hasta reabrirla.
+const INIT_TIMEOUT: Duration = Duration::from_secs(10);
+const INIT_RETRY: Duration = Duration::from_secs(1);
+const INIT_RETRY_MAX: Duration = Duration::from_secs(30);
+
 /// Empieza a vigilar la música en un hilo aparte para no retrasar la aparición de la isla.
 pub fn start(hwnd: HWND) {
     let hwnd = hwnd.0 as isize;
     std::thread::spawn(move || {
-        if init(hwnd).is_err() {
+        let mut wait = INIT_RETRY;
+        while init(hwnd).is_err() {
             post(hwnd, None);
+            std::thread::sleep(wait);
+            wait = (wait * 2).min(INIT_RETRY_MAX);
         }
     });
 }
 
+/// Pide el administrador de SMTC, sin esperar para siempre si Windows no contesta.
+fn request_manager() -> Result<Manager> {
+    let op = Manager::RequestAsync()?;
+    let (tx, rx) = mpsc::channel();
+    op.when(move |manager| {
+        let _ = tx.send(manager);
+    })?;
+    match rx.recv_timeout(INIT_TIMEOUT) {
+        Ok(manager) => manager,
+        Err(_) => {
+            let _ = op.Cancel();
+            Err(Error::from(E_FAIL))
+        }
+    }
+}
+
 fn init(hwnd: isize) -> Result<()> {
-    let manager = Manager::RequestAsync()?.join()?;
+    let manager = request_manager()?;
     // Otra app empezó a sonar: la isla la sigue, aunque antes se hubiera elegido otra a mano.
     manager.CurrentSessionChanged(&TypedEventHandler::new(|_, _| {
         if let Some(w) = lock().as_mut() {
@@ -660,6 +686,14 @@ mod tests {
 
     /// Diagnóstico (ignorado por defecto): lee 30 veces seguidas la carátula de lo que suena
     /// y cuenta cuántas lecturas fallan sin que cambie la canción.
+    /// Con Windows ya listo, el pedido con tiempo límite responde enseguida.
+    #[test]
+    fn pide_el_administrador_sin_colgarse() {
+        let start = Instant::now();
+        request_manager().expect("SMTC no respondió");
+        assert!(start.elapsed() < INIT_TIMEOUT);
+    }
+
     #[test]
     #[ignore]
     fn lecturas_de_caratula() {

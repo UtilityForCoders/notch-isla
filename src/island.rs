@@ -346,12 +346,7 @@ fn geometry(
 ) -> Geometry {
     let p = p.clamp(-0.1, 1.1);
     let lerp = |a: f32, b: f32| a + (b - a) * p;
-    let lyrics_p_clamped = lyrics_p.clamp(-0.1, 1.15);
-    let n = notice_p.clamp(-0.1, 1.1);
-    let toward_notice = |music: f32, notice: f32| music + (notice - music) * n;
-    let music_w = EXPANDED_COMPACT.0 + (EXPANDED_LYRICS.0 - EXPANDED_COMPACT.0) * lyrics_p_clamped;
-    let expanded_w = toward_notice(music_w, NOTICE.0);
-    let expanded_h = toward_notice(EXPANDED_LYRICS.1, NOTICE.1);
+    let (expanded_w, expanded_h) = expanded_size((lyrics_p, notice_p));
     let w = (lerp(COLLAPSED.0, expanded_w) * scale).clamp(1.0, max_w);
     let h = lerp(COLLAPSED.1, expanded_h) * scale;
     let gap = TOP_GAP * scale;
@@ -372,6 +367,18 @@ fn geometry(
     }
 }
 
+/// Tamaño lógico de la isla expandida (ancho, alto) para `shape` = (`lyrics_p`, `notice_p`).
+fn expanded_size((lyrics_p, notice_p): (f32, f32)) -> (f32, f32) {
+    let lyrics_p = lyrics_p.clamp(-0.1, 1.15);
+    let n = notice_p.clamp(-0.1, 1.1);
+    let toward_notice = |music: f32, notice: f32| music + (notice - music) * n;
+    let music_w = EXPANDED_COMPACT.0 + (EXPANDED_LYRICS.0 - EXPANDED_COMPACT.0) * lyrics_p;
+    (
+        toward_notice(music_w, NOTICE.0),
+        toward_notice(EXPANDED_LYRICS.1, NOTICE.1),
+    )
+}
+
 /// Rectángulo (x0, y0, x1, y1, píxeles físicos) donde `draw` puede pintar algo en este cuadro:
 /// la isla con un margen para lo que asoma de ella (el punto de actualización, el recorte de
 /// la letra). Fuera de él la ventana queda transparente, así que basta con limpiar, copiar y
@@ -386,12 +393,18 @@ pub fn bounds(
 ) -> (f32, f32, f32, f32) {
     let g = geometry(max_w, max_h, scale, p, presence, shape);
     let margin = 8.0 * scale;
-    (
-        g.x0 - margin,
-        g.y0 - margin,
-        g.x1() + margin,
-        g.y0 + g.h + margin,
-    )
+    let (mut x0, mut x1, mut y1) = (g.x0, g.x1(), g.y0 + g.h);
+    // Mientras se expande o se encoge, el contenido (botones, tiempos, letra) se ubica como
+    // en la isla expandida y se desvanece: asoma fuera del cuadro negro, que es más chico.
+    // La zona lo cubre entero, si no quedarían restos de esos cuadros al encogerse.
+    if g.alpha > 0.0 {
+        let (w, h) = expanded_size(shape);
+        let (w, h) = (w * OVERSHOOT * scale, h * OVERSHOOT * scale);
+        x0 = x0.min((max_w - w) / 2.0);
+        x1 = x1.max(g.x0 + w);
+        y1 = y1.max(g.y0 + h);
+    }
+    (x0 - margin, g.y0 - margin, x1 + margin, y1 + margin)
 }
 
 /// Como `bounds`, para la línea del borde superior y su punto de actualización.
@@ -1188,5 +1201,41 @@ mod tests {
         println!("contraida: {collapsed:.3} ms, expandida: {expanded:.3} ms");
         assert!(collapsed < 0.5 * slack, "contraida: {collapsed:.3} ms");
         assert!(expanded < 2.0 * slack, "expandida: {expanded:.3} ms");
+    }
+
+    /// En cada paso de la animación, todo lo que se pinta cae dentro de `bounds`: si no, esa
+    /// zona no se limpia en el cuadro siguiente y quedan restos de la isla expandida.
+    #[test]
+    fn lo_pintado_cabe_en_la_zona() {
+        let scale = 1.25;
+        let (w, h) = window_size();
+        let (pw, ph) = ((w * scale).ceil() as u32, (h * scale).ceil() as u32);
+        let notice = Notice {
+            icon: NoticeIcon::Audio,
+            color: [255, 255, 255],
+        };
+        for shape in [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0)] {
+            for step in 0..=22 {
+                let p = step as f32 * 0.05;
+                for presence in [0.4, 1.0] {
+                    let mut pixmap = Pixmap::new(pw, ph).unwrap();
+                    let c = Controls {
+                        update: true,
+                        ..controls()
+                    };
+                    let notice = (shape.1 > 0.0).then_some((&notice, 1.0));
+                    draw(&mut pixmap, scale, p, presence, shape, Some(c), notice, None, None, 0.0, None, None);
+                    let (x0, y0, x1, y1) = bounds(pw as f32, ph as f32, scale, p, presence, shape);
+                    for (i, px) in pixmap.pixels().iter().enumerate() {
+                        let (x, y) = ((i as u32 % pw) as f32, (i as u32 / pw) as f32);
+                        assert!(
+                            px.alpha() == 0 || (x >= x0.floor() && x < x1.ceil() && y >= y0.floor() && y < y1.ceil()),
+                            "p = {p}, presence = {presence}, shape = {shape:?}: píxel ({x}, {y}) fuera de {:?}",
+                            (x0, y0, x1, y1)
+                        );
+                    }
+                }
+            }
+        }
     }
 }
