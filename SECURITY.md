@@ -4,7 +4,7 @@
 
 ### Reportar una vulnerabilidad
 
-Si encuentras un problema de seguridad en Notch Isla, **no abras un issue público**. Repórtalo en privado desde la pestaña **Security > Report a vulnerability** de este repositorio (https://github.com/gportal21/notch-isla/security/advisories/new). Incluye qué versión usas, qué pasa y, si puedes, cómo reproducirlo.
+Si encuentras un problema de seguridad en Notch Isla, **no abras un issue público**. Repórtalo en privado desde la pestaña **Security > Report a vulnerability** de este repositorio (https://github.com/UtilityForCoders/notch-isla/security/advisories/new). Incluye qué versión usas, qué pasa y, si puedes, cómo reproducirlo.
 
 Respondo lo antes posible. Cuando la corrección esté publicada, el reporte se hace público con el crédito para quien lo encontró (si lo desea).
 
@@ -24,7 +24,7 @@ Solo la **última versión publicada** recibe correcciones. La app se actualiza 
 
 ### Reporting a vulnerability
 
-If you find a security issue in Notch Isla, **please do not open a public issue**. Report it privately from this repository's **Security > Report a vulnerability** tab (https://github.com/gportal21/notch-isla/security/advisories/new), including the version you use, what happens and, if possible, how to reproduce it.
+If you find a security issue in Notch Isla, **please do not open a public issue**. Report it privately from this repository's **Security > Report a vulnerability** tab (https://github.com/UtilityForCoders/notch-isla/security/advisories/new), including the version you use, what happens and, if possible, how to reproduce it.
 
 I will reply as soon as possible. Once the fix is released, the advisory is made public, crediting the reporter (if they wish).
 

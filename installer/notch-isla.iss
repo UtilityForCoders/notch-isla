@@ -11,7 +11,7 @@
 
 #define AppName "Notch Isla"
 #define AppExe "notch-isla.exe"
-#define AppUrl "https://github.com/gportal21/notch-isla"
+#define AppUrl "https://github.com/UtilityForCoders/notch-isla"
 ; Mismo nombre de valor que usa la app en "Iniciar con Windows" (src/autostart.rs), así el
 ; menú de la bandeja muestra la opción marcada y el desinstalador puede quitarla.
 #define RunKey "Software\Microsoft\Windows\CurrentVersion\Run"

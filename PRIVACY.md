@@ -26,7 +26,7 @@ Lo que la app escribe en tu PC:
 
 Fuera de las actualizaciones y de la letra (si la activas), ningún dato sale de tu equipo ni se comparte con terceros.
 
-Preguntas: abre un *issue* en https://github.com/gportal21/notch-isla/issues
+Preguntas: abre un *issue* en https://github.com/UtilityForCoders/notch-isla/issues
 
 ## English
 
@@ -52,4 +52,4 @@ What the app writes to your PC:
 
 Apart from updates and lyrics (if you turn them on), no data leaves your computer or is shared with third parties.
 
-Questions: open an issue at https://github.com/gportal21/notch-isla/issues
+Questions: open an issue at https://github.com/UtilityForCoders/notch-isla/issues

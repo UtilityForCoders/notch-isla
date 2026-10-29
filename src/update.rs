@@ -29,12 +29,12 @@ use crate::{autostart, settings};
 pub const WM_UPDATE: u32 = WM_APP + 4;
 
 /// Página de descarga, para la versión portable o si la descarga falló.
-pub const DOWNLOAD_URL: &str = "https://github.com/gportal21/notch-isla/releases/latest";
+pub const DOWNLOAD_URL: &str = "https://github.com/UtilityForCoders/notch-isla/releases/latest";
 
 const API_HOST: &str = "api.github.com";
-const API_PATH: &str = "/repos/gportal21/notch-isla/releases/latest";
+const API_PATH: &str = "/repos/UtilityForCoders/notch-isla/releases/latest";
 const DOWNLOAD_HOST: &str = "github.com";
-const REPO_PATH: &str = "/gportal21/notch-isla";
+const REPO_PATH: &str = "/UtilityForCoders/notch-isla";
 
 /// Entrada del desinstalador que crea Inno Setup (el AppId de installer/notch-isla.iss + "_is1").
 const UNINSTALL_KEY: PCWSTR = w!(

@@ -3,7 +3,7 @@ name = "notch-isla"
 version = "0.4.7"
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/gportal21/notch-isla"
+repository = "https://github.com/UtilityForCoders/notch-isla"
 description = "Isla dinámica minimalista para Windows, enfocada en controlar la música."
 
 [dependencies]
