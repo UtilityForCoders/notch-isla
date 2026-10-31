@@ -2723,7 +2723,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
         // Al hacer clic, no quitarle el foco a la ventana que estás usando.
         WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
         fullscreen::WM_APPBAR if wparam.0 == fullscreen::ABN_FULLSCREENAPP => {
-            let active = fullscreen::is_active(hwnd, lparam);
+            let active = fullscreen::is_active(hwnd);
             with_app(|app| app.set_fullscreen(active));
             LRESULT(0)
         }
