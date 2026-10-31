@@ -59,7 +59,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::Shell::NIN_BALLOONUSERCLICK;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, KillTimer,
-    LoadCursorW, PostQuitMessage, RegisterClassExW, SetTimer, ShowWindow, TranslateMessage,
+    LoadCursorW, PostQuitMessage, RegisterClassExW, SetTimer, SetWindowPos, ShowWindow,
+    TranslateMessage, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE,
     UpdateLayeredWindow, UpdateLayeredWindowIndirect, IDC_ARROW, UPDATELAYEREDWINDOWINFO, MA_NOACTIVATE, MB_ICONASTERISK, MSG, SW_HIDE,
     SW_SHOWNOACTIVATE, ULW_ALPHA, WM_CONTEXTMENU, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED,
     WM_CAPTURECHANGED, WM_HOTKEY, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONUP, WM_TIMER,
@@ -995,6 +996,7 @@ impl App {
                 let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
             }
             self.shown = true;
+            self.raise();
         }
         // Ya no corresponde la franja (pantalla completa) y la isla no está: se oculta la ventana.
         if !want && !self.visible && self.shown && !self.edge_strip() {
@@ -1016,6 +1018,9 @@ impl App {
                 }
                 self.shown = true;
             }
+            // También al volver desde la franja: la ventana ya estaba mostrada, pero pudo quedar
+            // debajo de otras.
+            self.raise();
             self.presence.set_target(1.0);
             self.start_idle_countdown();
         } else {
@@ -1036,6 +1041,27 @@ impl App {
     fn set_fullscreen(&mut self, fullscreen: bool) {
         self.fullscreen = fullscreen;
         self.update_visibility();
+        // Los juegos y videos a pantalla completa pueden dejar la isla debajo de otras ventanas
+        // aunque siga marcada como "siempre encima"; al salir de ellos se vuelve a subir.
+        if !fullscreen && self.shown {
+            self.raise();
+        }
+    }
+
+    /// Vuelve a poner la ventana sobre las demás. `WS_EX_TOPMOST` solo se aplica al crearla:
+    /// si algo la empuja hacia abajo, Windows no la devuelve sola.
+    fn raise(&self) {
+        unsafe {
+            let _ = SetWindowPos(
+                self.hwnd,
+                Some(HWND_TOPMOST),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER,
+            );
+        }
     }
 
     /// Qué hay en el punto (x, y) de la ventana; sin música no hay botones ni barra.
