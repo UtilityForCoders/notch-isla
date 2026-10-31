@@ -7,8 +7,7 @@
 //! y letra sincronizada a la derecha.
 
 use tiny_skia::{
-    FillRule, FilterQuality, Paint, Path, PathBuilder, Pattern, Pixmap, SpreadMode,
-    Transform,
+    FillRule, FilterQuality, Paint, Path, PathBuilder, Pattern, Pixmap, SpreadMode, Transform,
 };
 
 /// (ancho, alto, radio de las esquinas)
@@ -157,8 +156,8 @@ pub struct Controls {
     pub accent: [u8; 3],
     /// Fracción reproducida, o `None` si la app no informa el avance (no se dibuja la barra).
     pub progress: Option<f32>,
-    /// Nivel de volumen (0 a 1) mientras se cambia con la rueda: reemplaza el avance.
-    pub volume: Option<f32>,
+    /// Nivel de volumen (0 a 1) y opacidad de desvanecimiento (0 a 1) mientras se cambia con la rueda.
+    pub volume: Option<(f32, f32)>,
     /// (posición de la app mostrada, cantidad de apps con música): con 2 o más se dibujan
     /// puntos bajo la carátula.
     pub sessions: (usize, usize),
@@ -528,6 +527,7 @@ pub fn draw(
     t: f32,
     time_info: Option<TimeInfo>,
     lyrics_info: Option<LyricsInfo>,
+    translucent: bool,
 ) -> Option<LayoutAreas> {
     let g = geometry(
         pixmap.width() as f32,
@@ -554,35 +554,60 @@ pub fn draw(
         ..Default::default()
     };
 
-    // Cuadro flotante: rectángulo negro con las 4 esquinas redondeadas, sin tocar el techo
-    paint.set_color_rgba8(0, 0, 0, 255);
-    fill_rounded_rect(pixmap, &paint, g.x0, g.y0, g.w, g.h, g.r);
+    // Cuadro flotante: rectángulo negro u oscuro translúcido con efecto acrílico y borde sutil
+    if translucent {
+        // Fondo translúcido ahumado (estilo Fluent / Acrylic oscuro de Windows 11)
+        paint.set_color_rgba8(20, 20, 24, 185);
+        fill_rounded_rect(pixmap, &paint, g.x0, g.y0, g.w, g.h, g.r);
+        // Borde translúcido sutil que define los bordes sobre cualquier fondo
+        paint.set_color_rgba8(255, 255, 255, 34);
+        if let Some(border) = rounded_rect_path(
+            g.x0 + 0.5,
+            g.y0 + 0.5,
+            (g.w - 1.0).max(1.0),
+            (g.h - 1.0).max(1.0),
+            (g.r - 0.5).max(0.0),
+        ) {
+            stroke_path(pixmap, &paint, &border, 1.0);
+        }
+    } else {
+        paint.set_color_rgba8(0, 0, 0, 255);
+        fill_rounded_rect(pixmap, &paint, g.x0, g.y0, g.w, g.h, g.r);
+    }
 
-    // Actualización disponible: punto azul con aro negro
+    // Actualización disponible: punto azul con aro de fondo
     if let Some(c) = controls.as_ref().filter(|c| c.update) {
         let (dx, dy) = update_dot(&g, p);
         let r = UPDATE_DOT_R * s * if c.update_hovered { 1.35 } else { 1.0 };
-        paint.set_color_rgba8(0, 0, 0, 255);
+        if translucent {
+            paint.set_color_rgba8(20, 20, 24, 185);
+        } else {
+            paint.set_color_rgba8(0, 0, 0, 255);
+        }
         fill_circle(pixmap, &paint, dx, dy, r + 1.5 * s);
         let [ur, ug, ub] = UPDATE_COLOR;
         paint.set_color_rgba8(ur, ug, ub, 255);
         fill_circle(pixmap, &paint, dx, dy, r);
     }
 
-    // Indicador de la isla contraída: mini carátula y barras de audio en la píldora flotante
+    // Indicador de la isla contraída: mini carátula y barras de audio centradas en la píldora flotante
     let mini = mini_alpha(p);
     if let (Some(c), true) = (&controls, mini > 0.0) {
         let size = 22.0 * s;
+        let spacing = 10.0 * s;
+        let bars_w = 4.0 * 3.0 * s + 3.0 * 2.5 * s;
+        let total_w = size + spacing + bars_w;
+        let start_x = g.x0 + (g.w - total_w) / 2.0;
         draw_cover(
             pixmap,
             cover,
-            g.x0 + 6.0 * s,
+            start_x,
             g.cy() - size / 2.0,
             size,
             size / 2.0,
             mini,
         );
-        draw_bars(pixmap, &g, s, c, t, mini);
+        draw_bars(pixmap, start_x + size + spacing, g.cy(), s, c, t, mini);
     }
 
     if g.alpha <= 0.0 {
@@ -602,13 +627,29 @@ pub fn draw(
 
     // Panel izquierdo: carátula de la canción
     let (cover_x, cover_y, size) = g.cover_rect();
-    draw_cover(pixmap, cover, cover_x, cover_y, size, COVER_RADIUS * s, g.alpha);
+    draw_cover(
+        pixmap,
+        cover,
+        cover_x,
+        cover_y,
+        size,
+        COVER_RADIUS * s,
+        g.alpha,
+    );
 
     if let Some(c) = &controls {
         let (index, count) = c.sessions;
         if c.cover_hovered && count > 1 {
             paint.set_color_rgba8(255, 255, 255, (g.alpha * 40.0) as u8);
-            fill_rounded_rect(pixmap, &paint, cover_x, cover_y, size, size, COVER_RADIUS * s);
+            fill_rounded_rect(
+                pixmap,
+                &paint,
+                cover_x,
+                cover_y,
+                size,
+                size,
+                COVER_RADIUS * s,
+            );
         }
         if let Some(icon) = app_icon {
             draw_app_badge(pixmap, icon, cover_x + size, cover_y + size, s, g.alpha);
@@ -632,27 +673,29 @@ pub fn draw(
                 _ => draw_button(pixmap, button, c, cx, cy, s, g.alpha),
             }
         }
-        match (c.volume, c.progress) {
-            (Some(volume), _) => draw_progress(pixmap, &g, false, volume),
-            (None, Some(progress)) => {
-                draw_progress(pixmap, &g, c.seek_hover.is_some(), progress);
-                if let Some((fraction, label)) = &c.seek_hover {
-                    // Punto donde caería el salto; el tiempo lo escribe DirectWrite encima.
-                    let (bar_x, bar_cy, bar_w) = g.progress_bar();
-                    let x = bar_x + bar_w * fraction.clamp(0.0, 1.0);
-                    paint.set_color_rgba8(255, 255, 255, (g.alpha * 255.0) as u8);
-                    fill_circle(pixmap, &paint, x, bar_cy, 5.0 * s);
-                    seek = Some(SeekTip {
-                        x,
-                        bar_cy,
-                        min_x: g.x0 + 8.0 * s,
-                        max_x: g.x1() - 8.0 * s,
-                        text: label.clone(),
-                        alpha: g.alpha,
-                    });
-                }
+        if let Some(progress) = c.progress {
+            draw_progress(pixmap, &g, c.seek_hover.is_some(), progress);
+            if let Some((fraction, label)) = &c.seek_hover {
+                // Punto donde caería el salto; el tiempo lo escribe DirectWrite encima.
+                let (bar_x, bar_cy, bar_w) = g.progress_bar();
+                let x = bar_x + bar_w * fraction.clamp(0.0, 1.0);
+                paint.set_color_rgba8(255, 255, 255, (g.alpha * 255.0) as u8);
+                fill_circle(pixmap, &paint, x, bar_cy, 5.0 * s);
+                seek = Some(SeekTip {
+                    x,
+                    bar_cy,
+                    min_x: g.x0 + 8.0 * s,
+                    max_x: g.x1() - 8.0 * s,
+                    text: label.clone(),
+                    alpha: g.alpha,
+                });
             }
-            (None, None) => {}
+        }
+        if let Some((vol_level, fade)) = c.volume {
+            let combined_alpha = g.alpha * fade;
+            if combined_alpha > 0.005 {
+                draw_vertical_volume(pixmap, &g, s, vol_level, combined_alpha);
+            }
         }
     }
 
@@ -946,13 +989,10 @@ fn draw_cover(
 /// Velocidades (rad/s) de las dos ondas que mueven cada barra; distintas para que no vayan al compás.
 const BAR_SPEEDS: [(f32, f32); 4] = [(7.1, 3.3), (9.3, 4.7), (6.2, 5.9), (8.4, 2.8)];
 
-/// Barras de audio a la derecha de la isla contraída. En pausa quedan quietas y bajas.
-fn draw_bars(pixmap: &mut Pixmap, g: &Geometry, s: f32, c: &Controls, t: f32, alpha: f32) {
+/// Barras de audio a la derecha de la mini carátula en la isla contraída. En pausa quedan quietas y bajas.
+fn draw_bars(pixmap: &mut Pixmap, left: f32, cy: f32, s: f32, c: &Controls, t: f32, alpha: f32) {
     let (bar_w, gap) = (3.0 * s, 2.5 * s);
     let (min_h, max_h) = (3.0 * s, 14.0 * s);
-    let n = BAR_SPEEDS.len() as f32;
-    let left = g.x1() - 14.0 * s - (n * bar_w + (n - 1.0) * gap);
-    let cy = g.cy();
 
     let mut paint = Paint {
         anti_alias: true,
@@ -973,6 +1013,34 @@ fn draw_bars(pixmap: &mut Pixmap, g: &Geometry, s: f32, c: &Controls, t: f32, al
         let h = min_h + (max_h - min_h) * level;
         let x = left + i as f32 * (bar_w + gap);
         fill_rounded_rect(pixmap, &paint, x, cy - h / 2.0, bar_w, h, bar_w / 2.0);
+    }
+}
+
+/// Indicador de volumen vertical en el espacio libre a la derecha del reproductor.
+/// Una línea vertical tipo slider cápsula que aparece al girar la rueda del mouse.
+fn draw_vertical_volume(pixmap: &mut Pixmap, g: &Geometry, s: f32, level: f32, alpha: f32) {
+    let bar_w = 4.0 * s;
+    let bar_h = 56.0 * s;
+    let vx = g.x0 + 241.0 * s;
+    let vy = g.cy() - bar_h / 2.0;
+    let radius = bar_w / 2.0;
+
+    let mut paint = Paint {
+        anti_alias: true,
+        ..Default::default()
+    };
+
+    // Pista vertical de fondo (tenue y elegante)
+    paint.set_color_rgba8(255, 255, 255, (alpha * 48.0) as u8);
+    fill_rounded_rect(pixmap, &paint, vx, vy, bar_w, bar_h, radius);
+
+    // Relleno de volumen (sube desde abajo)
+    let level = level.clamp(0.0, 1.0);
+    if level > 0.001 {
+        let fill_h = (bar_h * level).max(bar_w);
+        let fill_y = vy + bar_h - fill_h;
+        paint.set_color_rgba8(255, 255, 255, (alpha * 240.0) as u8);
+        fill_rounded_rect(pixmap, &paint, vx, fill_y, bar_w, fill_h, radius);
     }
 }
 
@@ -1001,7 +1069,11 @@ fn draw_button(
 
     match button {
         Button::Lyrics => {
-            let bubble_a = if c.lyrics_active { a } else { (alpha * 125.0) as u8 };
+            let bubble_a = if c.lyrics_active {
+                a
+            } else {
+                (alpha * 125.0) as u8
+            };
             paint.set_color_rgba8(255, 255, 255, bubble_a);
 
             let bw = 16.0 * s;
@@ -1017,11 +1089,33 @@ fn draw_button(
                 pb.line_to(bx + 6.0 * s, by + bh - 1.0 * s);
                 pb.close();
                 if let Some(path) = pb.finish() {
-                    pixmap.fill_path(&path, &paint, FillRule::Winding, Transform::identity(), None);
+                    pixmap.fill_path(
+                        &path,
+                        &paint,
+                        FillRule::Winding,
+                        Transform::identity(),
+                        None,
+                    );
                 }
                 paint.set_color_rgba8(0, 0, 0, a);
-                fill_rounded_rect(pixmap, &paint, cx - 3.8 * s, cy - 3.2 * s, 2.0 * s, 3.2 * s, 0.8 * s);
-                fill_rounded_rect(pixmap, &paint, cx + 1.6 * s, cy - 3.2 * s, 2.0 * s, 3.2 * s, 0.8 * s);
+                fill_rounded_rect(
+                    pixmap,
+                    &paint,
+                    cx - 3.8 * s,
+                    cy - 3.2 * s,
+                    2.0 * s,
+                    3.2 * s,
+                    0.8 * s,
+                );
+                fill_rounded_rect(
+                    pixmap,
+                    &paint,
+                    cx + 1.6 * s,
+                    cy - 3.2 * s,
+                    2.0 * s,
+                    3.2 * s,
+                    0.8 * s,
+                );
             } else {
                 if let Some(body) = rounded_rect_path(bx, by, bw, bh, 3.5 * s) {
                     stroke_path(pixmap, &paint, &body, 1.4 * s);
@@ -1031,8 +1125,24 @@ fn draw_button(
                 pb.line_to(bx - 1.0 * s, by + bh + 3.2 * s);
                 pb.line_to(bx + 6.0 * s, by + bh - 0.5 * s);
                 stroke(pixmap, &paint, pb, 1.4 * s);
-                fill_rounded_rect(pixmap, &paint, cx - 3.8 * s, cy - 3.2 * s, 1.8 * s, 2.8 * s, 0.6 * s);
-                fill_rounded_rect(pixmap, &paint, cx + 1.6 * s, cy - 3.2 * s, 1.8 * s, 2.8 * s, 0.6 * s);
+                fill_rounded_rect(
+                    pixmap,
+                    &paint,
+                    cx - 3.8 * s,
+                    cy - 3.2 * s,
+                    1.8 * s,
+                    2.8 * s,
+                    0.6 * s,
+                );
+                fill_rounded_rect(
+                    pixmap,
+                    &paint,
+                    cx + 1.6 * s,
+                    cy - 3.2 * s,
+                    1.8 * s,
+                    2.8 * s,
+                    0.6 * s,
+                );
             }
         }
         Button::PlayPause => {
@@ -1041,8 +1151,24 @@ fn draw_button(
                 let bar_w = 3.6 * s;
                 let bar_h = 13.0 * s;
                 let r = 1.2 * s;
-                fill_rounded_rect(pixmap, &paint, cx - 4.8 * s, cy - bar_h / 2.0, bar_w, bar_h, r);
-                fill_rounded_rect(pixmap, &paint, cx + 1.2 * s, cy - bar_h / 2.0, bar_w, bar_h, r);
+                fill_rounded_rect(
+                    pixmap,
+                    &paint,
+                    cx - 4.8 * s,
+                    cy - bar_h / 2.0,
+                    bar_w,
+                    bar_h,
+                    r,
+                );
+                fill_rounded_rect(
+                    pixmap,
+                    &paint,
+                    cx + 1.2 * s,
+                    cy - bar_h / 2.0,
+                    bar_w,
+                    bar_h,
+                    r,
+                );
             } else {
                 fill_triangle(pixmap, &paint, cx - 4.5 * s, cy, 11.5 * s, 13.0 * s);
             }
@@ -1187,7 +1313,21 @@ mod tests {
         let runs = 200;
         let start = Instant::now();
         for i in 0..runs {
-            draw(&mut pixmap, 1.25, p, 1.0, (0.0, 0.0), Some(controls()), None, None, None, i as f32 / 30.0, None, None);
+            draw(
+                &mut pixmap,
+                1.25,
+                p,
+                1.0,
+                (0.0, 0.0),
+                Some(controls()),
+                None,
+                None,
+                None,
+                i as f32 / 30.0,
+                None,
+                None,
+                false,
+            );
         }
         start.elapsed().as_secs_f64() * 1000.0 / runs as f64
     }
@@ -1224,7 +1364,21 @@ mod tests {
                         ..controls()
                     };
                     let notice = (shape.1 > 0.0).then_some((&notice, 1.0));
-                    draw(&mut pixmap, scale, p, presence, shape, Some(c), notice, None, None, 0.0, None, None);
+                    draw(
+                        &mut pixmap,
+                        scale,
+                        p,
+                        presence,
+                        shape,
+                        Some(c),
+                        notice,
+                        None,
+                        None,
+                        0.0,
+                        None,
+                        None,
+                        false,
+                    );
                     let (x0, y0, x1, y1) = bounds(pw as f32, ph as f32, scale, p, presence, shape);
                     for (i, px) in pixmap.pixels().iter().enumerate() {
                         let (x, y) = ((i as u32 % pw) as f32, (i as u32 / pw) as f32);

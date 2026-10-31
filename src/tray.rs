@@ -42,6 +42,9 @@ const CMD_HOTKEY_OFF: usize = 10;
 const CMD_REAL_BARS: usize = 11;
 const CMD_CHECK_UPDATES: usize = 12;
 const CMD_LYRICS_PROJECTOR: usize = 13;
+const CMD_CENTER: usize = 14;
+const CMD_HIGH_REFRESH: usize = 15;
+const CMD_TRANSLUCENT: usize = 16;
 /// Las opciones de los submenús van numeradas a partir de estas bases.
 const CMD_HIDE_DELAY: usize = 100;
 const CMD_MONITOR: usize = 200;
@@ -76,13 +79,19 @@ pub enum Command {
     ChangeHotkey,
     /// Atajo elegido: el de siempre, o `None` para desactivarlo.
     SetHotkey(Option<Hotkey>),
+    /// Centrar la isla en la pantalla.
+    Center,
+    /// Alternar adaptación de animaciones a los Hz del monitor.
+    ToggleHighRefresh,
+    /// Alternar fondo translúcido estilo acrílico.
+    ToggleTranslucent,
 }
 
 /// Lo que el menú necesita saber para marcar las opciones actuales.
 pub struct MenuState<'a> {
     /// Texto de la opción de actualizar, si hay una versión nueva; va arriba de todo.
     pub update: Option<&'a str>,
-    pub settings: &'a Settings,
+    pub settings: Settings,
     pub monitors: &'a [Monitor],
     /// Minutos que le quedan al temporizador, si hay uno en marcha.
     pub timer_left: Option<u32>,
@@ -173,10 +182,9 @@ impl Drop for Tray {
 
 /// Muestra el menú de la bandeja junto al cursor y devuelve la opción elegida.
 ///
-/// No recibe `&Tray` a propósito: el menú corre su propio bucle de mensajes y la ventana
-/// sigue recibiendo mensajes mientras está abierto (no debe haber un préstamo de la app activo).
-pub fn show_menu(state: &MenuState) -> Option<Command> {
-    let settings = state.settings;
+/// Genera las opciones del menú para el estado actual.
+pub fn build_items(state: &MenuState) -> Vec<Item> {
+    let settings = &state.settings;
     let action = |id: usize, label: &str, checked: bool| Item::Action {
         id,
         label: label.to_string(),
@@ -264,6 +272,21 @@ pub fn show_menu(state: &MenuState) -> Option<Command> {
         settings.hide_fullscreen,
     ));
     items.push(action(
+        CMD_HIGH_REFRESH,
+        "Adaptar animaciones a los Hz de la pantalla",
+        settings.high_refresh,
+    ));
+    items.push(action(
+        CMD_TRANSLUCENT,
+        "Fondo translúcido",
+        settings.translucent,
+    ));
+    items.push(action(
+        CMD_CENTER,
+        "Centrar en la pantalla",
+        settings.offset_x == 0,
+    ));
+    items.push(action(
         CMD_AUTOSTART,
         "Iniciar con Windows",
         autostart::is_enabled(),
@@ -289,8 +312,10 @@ pub fn show_menu(state: &MenuState) -> Option<Command> {
     // Con una versión nueva ya encontrada, la opción de arriba la instala; esta igual consulta.
     items.push(action(CMD_CHECK_UPDATES, "Buscar actualizaciones", false));
     items.push(action(CMD_EXIT, "Salir", false));
+    items
+}
 
-    let id = menu::show(items)?;
+fn id_to_command(id: usize, state: &MenuState) -> Option<Command> {
     let pick = |base: usize, len: usize| (base..base + len).contains(&id).then(|| id - base);
     match id {
         CMD_AUTOSTART => Some(Command::ToggleAutostart),
@@ -303,6 +328,9 @@ pub fn show_menu(state: &MenuState) -> Option<Command> {
         CMD_LYRICS_PROJECTOR => Some(Command::ToggleLyricsProjector),
         CMD_REAL_BARS => Some(Command::ToggleRealBars),
         CMD_CHECK_UPDATES => Some(Command::CheckUpdates),
+        CMD_CENTER => Some(Command::Center),
+        CMD_HIGH_REFRESH => Some(Command::ToggleHighRefresh),
+        CMD_TRANSLUCENT => Some(Command::ToggleTranslucent),
         CMD_HOTKEY_CHANGE => Some(Command::ChangeHotkey),
         CMD_HOTKEY_DEFAULT => Some(Command::SetHotkey(Some(hotkey::DEFAULT))),
         CMD_HOTKEY_OFF => Some(Command::SetHotkey(None)),
@@ -318,38 +346,76 @@ pub fn show_menu(state: &MenuState) -> Option<Command> {
     }
 }
 
-/// Menú de clic derecho sobre la isla: la salida de audio de la app que suena.
-/// Devuelve `Some(None)` = la predeterminada del sistema, `Some(Some(i))` = la salida `i`.
-/// `unavailable`: por qué no se puede elegir (el menú solo lo explica), o `None` si se puede.
-pub fn show_output_menu(
-    app: &str,
+/// No recibe `&Tray` a propósito: el menú corre su propio bucle de mensajes y la ventana
+/// sigue recibiendo mensajes mientras está abierto (no debe haber un préstamo de la app activo).
+/// Permite ejecutar comandos de configuración manteniendo el menú abierto e interactivo.
+pub fn show_menu<F>(mut state: MenuState, mut on_command: F)
+where
+    F: FnMut(Command, &mut Settings) -> bool,
+{
+    let items = build_items(&state);
+    menu::show_interactive(items, move |id| {
+        let Some(cmd) = id_to_command(id, &state) else {
+            return menu::MenuAction::Close;
+        };
+        let mut settings = state.settings.clone();
+        let keep_open = on_command(cmd, &mut settings);
+        if keep_open {
+            state.settings = settings;
+            let new_items = build_items(&state);
+            menu::MenuAction::KeepOpen(new_items)
+        } else {
+            menu::MenuAction::Close
+        }
+    });
+}
+
+pub enum IslandMenuChoice {
+    Output(Option<usize>),
+    Center,
+}
+
+/// Menú contextual sobre la isla: opciones de salida de audio y centrar en la pantalla.
+pub fn show_island_menu(
+    app: Option<&str>,
     outputs: &[Output],
     current: Option<&str>,
     unavailable: Option<&str>,
-) -> Option<Option<usize>> {
-    let mut items = vec![
-        Item::Label(format!("Salida de audio de {app}")),
-        Item::Separator,
-    ];
-    if let Some(reason) = unavailable {
-        items.push(Item::Label(reason.to_string()));
-    } else {
-        items.push(Item::Action {
-            id: CMD_OUTPUT_DEFAULT,
-            label: "Predeterminada del sistema".to_string(),
-            checked: current.is_none(),
-        });
-        for (i, o) in outputs.iter().enumerate() {
+    is_centered: bool,
+) -> Option<IslandMenuChoice> {
+    let mut items = Vec::new();
+    if let Some(app) = app {
+        items.push(Item::Label(format!("Salida de audio de {app}")));
+        items.push(Item::Separator);
+        if let Some(reason) = unavailable {
+            items.push(Item::Label(reason.to_string()));
+        } else {
             items.push(Item::Action {
-                id: CMD_OUTPUT + i,
-                label: o.name.clone(),
-                checked: current == Some(o.id.as_str()),
+                id: CMD_OUTPUT_DEFAULT,
+                label: "Predeterminada del sistema".to_string(),
+                checked: current.is_none(),
             });
+            for (i, o) in outputs.iter().enumerate() {
+                items.push(Item::Action {
+                    id: CMD_OUTPUT + i,
+                    label: o.name.clone(),
+                    checked: current == Some(o.id.as_str()),
+                });
+            }
         }
+        items.push(Item::Separator);
     }
+    items.push(Item::Action {
+        id: CMD_CENTER,
+        label: "Centrar en la pantalla".to_string(),
+        checked: is_centered,
+    });
     match menu::show(items)? {
-        CMD_OUTPUT_DEFAULT => Some(None),
-        id if (CMD_OUTPUT..CMD_OUTPUT + outputs.len()).contains(&id) => Some(Some(id - CMD_OUTPUT)),
+        CMD_CENTER => Some(IslandMenuChoice::Center),
+        CMD_OUTPUT_DEFAULT => Some(IslandMenuChoice::Output(None)),
+        id if (CMD_OUTPUT..CMD_OUTPUT + outputs.len()).contains(&id) => {
+            Some(IslandMenuChoice::Output(Some(id - CMD_OUTPUT)))
+        }
         _ => None,
     }
 }
