@@ -1,12 +1,20 @@
-//! Detección de apps a pantalla completa (videos, juegos, presentaciones) sin sondeo.
+//! Detección de apps a pantalla completa (juegos, videos, presentaciones).
 //!
-//! Truco clásico: registrarse como "appbar" sin reservar espacio. El Explorador avisa a todas
-//! las appbars con `ABN_FULLSCREENAPP` cuando una app entra o sale de pantalla completa.
+//! Combina el aviso por appbar de Explorer (`ABN_FULLSCREENAPP`) con la API nativa de Windows
+//! `SHQueryUserNotificationState` (detecta juegos Direct3D) y la comprobación de dimensiones
+//! de la ventana en primer plano (detecta juegos en modo ventana sin bordes / borderless fullscreen).
 
-use windows::Win32::Foundation::{HWND, LPARAM};
-use windows::Win32::Graphics::Gdi::{MonitorFromWindow, MONITOR_DEFAULTTONEAREST};
-use windows::Win32::UI::Shell::{SHAppBarMessage, ABM_NEW, ABM_REMOVE, APPBARDATA};
-use windows::Win32::UI::WindowsAndMessaging::{GetClassNameW, GetForegroundWindow, WM_APP};
+use windows::Win32::Foundation::{HWND, LPARAM, RECT};
+use windows::Win32::Graphics::Gdi::{
+    GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+};
+use windows::Win32::UI::Shell::{
+    SHAppBarMessage, SHQueryUserNotificationState, ABM_NEW, ABM_REMOVE, APPBARDATA,
+    QUNS_PRESENTATION_MODE, QUNS_RUNNING_D3D_FULL_SCREEN,
+};
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetClassNameW, GetForegroundWindow, GetWindowRect, IsIconic, IsWindowVisible, WM_APP,
+};
 
 /// Mensaje con el que el Explorador nos avisa; `wparam` = tipo de aviso.
 pub const WM_APPBAR: u32 = WM_APP + 3;
@@ -36,25 +44,70 @@ pub fn unregister(hwnd: HWND) {
     }
 }
 
-/// Interpreta el aviso: ¿hay una app a pantalla completa en el monitor de la isla?
-pub fn is_active(hwnd: HWND, lparam: LPARAM) -> bool {
-    if lparam.0 == 0 {
-        return false;
-    }
+/// Comprueba si la ventana activa en primer plano o el sistema está en pantalla completa
+/// (juegos DirectX/Vulkan, borderless fullscreen, videos en pantalla completa, presentaciones).
+pub fn is_fullscreen(hwnd: HWND) -> bool {
     unsafe {
+        // 1. Detección nativa de Windows para juegos Direct3D y presentaciones:
+        if let Ok(state) = SHQueryUserNotificationState() {
+            if state == QUNS_RUNNING_D3D_FULL_SCREEN || state == QUNS_PRESENTATION_MODE {
+                return true;
+            }
+        }
+
+        // 2. Detección por ventana en primer plano que cubre todo el monitor:
         let fg = GetForegroundWindow();
         if fg.is_invalid() || fg == hwnd {
             return false;
         }
-        // Rareza conocida: hacer clic en el escritorio también dispara el aviso.
-        let mut class = [0u16; 32];
+
+        // Ignorar el escritorio de Windows y la barra de tareas
+        let mut class = [0u16; 64];
         let len = GetClassNameW(fg, &mut class) as usize;
         let class = String::from_utf16_lossy(&class[..len]);
-        if class == "WorkerW" || class == "Progman" {
+        if class == "WorkerW" || class == "Progman" || class == "Shell_TrayWnd" {
             return false;
         }
-        // Solo cuenta si es en el mismo monitor que la isla.
-        MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST)
-            == MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST)
+
+        if !IsWindowVisible(fg).as_bool() || IsIconic(fg).as_bool() {
+            return false;
+        }
+
+        let mut rc_window = RECT::default();
+        if GetWindowRect(fg, &mut rc_window).is_err() {
+            return false;
+        }
+
+        let fg_mon = MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST);
+        let isla_mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        if fg_mon != isla_mon {
+            // El juego o ventana activa está en otro monitor, no en el de la isla
+            return false;
+        }
+
+        let mut mi = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if !GetMonitorInfoW(fg_mon, &mut mi).as_bool() {
+            return false;
+        }
+
+        let rc_mon = mi.rcMonitor;
+        // La ventana cubre la pantalla completa si sus límites son iguales o mayores que el monitor
+        rc_window.left <= rc_mon.left
+            && rc_window.top <= rc_mon.top
+            && rc_window.right >= rc_mon.right
+            && rc_window.bottom >= rc_mon.bottom
+    }
+}
+
+/// Interpreta el aviso del AppBar: ¿hay una app a pantalla completa en el monitor de la isla?
+pub fn is_active(hwnd: HWND, lparam: LPARAM) -> bool {
+    if lparam.0 == 0 {
+        // Si el AppBar dice que salió, revalidamos con `is_fullscreen` por si sigue habiendo un juego
+        is_fullscreen(hwnd)
+    } else {
+        true
     }
 }

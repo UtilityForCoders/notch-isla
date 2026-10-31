@@ -60,7 +60,7 @@ const LYRIC_SLOTS: [(f32, f32, f32); 6] = [
 /// Versos maquetados que se guardan: los seis del carrusel en sus dos formatos, más el aviso.
 const LYRIC_CACHE: usize = 14;
 /// Opacidad de la parte del verso actual que aún no se canta (la cantada va en blanco pleno).
-const UNSUNG_ALPHA: f32 = 0.35;
+pub(crate) const UNSUNG_ALPHA: f32 = 0.35;
 /// Límites del intervalo entre cuadros mientras el texto avanza (~60 y ~30 fps).
 const SCROLL_FRAME_MS: (u32, u32) = (15, 33);
 
@@ -792,7 +792,7 @@ fn draw_note(
 /// Parte cantada de un verso maquetado, relativa a su esquina: los renglones de arriba
 /// completos (si el verso ocupa dos) y el renglón actual hasta la posición `pos`, que cae
 /// entre dos letras con decimales para que el borde avance suave.
-fn sung_rects(layout: &IDWriteTextLayout, pos: f32, w: f32) -> [D2D_RECT_F; 2] {
+pub(crate) fn sung_rects(layout: &IDWriteTextLayout, pos: f32, w: f32) -> [D2D_RECT_F; 2] {
     let k = pos.floor().max(0.0);
     let mut metrics = DWRITE_HIT_TEST_METRICS::default();
     let (mut px, mut py) = (0.0, 0.0);

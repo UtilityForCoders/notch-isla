@@ -33,6 +33,12 @@ pub struct Settings {
     pub real_bars: bool,
     /// Atajo para mostrar u ocultar la isla; `None` = desactivado.
     pub hotkey: Option<Hotkey>,
+    /// Desplazamiento horizontal respecto al centro de la pantalla (píxeles lógicos; 0 = centrada).
+    pub offset_x: i32,
+    /// Adapta la frecuencia de cuadros de las animaciones a los Hz del monitor (120 Hz, 240 Hz, etc.).
+    pub high_refresh: bool,
+    /// Fondo translúcido con efecto acrílico y borde sutil (si no, negro opaco).
+    pub translucent: bool,
 }
 
 impl Settings {
@@ -57,6 +63,9 @@ impl Settings {
             lyrics_projector: read_dword(w!("LyricsProjector")).map_or(lyrics, |v| v != 0),
             real_bars: read_dword(w!("RealBars")).is_none_or(|v| v != 0),
             hotkey,
+            offset_x: read_dword(w!("OffsetX")).map_or(0, |v| v as i32),
+            high_refresh: read_dword(w!("HighRefresh")).is_some_and(|v| v != 0),
+            translucent: read_dword(w!("Translucent")).map_or(true, |v| v != 0),
         }
     }
 
@@ -70,6 +79,9 @@ impl Settings {
         write_dword(w!("RealBars"), self.real_bars as u32);
         write_dword(w!("HotkeyMods"), self.hotkey.map_or(0, |h| h.mods));
         write_dword(w!("HotkeyKey"), self.hotkey.map_or(0, |h| h.vk));
+        write_dword(w!("OffsetX"), self.offset_x as u32);
+        write_dword(w!("HighRefresh"), self.high_refresh as u32);
+        write_dword(w!("Translucent"), self.translucent as u32);
     }
 
     /// Alguna de las dos letras está activada: hay que pedirla.

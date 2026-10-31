@@ -11,13 +11,13 @@ use tiny_skia::{Color, Paint};
 use windows::core::{w, Result};
 use windows::Win32::Foundation::{COLORREF, HWND, POINT, RECT, SIZE};
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_PIXEL_FORMAT,
+    D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_PIXEL_FORMAT, D2D_RECT_F,
 };
 use windows::Win32::Graphics::Direct2D::{
-    D2D1CreateFactory, ID2D1DCRenderTarget, ID2D1Factory, D2D1_DRAW_TEXT_OPTIONS_NONE,
-    D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_FEATURE_LEVEL_DEFAULT, D2D1_RENDER_TARGET_PROPERTIES,
-    D2D1_RENDER_TARGET_TYPE_SOFTWARE, D2D1_RENDER_TARGET_USAGE_NONE,
-    D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE,
+    D2D1CreateFactory, ID2D1DCRenderTarget, ID2D1Factory, D2D1_ANTIALIAS_MODE_ALIASED,
+    D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_FEATURE_LEVEL_DEFAULT,
+    D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_SOFTWARE,
+    D2D1_RENDER_TARGET_USAGE_NONE, D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE,
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWriteCreateFactory, IDWriteFactory, IDWriteTextFormat, IDWriteTextLayout,
@@ -33,9 +33,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
-use crate::island::fill_rounded_rect;
+use crate::island::{fill_rounded_rect, rounded_rect_path, stroke_path};
 use crate::spring::Spring;
-use crate::text::make_format;
+use crate::text::{make_format, sung_rects, UNSUNG_ALPHA};
 use crate::Surface;
 
 // Medidas en píxeles lógicos.
@@ -163,9 +163,16 @@ impl Projector {
     }
 
     /// Dibuja el proyector con el verso `text` (o lo esconde con `None`), centrado en `cx` y
-    /// con su borde superior en `top` (píxeles de pantalla). Devuelve `true` mientras se mueve
-    /// (resorte o desvanecido): hay que seguir dibujando cuadros.
-    pub fn render(&mut self, text: Option<&str>, cx: i32, top: i32) -> bool {
+    /// con su borde superior en `top` (píxeles de pantalla). `sung`: posición cantada para resaltar.
+    /// Devuelve `true` mientras se mueve (resorte o desvanecido): hay que seguir dibujando cuadros.
+    pub fn render(
+        &mut self,
+        text: Option<&str>,
+        sung: Option<f32>,
+        cx: i32,
+        top: i32,
+        translucent: bool,
+    ) -> bool {
         let dt = self.last_frame.elapsed().as_secs_f32().min(0.05);
         self.last_frame = Instant::now();
         let s = self.scale;
@@ -207,7 +214,7 @@ impl Projector {
             }
             return moving;
         }
-        self.draw(fade, cx, top);
+        self.draw(fade, sung, cx, top, translucent);
         if !self.shown {
             unsafe {
                 let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
@@ -235,7 +242,7 @@ impl Projector {
         }
     }
 
-    fn draw(&mut self, fade: f32, cx: i32, top: i32) {
+    fn draw(&mut self, fade: f32, sung: Option<f32>, cx: i32, top: i32, translucent: bool) {
         let s = self.scale;
         let (sw, sh) = (self.surface.width as f32, self.surface.height as f32);
         let w = self.width.value.clamp(1.0, sw - 2.0 * MARGIN * s);
@@ -250,8 +257,24 @@ impl Projector {
             anti_alias: true,
             ..Default::default()
         };
-        paint.set_color_rgba8(0, 0, 0, 255);
-        fill_rounded_rect(pixmap, &paint, x, y, w, h, (h / 2.0).min(18.0 * s));
+        let r = (h / 2.0).min(18.0 * s);
+        if translucent {
+            paint.set_color_rgba8(20, 20, 24, 185);
+            fill_rounded_rect(pixmap, &paint, x, y, w, h, r);
+            paint.set_color_rgba8(255, 255, 255, 34);
+            if let Some(border) = rounded_rect_path(
+                x + 0.5,
+                y + 0.5,
+                (w - 1.0).max(1.0),
+                (h - 1.0).max(1.0),
+                (r - 0.5).max(0.0),
+            ) {
+                stroke_path(pixmap, &paint, &border, 1.0);
+            }
+        } else {
+            paint.set_color_rgba8(0, 0, 0, 255);
+            fill_rounded_rect(pixmap, &paint, x, y, w, h, r);
+        }
         self.surface.copy_to_dib();
 
         if let Some(verse) = &self.verse {
@@ -264,24 +287,61 @@ impl Projector {
             unsafe {
                 if self.target.BindDC(self.surface.dc, &full).is_ok() {
                     self.target.BeginDraw();
+                    let unsung_a = if sung.is_some() {
+                        fade * UNSUNG_ALPHA
+                    } else {
+                        fade
+                    };
                     let color = D2D1_COLOR_F {
                         r: 1.0,
                         g: 1.0,
                         b: 1.0,
-                        a: fade,
+                        a: unsung_a,
                     };
                     if let Ok(brush) = self.target.CreateSolidColorBrush(&color, None) {
                         // La caja del texto mide `MAX_TEXT_W` y lo centra adentro.
                         let box_w = MAX_TEXT_W * s;
+                        let text_x = sw / 2.0 - box_w / 2.0;
+                        let text_y = y + (h - verse.h) / 2.0;
                         self.target.DrawTextLayout(
                             windows_numerics::Vector2 {
-                                X: sw / 2.0 - box_w / 2.0,
-                                Y: y + (h - verse.h) / 2.0,
+                                X: text_x,
+                                Y: text_y,
                             },
                             &verse.layout,
                             &brush,
                             D2D1_DRAW_TEXT_OPTIONS_NONE,
                         );
+                        if let Some(pos) = sung.filter(|&p| p > 0.0) {
+                            brush.SetColor(&D2D1_COLOR_F {
+                                r: 1.0,
+                                g: 1.0,
+                                b: 1.0,
+                                a: fade,
+                            });
+                            for rect in sung_rects(&verse.layout, pos, box_w) {
+                                if rect.right <= rect.left || rect.bottom <= rect.top {
+                                    continue;
+                                }
+                                let clip = D2D_RECT_F {
+                                    left: text_x + rect.left,
+                                    top: text_y + rect.top,
+                                    right: text_x + rect.right,
+                                    bottom: text_y + rect.bottom,
+                                };
+                                self.target.PushAxisAlignedClip(&clip, D2D1_ANTIALIAS_MODE_ALIASED);
+                                self.target.DrawTextLayout(
+                                    windows_numerics::Vector2 {
+                                        X: text_x,
+                                        Y: text_y,
+                                    },
+                                    &verse.layout,
+                                    &brush,
+                                    D2D1_DRAW_TEXT_OPTIONS_NONE,
+                                );
+                                self.target.PopAxisAlignedClip();
+                            }
+                        }
                     }
                     let _ = self.target.EndDraw(None, None);
                 }
