@@ -23,6 +23,8 @@ mod visualizer;
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use audio::Volume;
@@ -58,17 +60,21 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::Shell::NIN_BALLOONUSERCLICK;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, KillTimer,
-    LoadCursorW, PostQuitMessage, RegisterClassExW, SetTimer, SetWindowPos, ShowWindow,
-    TranslateMessage, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE,
-    UpdateLayeredWindow, UpdateLayeredWindowIndirect, IDC_ARROW, UPDATELAYEREDWINDOWINFO, MA_NOACTIVATE, MB_ICONASTERISK, MSG, SW_HIDE,
-    SW_SHOWNOACTIVATE, ULW_ALPHA, WM_CONTEXTMENU, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED,
-    WM_CAPTURECHANGED, WM_HOTKEY, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONUP, WM_TIMER,
-    WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetCursorPos, GetMessageW,
+    KillTimer, LoadCursorW, PostMessageW, PostQuitMessage, RegisterClassExW, SetTimer,
+    SetWindowPos, ShowWindow, TranslateMessage, UpdateLayeredWindow, UpdateLayeredWindowIndirect,
+    HWND_TOPMOST, IDC_ARROW, MA_NOACTIVATE, MB_ICONASTERISK, MSG, SWP_NOACTIVATE, SWP_NOMOVE,
+    SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOWNOACTIVATE, ULW_ALPHA,
+    UPDATELAYEREDWINDOWINFO, WM_APP, WM_CAPTURECHANGED, WM_CONTEXTMENU, WM_DESTROY,
+    WM_DISPLAYCHANGE, WM_DPICHANGED, WM_HOTKEY, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE,
+    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONUP, WM_TIMER, WNDCLASSEXW, WS_EX_LAYERED,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 /// Aviso de "el mouse salió de la ventana" (definido aquí para no cargar todo el módulo Win32_UI_Controls).
 const WM_MOUSELEAVE: u32 = 0x02A3;
+/// Mensaje que envía el hilo de sincronización VSync (DWM) cuando las animaciones de alta tasa de refresco están activas.
+const WM_ANIM_TICK: u32 = WM_APP + 9;
 
 const ANIM_TIMER: usize = 1;
 /// Temporizador de un solo disparo: oculta la isla tras un rato sin usarla (lo que digan los
@@ -88,6 +94,9 @@ const CAPTURE_MS: u32 = 10_000;
 /// enseguida, no se cierra.
 const COLLAPSE_TIMER: usize = 7;
 const COLLAPSE_DELAY_MS: u32 = 800;
+/// Comprobación periódica de pantalla completa (juegos y apps que no avisan por Explorer).
+const FULLSCREEN_TIMER: usize = 8;
+const FULLSCREEN_CHECK_MS: u32 = 500;
 
 /// Resorte de la expansión (rigidez, amortiguación): rápido, con un pequeño rebote.
 const EXPAND_SPRING: (f32, f32) = (260.0, 22.0);
@@ -267,6 +276,7 @@ fn main() -> Result<()> {
         // La ventana empieza oculta: aparece cuando SMTC reporte música (ver `update_visibility`).
         media::start(hwnd);
         fullscreen::register(hwnd);
+        let _ = SetTimer(Some(hwnd), FULLSCREEN_TIMER, FULLSCREEN_CHECK_MS, None);
         update::start(hwnd);
         // Se crean con la app ya guardada: Windows avisa enseguida los valores actuales.
         with_app(|app| {
@@ -311,6 +321,89 @@ fn with_app(f: impl FnOnce(&mut App)) -> bool {
     })
 }
 
+/// Estado del arrastre horizontal de la isla por la parte superior.
+struct DragIsland {
+    start_cursor_x: i32,
+    start_pos_x: i32,
+    has_moved: bool,
+    pending_hit: Option<Hit>,
+    last_drag: Instant,
+}
+
+/// Conductor de alta tasa de refresco (120 Hz, 144 Hz, 240 Hz): sincroniza las animaciones
+/// directamente con el refresco de hardware del monitor mediante DwmFlush() sin la limitación
+/// de 10 ms de SetTimer. Duerme completamente (0 % CPU) cuando no hay animaciones activas.
+struct HighRefreshDriver {
+    active: Arc<(Mutex<bool>, Condvar)>,
+    pending: Arc<AtomicBool>,
+}
+
+impl HighRefreshDriver {
+    fn new(hwnd: HWND) -> Self {
+        let active = Arc::new((Mutex::new(false), Condvar::new()));
+        let pending = Arc::new(AtomicBool::new(false));
+        let thread_active = Arc::clone(&active);
+        let thread_pending = Arc::clone(&pending);
+        let hwnd_raw = hwnd.0 as isize;
+
+        std::thread::Builder::new()
+            .name("notch-vsync".into())
+            .spawn(move || {
+                let hwnd = HWND(hwnd_raw as *mut core::ffi::c_void);
+                loop {
+                    // Duerme hasta que haya una animación que requiera alta tasa de refresco:
+                    {
+                        let (lock, cvar) = &*thread_active;
+                        let mut is_active = lock.lock().unwrap();
+                        while !*is_active {
+                            is_active = cvar.wait(is_active).unwrap();
+                        }
+                    }
+
+                    // Sincroniza con el refresco de pantalla del DWM (hardware VSync):
+                    unsafe {
+                        let res = monitors::DwmFlush();
+                        if res.is_err() {
+                            // Si DWM se suspende o falla (ej. juego en pantalla completa exclusiva),
+                            // dormimos brevemente para no saturar el hilo ni quemar CPU.
+                            std::thread::sleep(std::time::Duration::from_millis(15));
+                        }
+                    }
+
+                    let is_active = *thread_active.0.lock().unwrap();
+                    if is_active && !thread_pending.swap(true, Ordering::SeqCst) {
+                        unsafe {
+                            let _ = PostMessageW(
+                                Some(hwnd),
+                                WM_ANIM_TICK,
+                                windows::Win32::Foundation::WPARAM(0),
+                                windows::Win32::Foundation::LPARAM(0),
+                            );
+                        }
+                    }
+                }
+            })
+            .expect("iniciar hilo vsync");
+
+        Self { active, pending }
+    }
+
+    fn set_active(&self, active: bool) {
+        let (lock, cvar) = &*self.active;
+        let mut is_active = lock.lock().unwrap();
+        if *is_active != active {
+            *is_active = active;
+            if active {
+                cvar.notify_one();
+            }
+        }
+    }
+
+    fn frame_processed(&self) {
+        self.pending.store(false, Ordering::SeqCst);
+    }
+}
+
 struct App {
     hwnd: HWND,
     surface: Surface,
@@ -334,6 +427,8 @@ struct App {
     /// Se está arrastrando la barra: fracción bajo el mouse. Mientras dura, la barra, los
     /// tiempos y la letra muestran ese momento; el salto se pide al soltar.
     dragging: Option<f32>,
+    /// Arrastre horizontal de la isla para colocarla en la parte superior.
+    drag_island: Option<DragIsland>,
     /// El mouse está sobre la carátula y se puede cambiar de app.
     cover_hovered: bool,
     /// El mouse está sobre el punto de actualización.
@@ -349,6 +444,8 @@ struct App {
     shown: bool,
     /// Entrada y salida de la pantalla: 0 = escondida arriba, 1 = en su sitio.
     presence: Spring,
+    /// Resorte para deslizar suavemente la isla de vuelta al centro al pulsar "Centrar en la pantalla".
+    x_spring: Spring,
     /// Transición suave de anchura: 0 = reproductor compacto, 1 = tarjeta amplia con letra.
     lyrics_spring: Spring,
     /// Cambio de forma con los avisos: 0 = tarjeta de la música, 1 = fila del aviso.
@@ -394,6 +491,9 @@ struct App {
     projector: Option<Projector>,
     /// Escucha el audio de la app que suena para las barras reales.
     visualizer: Visualizer,
+    /// Frecuencia de refresco de la pantalla actual en Hz (60, 120, 240, etc.).
+    hz: u32,
+    high_refresh_driver: HighRefreshDriver,
 }
 
 /// Aviso del sistema con sus textos.
@@ -405,7 +505,7 @@ struct ActiveNotice {
 
 impl App {
     fn new(hwnd: HWND, monitor: HMONITOR, settings: Settings) -> Result<Self> {
-        let (surface, pos, scale) = layout_for(monitor)?;
+        let (surface, pos, scale) = layout_for(monitor, settings.offset_x)?;
         Ok(Self {
             hwnd,
             surface,
@@ -421,6 +521,7 @@ impl App {
             hovered_button: None,
             seek_hover: None,
             dragging: None,
+            drag_island: None,
             cover_hovered: false,
             update_hovered: false,
             tray: Tray::new(hwnd),
@@ -429,6 +530,7 @@ impl App {
             visible: false,
             shown: false,
             presence: Spring::new(0.0, 260.0, 22.0),
+            x_spring: Spring::new(pos.x as f32, 220.0, 23.0),
             lyrics_spring: Spring::new(if settings.lyrics_island { 1.0 } else { 0.0 }, 260.0, 22.0),
             notice_spring: Spring::new(0.0, 260.0, 22.0),
             last_media: None,
@@ -452,6 +554,8 @@ impl App {
             lyric_slide: None,
             projector: None,
             visualizer: Visualizer::default(),
+            hz: monitors::refresh_rate(monitor),
+            high_refresh_driver: HighRefreshDriver::new(hwnd),
         })
     }
 
@@ -812,17 +916,31 @@ impl App {
     fn apply_settings(&mut self, settings: Settings) {
         let moved = settings.monitor != self.settings.monitor;
         let delay_changed = settings.hide_delay != self.settings.hide_delay;
+        let high_refresh_changed = settings.high_refresh != self.settings.high_refresh;
         let previous_hotkey = self.settings.hotkey;
         self.settings = settings;
         if moved {
             self.relayout();
+        }
+        if high_refresh_changed {
+            if !self.settings.high_refresh {
+                self.high_refresh_driver.set_active(false);
+            }
+            if self.timer_ms.is_some() {
+                self.set_timer(Some(self.frame_ms()));
+            }
         }
         if self.settings.hotkey != previous_hotkey {
             self.set_hotkey(self.settings.hotkey, previous_hotkey);
         }
         // Recién activada: se pide la letra de lo que suena ahora.
         self.request_lyrics();
-        self.lyrics_spring.set_target(if self.settings.lyrics_island { 1.0 } else { 0.0 });
+        self.lyrics_spring
+            .set_target(if self.settings.lyrics_island {
+                1.0
+            } else {
+                0.0
+            });
         self.start_animation();
         if delay_changed {
             if self.idle_hidden && self.settings.hide_delay == 0 {
@@ -844,10 +962,12 @@ impl App {
     /// ajustes (o en la principal si esa ya no está).
     fn relayout(&mut self) {
         let monitor = monitors::find(&self.settings.monitor);
-        if let Ok((surface, pos, scale)) = layout_for(monitor) {
+        self.hz = monitors::refresh_rate(monitor);
+        if let Ok((surface, pos, scale)) = layout_for(monitor, self.settings.offset_x) {
             self.surface = surface;
             self.pos = pos;
             self.scale = scale;
+            self.x_spring.reset(pos.x as f32);
             if let Some(text) = self.text.as_mut() {
                 text.set_scale(scale);
             }
@@ -864,7 +984,12 @@ impl App {
             // El botón está en la isla expandida: cambia la letra de la isla, no la del proyector.
             self.settings.lyrics_island = !self.settings.lyrics_island;
             self.settings.save();
-            self.lyrics_spring.set_target(if self.settings.lyrics_island { 1.0 } else { 0.0 });
+            self.lyrics_spring
+                .set_target(if self.settings.lyrics_island {
+                    1.0
+                } else {
+                    0.0
+                });
             self.request_lyrics();
         } else {
             media::press(button);
@@ -921,10 +1046,6 @@ impl App {
         self.start_idle_countdown();
     }
 
-    fn volume_showing(&self) -> bool {
-        self.volume_until.is_some_and(|t| Instant::now() < t)
-    }
-
     /// Rueda del mouse sobre la isla: sube o baja el volumen de la app que suena (o el general,
     /// con Ctrl o si no se encuentra el sonido de la app) y lo muestra un momento.
     fn wheel(&mut self, delta: i16, general: bool) {
@@ -953,12 +1074,26 @@ impl App {
         }
     }
 
+    /// Intervalo en milisegundos para cuadros de movimiento continuo.
+    /// Si la opción está activada y el monitor supera los 60 Hz (120 Hz, 144 Hz, 240 Hz, etc.),
+    /// se adapta a la frecuencia del monitor; si no, mantiene los 15 ms estándar (~60 Hz).
+    fn frame_ms(&self) -> u32 {
+        if self.settings.high_refresh && self.hz > 60 {
+            ((1000.0 / self.hz as f32).round() as u32).clamp(1, FRAME_MS)
+        } else {
+            FRAME_MS
+        }
+    }
+
     /// Redibuja fuera de la animación; si algo quedó moviéndose, arranca el temporizador.
     /// Si ya está corriendo, `tick` ajusta el intervalo en el siguiente cuadro.
     fn redraw(&mut self) {
         let motion = self.render();
-        if self.timer_ms.is_none() {
-            self.set_timer(timer_for(&motion, false));
+        let target = timer_for(&motion, false, self.frame_ms());
+        if target.is_some_and(|needed| self.timer_ms.is_none_or(|cur| needed < cur))
+            || self.timer_ms.is_none()
+        {
+            self.set_timer(target);
         }
     }
 
@@ -967,17 +1102,33 @@ impl App {
         if self.timer_ms == ms {
             return;
         }
+        let needs_high_refresh =
+            self.settings.high_refresh && self.hz > 60 && ms.is_some_and(|interval| interval < 15);
+
         unsafe {
-            match ms {
-                Some(ms) => {
-                    if self.timer_ms.is_none() {
-                        self.last_tick = Instant::now();
-                    }
-                    // Con el mismo id, SetTimer reemplaza el intervalo del temporizador existente.
-                    SetTimer(Some(self.hwnd), ANIM_TIMER, ms, None);
+            if needs_high_refresh {
+                if self.timer_ms.is_none() {
+                    self.last_tick = Instant::now();
                 }
-                None => {
-                    let _ = KillTimer(Some(self.hwnd), ANIM_TIMER);
+                // Con alta tasa de refresco, el hilo sincronizado con hardware VSync (DWM)
+                // lleva el ritmo exacto (120/144/240 fps) sin la limitación de 10 ms de SetTimer.
+                // Mantenemos además un temporizador de reserva a 30 ms por si DWM se suspende
+                // durante juegos a pantalla completa, evitando cualquier congelamiento.
+                SetTimer(Some(self.hwnd), ANIM_TIMER, 30, None);
+                self.high_refresh_driver.set_active(true);
+            } else {
+                self.high_refresh_driver.set_active(false);
+                match ms {
+                    Some(ms) => {
+                        if self.timer_ms.is_none() {
+                            self.last_tick = Instant::now();
+                        }
+                        // Con el mismo id, SetTimer reemplaza el intervalo del temporizador existente.
+                        SetTimer(Some(self.hwnd), ANIM_TIMER, ms, None);
+                    }
+                    None => {
+                        let _ = KillTimer(Some(self.hwnd), ANIM_TIMER);
+                    }
                 }
             }
         }
@@ -987,8 +1138,30 @@ impl App {
     /// La isla se muestra si hay un aviso, o si hay música y no se ocultó sola; en ambos casos,
     /// salvo que haya algo a pantalla completa (si así está en los ajustes).
     fn update_visibility(&mut self) {
-        let want = !self.hidden_by_fullscreen()
-            && (self.notice.is_some() || (self.media.is_some() && !self.idle_hidden));
+        if self.hidden_by_fullscreen() {
+            // En pantalla completa (juego, video, presentación), la isla no debe aparecer
+            // y si estaba visible se oculta de inmediato sin animaciones lentas que se traben.
+            if self.shown {
+                unsafe {
+                    let _ = ShowWindow(self.hwnd, SW_HIDE);
+                }
+                self.shown = false;
+            }
+            self.visible = false;
+            self.presence.reset(0.0);
+            self.high_refresh_driver.set_active(false);
+            self.stop_idle_countdown();
+            self.hovered = false;
+            self.lingering = false;
+            self.hovered_button = None;
+            self.seek_hover = None;
+            self.cover_hovered = false;
+            self.update_hovered = false;
+            self.aim_expansion(false);
+            return;
+        }
+
+        let want = self.notice.is_some() || (self.media.is_some() && !self.idle_hidden);
         // Oculta por inactividad, la ventana sigue mostrada para la franja del borde.
         if self.edge_strip() && !self.shown {
             self.render();
@@ -998,7 +1171,7 @@ impl App {
             self.shown = true;
             self.raise();
         }
-        // Ya no corresponde la franja (pantalla completa) y la isla no está: se oculta la ventana.
+        // Ya no corresponde la franja y la isla no está: se oculta la ventana.
         if !want && !self.visible && self.shown && !self.edge_strip() {
             unsafe {
                 let _ = ShowWindow(self.hwnd, SW_HIDE);
@@ -1038,7 +1211,24 @@ impl App {
         self.start_animation();
     }
 
+    /// Comprueba activamente si hay una app o juego en pantalla completa.
+    fn poll_fullscreen(&mut self) {
+        if !self.settings.hide_fullscreen {
+            if self.fullscreen {
+                self.set_fullscreen(false);
+            }
+            return;
+        }
+        let active = fullscreen::is_fullscreen(self.hwnd);
+        if active != self.fullscreen {
+            self.set_fullscreen(active);
+        }
+    }
+
     fn set_fullscreen(&mut self, fullscreen: bool) {
+        if self.fullscreen == fullscreen {
+            return;
+        }
         self.fullscreen = fullscreen;
         self.update_visibility();
         // Los juegos y videos a pantalla completa pueden dejar la isla debajo de otras ventanas
@@ -1078,8 +1268,8 @@ impl App {
             self.spring.value,
             self.presence.value,
             self.shape(),
-            // Mientras se muestra el volumen, la barra no sirve para saltar.
-            media.timeline.is_some() && !self.volume_showing(),
+            // Barra de progreso de la canción.
+            media.timeline.is_some(),
             media.sessions.1 > 1,
             self.update.is_some(),
             x,
@@ -1162,6 +1352,108 @@ impl App {
         self.redraw();
     }
 
+    fn monitor_rect(&self) -> RECT {
+        let monitor = monitors::find(&self.settings.monitor);
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        unsafe {
+            let _ = GetMonitorInfoW(monitor, &mut info);
+        }
+        info.rcMonitor
+    }
+
+    /// Inicia el arrastre de la isla a lo largo del borde superior.
+    fn begin_drag_island(&mut self, pending_hit: Option<Hit>) {
+        let mut pt = POINT::default();
+        unsafe {
+            let _ = GetCursorPos(&mut pt);
+            SetCapture(self.hwnd);
+        }
+        self.drag_island = Some(DragIsland {
+            start_cursor_x: pt.x,
+            start_pos_x: self.pos.x,
+            has_moved: false,
+            pending_hit,
+            last_drag: Instant::now(),
+        });
+    }
+
+    /// Mueve la isla horizontalmente mientras se arrastra el mouse.
+    fn drag_island_to(&mut self) {
+        let mut pt = POINT::default();
+        unsafe {
+            let _ = GetCursorPos(&mut pt);
+        }
+        let Some((start_cursor_x, start_pos_x, has_moved)) = self
+            .drag_island
+            .as_ref()
+            .map(|d| (d.start_cursor_x, d.start_pos_x, d.has_moved))
+        else {
+            return;
+        };
+        let delta = pt.x - start_cursor_x;
+        if !has_moved {
+            if delta.abs() >= 4 {
+                if let Some(drag) = self.drag_island.as_mut() {
+                    drag.has_moved = true;
+                    drag.last_drag = Instant::now();
+                }
+                self.set_hover(None);
+            } else {
+                return;
+            }
+        }
+        // Limita el ritmo de actualización al configurado (60 Hz si está desactivado, 120/240 Hz si está activado).
+        let min_interval = Duration::from_millis(self.frame_ms() as u64);
+        if let Some(drag) = self.drag_island.as_mut() {
+            if drag.last_drag.elapsed() < min_interval {
+                return;
+            }
+            drag.last_drag = Instant::now();
+        }
+        let target_x = start_pos_x + delta;
+        self.set_island_x(target_x);
+    }
+
+    /// Fija la posición horizontal de la isla, asegurando que quede dentro de la pantalla.
+    fn set_island_x(&mut self, target_x: i32) {
+        let rc = self.monitor_rect();
+        let (min_x, max_x) = island_bounds(&rc, self.surface.width, self.scale);
+        let clamped_x = target_x.clamp(min_x, max_x);
+        if self.pos.x != clamped_x {
+            self.pos.x = clamped_x;
+            self.x_spring.reset(clamped_x as f32);
+            let center_x = rc.left + ((rc.right - rc.left) - self.surface.width as i32) / 2;
+            self.settings.offset_x = ((clamped_x - center_x) as f32 / self.scale).round() as i32;
+            unsafe {
+                let _ = SetWindowPos(
+                    self.hwnd,
+                    None,
+                    self.pos.x,
+                    self.pos.y,
+                    0,
+                    0,
+                    SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+            }
+            self.redraw();
+        }
+    }
+
+    /// Centra la isla horizontalmente en la pantalla actual con una animación suave de resorte.
+    fn center_island(&mut self) {
+        let rc = self.monitor_rect();
+        let center_x = rc.left + ((rc.right - rc.left) - self.surface.width as i32) / 2;
+        self.settings.offset_x = 0;
+        self.settings.save();
+        if self.pos.x != center_x {
+            self.x_spring.set_target(center_x as f32);
+            self.start_animation();
+        }
+    }
+
     /// Clic en la barra: pide el salto a la app y mueve la barra ya, sin esperar su aviso.
     fn seek(&mut self, fraction: f32) {
         media::seek(fraction);
@@ -1241,19 +1533,47 @@ impl App {
     }
 
     fn start_animation(&mut self) {
-        self.set_timer(Some(FRAME_MS));
+        self.set_timer(Some(self.frame_ms()));
     }
 
     fn tick(&mut self) {
+        if self.hidden_by_fullscreen() {
+            if self.shown {
+                unsafe {
+                    let _ = ShowWindow(self.hwnd, SW_HIDE);
+                }
+                self.shown = false;
+            }
+            self.set_timer(None);
+            return;
+        }
+
         let now = Instant::now();
         let dt = now.duration_since(self.last_tick).as_secs_f32();
         self.last_tick = now;
+
+        let centering = self.x_spring.step(dt);
+        let new_x = self.x_spring.value.round() as i32;
+        if self.pos.x != new_x {
+            self.pos.x = new_x;
+            unsafe {
+                let _ = SetWindowPos(
+                    self.hwnd,
+                    None,
+                    self.pos.x,
+                    self.pos.y,
+                    0,
+                    0,
+                    SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+            }
+        }
 
         let expanding = self.spring.step(dt);
         let entering = self.presence.step(dt);
         let lyrics_moving = self.lyrics_spring.step(dt);
         let reshaping = self.notice_spring.step(dt);
-        let moving = expanding || entering || lyrics_moving || reshaping;
+        let moving = expanding || entering || lyrics_moving || reshaping || centering;
         let motion = self.render();
 
         // Terminó de salir: ahora sí se oculta la ventana (salvo que deba quedar la franja).
@@ -1265,7 +1585,8 @@ impl App {
         }
 
         // El temporizador sigue solo mientras algo se mueve, y al ritmo que eso necesita.
-        self.set_timer(timer_for(&motion, moving));
+        let frame_ms = self.frame_ms();
+        self.set_timer(timer_for(&motion, moving, frame_ms));
     }
 
     /// Forma de la isla expandida para `island`: (ancho con letra, forma de aviso).
@@ -1278,7 +1599,16 @@ impl App {
         // Si la música acaba de terminar, la isla sale mostrando la última canción, no vacía.
         let media = self.media.as_ref().or(self.last_media.as_ref());
         let cover = media.and_then(|m| m.cover.as_ref());
-        let volume = self.volume_showing().then_some(self.volume_level);
+        let now = Instant::now();
+        let volume = self.volume_until.and_then(|until| {
+            if now < until {
+                let remaining = until.saturating_duration_since(now).as_secs_f32();
+                let fade = (remaining / 0.25).clamp(0.0, 1.0);
+                Some((self.volume_level, fade))
+            } else {
+                None
+            }
+        });
         let pressed = self.pressed.and_then(|(button, at)| {
             let t = at.elapsed().as_secs_f32() / island::PRESS_SECS;
             (t < 1.0).then_some((button, t))
@@ -1296,8 +1626,9 @@ impl App {
         let notice_shape = if notice.is_some() { 1.0 } else { 0.0 };
         self.notice_spring.set_target(notice_shape);
         let reshaping = self.notice_spring.value != notice_shape;
-        let playing = self.visible && self.media.as_ref().is_some_and(|m| m.playing);
-        let bars = playing && island::mini_alpha(self.spring.value) > 0.0;
+        let strip = self.edge_strip();
+        let playing = (self.visible || strip) && self.media.as_ref().is_some_and(|m| m.playing);
+        let bars = self.visible && playing && island::mini_alpha(self.spring.value) > 0.0;
         // Se escucha el audio de la app solo mientras se ven las barras.
         let listen = self
             .media
@@ -1328,7 +1659,8 @@ impl App {
         });
         // El contenido expandido (y con él la barra) se ve a partir de ~55 % de la expansión.
         // Mientras se muestra el volumen también hace falta redibujar: para quitarlo a tiempo.
-        let progress = (playing
+        let progress = (self.visible
+            && playing
             && self.spring.value > 0.55
             && self.media.as_ref().is_some_and(|m| m.timeline.is_some()))
             || volume.is_some();
@@ -1401,7 +1733,6 @@ impl App {
             info
         });
         let shape = self.shape();
-        let strip = self.edge_strip();
         // Solo se trabaja la zona donde se dibuja ahora y donde se dibujó antes (para borrarlo):
         // con la isla contraída es una parte mínima de la ventana.
         let (sw, sh) = (self.surface.width, self.surface.height);
@@ -1444,6 +1775,7 @@ impl App {
             self.started.elapsed().as_secs_f32(),
             time_info,
             lyrics_info,
+            self.settings.translucent,
         );
         let lyrics_area = areas.as_ref().and_then(|a| a.lyrics.as_ref());
         let lyric_sliding = lyrics_area.is_some_and(|l| l.shift != 0.0);
@@ -1472,20 +1804,26 @@ impl App {
 
         // Proyector de la letra debajo de la isla (solo si la isla está contraída u oculta en el borde):
         let mut lyric_ms = None;
-        let should_project = self.spring.value < 0.4
-            && self.settings.lyrics_projector
-            && playing
-            && (self.visible || strip);
+        let mut project_sung = None;
+        let mut project_painting = false;
+        let should_project = self.spring.value < 0.4 && self.settings.lyrics_projector && playing;
+        let frame_ms = self.frame_ms();
         let lyric = if should_project {
             self.media.as_ref().and_then(|m| {
                 let lines = self.lyrics.get(&lyrics::key(&m.title, &m.artist))?;
                 let t = m.timeline?;
                 let secs = t.current_position(true);
                 lyric_ms = lyrics::next_start(lines, secs)
-                    .map(|next| (((next - secs) * 1000.0) as u32).clamp(FRAME_MS, 5000));
+                    .map(|next| (((next - secs) * 1000.0) as u32).clamp(frame_ms, 5000));
+                let current = lyrics::index_at(lines, secs);
+                if let Some(i) = current {
+                    let (pos, len) = lyrics::sung(lines, i, secs);
+                    project_sung = Some(pos);
+                    project_painting = m.playing && pos < len;
+                }
                 lyrics::line_at(lines, secs)
             })
-        } else if playing && self.settings.lyrics_island {
+        } else if self.visible && playing && self.settings.lyrics_island {
             if let Some(m) = &self.media {
                 if let (Some(lines), Some(t)) = (
                     self.lyrics.get(&lyrics::key(&m.title, &m.artist)),
@@ -1494,7 +1832,7 @@ impl App {
                     let secs = t.current_position(true);
                     // Despierta al comenzar el próximo verso, también con la letra dentro de la isla.
                     lyric_ms = lyrics::next_start(lines, secs)
-                        .map(|next| (((next - secs) * 1000.0) as u32).clamp(FRAME_MS, 5000));
+                        .map(|next| (((next - secs) * 1000.0) as u32).clamp(frame_ms, 5000));
                 }
             }
             None
@@ -1518,7 +1856,7 @@ impl App {
             let bottom = island_bottom.max(4.0 * self.scale);
             let cx = self.pos.x + self.surface.width as i32 / 2;
             let top = self.pos.y + (bottom - 2.0 * self.scale) as i32;
-            projecting = projector.render(lyric, cx, top);
+            projecting = projector.render(lyric, project_sung, cx, top, self.settings.translucent);
         }
 
         let mut scroll_ms = None;
@@ -1532,7 +1870,7 @@ impl App {
                         &m.title
                     };
                     let mut subtitle = m.artist.clone();
-                    if let Some(level) = volume {
+                    if let Some((level, _)) = volume {
                         let kind = if self.volume_app { "app" } else { "general" };
                         let percent = (level * 100.0).round() as u32;
                         subtitle = format!("Volumen {kind} {percent} %");
@@ -1632,25 +1970,31 @@ impl App {
             projecting,
             lyric_ms,
             lyric_sliding,
-            lyric_painting,
+            lyric_painting: lyric_painting || project_painting,
             reshaping,
         }
     }
 }
 
-/// Intervalo del temporizador según lo que se mueve: 60 fps para la isla, un cuadro por píxel
-/// de avance de un texto largo (y ninguno durante sus pausas), 30 fps si solo bailan las barras,
-/// 20 fps si se pinta el verso, 4 fps si solo avanza la barra de progreso, un cuadro por píxel
-/// de avance si la isla está oculta y solo crece la línea del borde, y apagado si todo está
-/// quieto. Con letra, además, a más tardar cuando empieza el verso siguiente.
-fn timer_for(motion: &Motion, moving: bool) -> Option<u32> {
+impl Drop for App {
+    fn drop(&mut self) {
+        self.high_refresh_driver.set_active(false);
+    }
+}
+
+/// Intervalo del temporizador según lo que se mueve: 60 fps (o más si el monitor lo soporta) para la isla,
+/// un cuadro por píxel de avance de un texto largo (y ninguno durante sus pausas), 30 fps si solo bailan
+/// las barras, 20 fps si se pinta el verso, 4 fps si solo avanza la barra de progreso, un cuadro por píxel
+/// de avance si la isla está oculta y solo crece la línea del borde, y apagado si todo está quieto.
+/// Con letra, además, a más tardar cuando empieza el verso siguiente.
+fn timer_for(motion: &Motion, moving: bool, frame_ms: u32) -> Option<u32> {
     let base = if moving
         || motion.pressing
         || motion.projecting
         || motion.lyric_sliding
         || motion.reshaping
     {
-        Some(FRAME_MS)
+        Some(frame_ms)
     } else if motion.bars {
         Some(BARS_MS)
     } else if motion.lyric_painting {
@@ -1666,8 +2010,24 @@ fn timer_for(motion: &Motion, moving: bool) -> Option<u32> {
         .min()
 }
 
-/// Calcula escala, superficie de dibujo y posición (arriba al centro) para un monitor.
-fn layout_for(monitor: HMONITOR) -> Result<(Surface, POINT, f32)> {
+/// Límites mínimo y máximo de `pos.x` para que la isla quepa dentro de la pantalla.
+fn island_bounds(rc: &RECT, width: u32, scale: f32) -> (i32, i32) {
+    let half_w = width as i32 / 2;
+    let margin = (16.0 * scale).round() as i32;
+    let max_island_w = (island::EXPANDED_LYRICS.0 * scale).round() as i32;
+    let half_island = max_island_w / 2 + margin;
+    let min_cx = rc.left + half_island;
+    let max_cx = rc.right - half_island;
+    if min_cx > max_cx {
+        let center_cx = rc.left + (rc.right - rc.left) / 2;
+        (center_cx - half_w, center_cx - half_w)
+    } else {
+        (min_cx - half_w, max_cx - half_w)
+    }
+}
+
+/// Calcula escala, superficie de dibujo y posición (arriba al centro, con desplazamiento opcional) para un monitor.
+fn layout_for(monitor: HMONITOR, offset_x: i32) -> Result<(Surface, POINT, f32)> {
     let mut info = MONITORINFO {
         cbSize: std::mem::size_of::<MONITORINFO>() as u32,
         ..Default::default()
@@ -1684,8 +2044,11 @@ fn layout_for(monitor: HMONITOR) -> Result<(Surface, POINT, f32)> {
     let height = (lh * scale).ceil() as u32;
 
     let rc: RECT = info.rcMonitor;
+    let (min_x, max_x) = island_bounds(&rc, width, scale);
+    let center_x = rc.left + ((rc.right - rc.left) - width as i32) / 2;
+    let target_x = center_x + (offset_x as f32 * scale).round() as i32;
     let pos = POINT {
-        x: rc.left + ((rc.right - rc.left) - width as i32) / 2,
+        x: target_x.clamp(min_x, max_x),
         y: rc.top,
     };
     Ok((Surface::new(width, height)?, pos, scale))
@@ -1910,50 +2273,69 @@ fn finish_install(hwnd: HWND) {
     }
 }
 
-/// Menú de salida de audio de la app que suena y, si se elige una, la asigna y lo avisa.
-/// Va fuera de `with_app`: el menú corre su propio bucle de mensajes. Si la función de Windows
-/// no está disponible o falla, el menú lo dice y nada más cambia.
-fn choose_output(app_id: &str) {
-    let label = audio::app_label(app_id);
-    let pids = audio::app_pids(app_id);
-    let available = routing::available();
-    let outputs = if available {
-        routing::outputs()
+/// Menú contextual sobre la isla: opciones de salida de audio y centrar en la pantalla.
+/// Va fuera de `with_app`: el menú corre su propio bucle de mensajes.
+fn open_island_menu(app_id: Option<&str>, is_centered: bool) {
+    let (label, pids, outputs, unavailable) = if let Some(app_id) = app_id {
+        let label = audio::app_label(app_id);
+        let pids = audio::app_pids(app_id);
+        let available = routing::available();
+        let outputs = if available {
+            routing::outputs()
+        } else {
+            Vec::new()
+        };
+        let unavailable = if !available {
+            Some("No disponible en esta versión de Windows")
+        } else if pids.is_empty() {
+            Some("No se encontró el proceso de la app")
+        } else if outputs.is_empty() {
+            Some("No hay salidas de audio")
+        } else {
+            None
+        };
+        (Some(label), pids, outputs, unavailable)
     } else {
-        Vec::new()
+        (None, Vec::new(), Vec::new(), None)
     };
-    let unavailable = if !available {
-        Some("No disponible en esta versión de Windows")
-    } else if pids.is_empty() {
-        Some("No se encontró el proceso de la app")
-    } else if outputs.is_empty() {
-        Some("No hay salidas de audio")
-    } else {
-        None
-    };
-    let current = if unavailable.is_none() {
+    let current = if unavailable.is_none() && !pids.is_empty() {
         routing::current(&pids)
     } else {
         None
     };
-    let Some(choice) = tray::show_output_menu(&label, &outputs, current.as_deref(), unavailable)
-    else {
+    let Some(choice) = tray::show_island_menu(
+        label.as_deref(),
+        &outputs,
+        current.as_deref(),
+        unavailable,
+        is_centered,
+    ) else {
         return;
     };
-    let device = choice.and_then(|i| outputs.get(i));
-    let ok = routing::set(&pids, device.map(|o| o.id.as_str()));
-    let subtitle = match (ok, device) {
-        (false, _) => "No se pudo cambiar".to_string(),
-        (true, Some(o)) => o.name.clone(),
-        (true, None) => "Predeterminada del sistema".to_string(),
-    };
-    with_app(|app| {
-        let view = Notice {
-            icon: NoticeIcon::Audio,
-            color: BLUE,
-        };
-        app.show_notice(view, &format!("Salida de {label}"), &subtitle, NOTICE_MS);
-    });
+    match choice {
+        tray::IslandMenuChoice::Center => {
+            with_app(|app| app.center_island());
+        }
+        tray::IslandMenuChoice::Output(choice) => {
+            let Some(label) = label else {
+                return;
+            };
+            let device = choice.and_then(|i| outputs.get(i));
+            let ok = routing::set(&pids, device.map(|o| o.id.as_str()));
+            let subtitle = match (ok, device) {
+                (false, _) => "No se pudo cambiar".to_string(),
+                (true, Some(o)) => o.name.clone(),
+                (true, None) => "Predeterminada del sistema".to_string(),
+            };
+            with_app(|app| {
+                let view = Notice {
+                    icon: NoticeIcon::Audio,
+                    color: BLUE,
+                };
+                app.show_notice(view, &format!("Salida de {label}"), &subtitle, NOTICE_MS);
+            });
+        }
+    }
 }
 
 /// Coordenadas del mouse en la ventana (con signo, como GET_X_LPARAM / GET_Y_LPARAM).
@@ -1968,6 +2350,10 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
         WM_MOUSEMOVE => {
             let (x, y) = mouse_pos(lparam);
             with_app(|app| {
+                if app.drag_island.is_some() {
+                    app.drag_island_to();
+                    return;
+                }
                 // Oculta: el mouse está en la franja del borde (o sobre la isla mientras sube).
                 if app.idle_hidden {
                     app.reveal();
@@ -1985,8 +2371,8 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
         }
         WM_MOUSELEAVE => {
             with_app(|app| {
-                // Arrastrando la barra, la isla sigue abierta aunque el mouse salga.
-                if app.dragging.is_none() {
+                // Arrastrando la barra o la isla, sigue abierta aunque el mouse salga.
+                if app.dragging.is_none() && app.drag_island.is_none() {
                     app.set_hovered(false);
                     app.set_hover(None);
                 }
@@ -1996,15 +2382,25 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
         WM_LBUTTONDOWN => {
             let (x, y) = mouse_pos(lparam);
             with_app(|app| {
-                if let (None, Some(Hit::Seek(fraction))) = (&app.notice, app.hit_at(x, y)) {
+                let hit = app.hit_at(x, y);
+                if let (None, Some(Hit::Seek(fraction))) = (&app.notice, hit) {
                     app.begin_drag(fraction);
+                } else {
+                    app.begin_drag_island(hit);
                 }
             });
             LRESULT(0)
         }
         // Otra ventana se quedó con el mouse a mitad del arrastre: se cancela sin saltar.
         WM_CAPTURECHANGED => {
-            with_app(|app| app.end_drag(false));
+            with_app(|app| {
+                app.end_drag(false);
+                if let Some(drag) = app.drag_island.take() {
+                    if drag.has_moved {
+                        app.settings.save();
+                    }
+                }
+            });
             LRESULT(0)
         }
         // Llega a la isla aunque no tenga el foco gracias a la opción de Windows
@@ -2021,32 +2417,75 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             // La actualización se aplica fuera de `with_app`: puede cerrar la ventana, y su
             // WM_DESTROY necesita el estado de la app libre.
             let mut pending = None;
-            with_app(|app| match app.hit_at(x, y) {
-                // Fin del arrastre (o de un clic simple en la barra): salta al punto elegido.
-                _ if app.dragging.is_some() => app.end_drag(true),
-                _ if app.notice.is_some() => app.end_notice(),
-                Some(Hit::Button(button)) => app.press(button),
-                Some(Hit::Seek(fraction)) => app.seek(fraction),
-                Some(Hit::Cover) => media::next_session(),
-                Some(Hit::Update) => pending = app.update.clone(),
-                None => {}
+            with_app(|app| {
+                if let Some(drag) = app.drag_island.take() {
+                    unsafe {
+                        let _ = ReleaseCapture();
+                    }
+                    if drag.has_moved {
+                        let mut pt = POINT::default();
+                        unsafe {
+                            let _ = GetCursorPos(&mut pt);
+                        }
+                        let delta = pt.x - drag.start_cursor_x;
+                        app.set_island_x(drag.start_pos_x + delta);
+                        app.settings.save();
+                        return;
+                    }
+                    if app.notice.is_some() {
+                        app.end_notice();
+                        return;
+                    }
+                    match drag.pending_hit {
+                        Some(Hit::Button(button)) => app.press(button),
+                        Some(Hit::Seek(fraction)) => app.seek(fraction),
+                        Some(Hit::Cover) => media::next_session(),
+                        Some(Hit::Update) => pending = app.update.clone(),
+                        None => {}
+                    }
+                    return;
+                }
+                if app.dragging.is_some() {
+                    app.end_drag(true);
+                    return;
+                }
+                if app.notice.is_some() {
+                    app.end_notice();
+                    return;
+                }
+                match app.hit_at(x, y) {
+                    Some(Hit::Button(button)) => app.press(button),
+                    Some(Hit::Seek(fraction)) => app.seek(fraction),
+                    Some(Hit::Cover) => media::next_session(),
+                    Some(Hit::Update) => pending = app.update.clone(),
+                    None => {}
+                }
             });
             if pending.is_some() {
                 apply_update(pending.as_ref());
             }
             LRESULT(0)
         }
-        // Clic derecho sobre la isla con música: elegir la salida de audio de esa app.
+        // Clic derecho sobre la isla: opciones de salida de audio y centrar en pantalla.
         WM_RBUTTONUP => {
             let mut app_id = None;
+            let mut is_centered = true;
             with_app(|app| {
-                if app.visible && app.notice.is_none() {
+                if (app.visible || app.edge_strip()) && app.notice.is_none() {
                     app_id = app.media.as_ref().map(|m| m.app_id.clone());
+                    is_centered = app.settings.offset_x == 0;
                 }
             });
-            if let Some(app_id) = app_id {
-                choose_output(&app_id);
-            }
+            open_island_menu(app_id.as_deref(), is_centered);
+            LRESULT(0)
+        }
+        WM_ANIM_TICK => {
+            with_app(|app| {
+                app.high_refresh_driver.frame_processed();
+                if app.settings.high_refresh {
+                    app.tick();
+                }
+            });
             LRESULT(0)
         }
         WM_TIMER if wparam.0 == ANIM_TIMER => {
@@ -2091,6 +2530,10 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
         }
         WM_TIMER if wparam.0 == CAPTURE_TIMER => {
             with_app(|app| app.end_hotkey_capture(None));
+            LRESULT(0)
+        }
+        WM_TIMER if wparam.0 == FULLSCREEN_TIMER => {
+            with_app(|app| app.poll_fullscreen());
             LRESULT(0)
         }
         media::WM_MEDIA => {
@@ -2165,59 +2608,115 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             if event == NIN_BALLOONUSERCLICK {
                 apply_update(pending.as_ref());
             } else if event == WM_RBUTTONUP || event == WM_CONTEXTMENU {
-                let Some(mut settings) = settings else {
+                let Some(settings) = settings else {
                     return LRESULT(0);
                 };
                 let label = pending.as_ref().map(update::Update::menu_label);
                 let monitors = monitors::list();
                 let state = tray::MenuState {
                     update: label.as_deref(),
-                    settings: &settings,
+                    settings,
                     monitors: &monitors,
                     timer_left,
                 };
                 use tray::Command;
-                match tray::show_menu(&state) {
-                    Some(Command::ToggleAutostart) => autostart::set(!autostart::is_enabled()),
-                    Some(Command::Update) => apply_update(pending.as_ref()),
-                    Some(Command::Exit) => unsafe {
-                        let _ = DestroyWindow(hwnd);
-                    },
-                    Some(Command::Timer(minutes)) => {
-                        with_app(|app| app.start_countdown(minutes));
+                tray::show_menu(state, |cmd, settings| match cmd {
+                    Command::ToggleAutostart => {
+                        autostart::set(!autostart::is_enabled());
+                        true
                     }
-                    Some(Command::CancelTimer) => {
-                        with_app(|app| app.cancel_countdown());
+                    Command::Update => {
+                        apply_update(pending.as_ref());
+                        false
                     }
-                    Some(Command::ChangeHotkey) => {
-                        with_app(|app| app.begin_hotkey_capture());
-                    }
-                    Some(Command::CheckUpdates) => {
-                        with_app(|app| app.check_updates_now());
-                    }
-                    Some(command) => {
-                        match command {
-                            Command::HideDelay(secs) => settings.hide_delay = secs,
-                            Command::Monitor(i) => settings.monitor = monitors[i].device.clone(),
-                            Command::ToggleNotices => settings.notices = !settings.notices,
-                            Command::ToggleLyricsIsland => {
-                                settings.lyrics_island = !settings.lyrics_island
-                            }
-                            Command::ToggleLyricsProjector => {
-                                settings.lyrics_projector = !settings.lyrics_projector
-                            }
-                            Command::ToggleRealBars => settings.real_bars = !settings.real_bars,
-                            Command::SetHotkey(h) => settings.hotkey = h,
-                            Command::ToggleFullscreen => {
-                                settings.hide_fullscreen = !settings.hide_fullscreen
-                            }
-                            _ => {}
+                    Command::Exit => {
+                        unsafe {
+                            let _ = DestroyWindow(hwnd);
                         }
-                        settings.save();
-                        with_app(|app| app.apply_settings(settings));
+                        false
                     }
-                    None => {}
-                }
+                    Command::Timer(minutes) => {
+                        with_app(|app| app.start_countdown(minutes));
+                        false
+                    }
+                    Command::CancelTimer => {
+                        with_app(|app| app.cancel_countdown());
+                        false
+                    }
+                    Command::ChangeHotkey => {
+                        with_app(|app| app.begin_hotkey_capture());
+                        false
+                    }
+                    Command::CheckUpdates => {
+                        with_app(|app| app.check_updates_now());
+                        false
+                    }
+                    Command::Center => {
+                        with_app(|app| app.center_island());
+                        settings.offset_x = 0;
+                        true
+                    }
+                    Command::HideDelay(secs) => {
+                        settings.hide_delay = secs;
+                        settings.save();
+                        with_app(|app| app.apply_settings(settings.clone()));
+                        true
+                    }
+                    Command::Monitor(i) => {
+                        settings.monitor = monitors[i].device.clone();
+                        settings.save();
+                        with_app(|app| app.apply_settings(settings.clone()));
+                        true
+                    }
+                    Command::ToggleNotices => {
+                        settings.notices = !settings.notices;
+                        settings.save();
+                        with_app(|app| app.apply_settings(settings.clone()));
+                        true
+                    }
+                    Command::ToggleLyricsIsland => {
+                        settings.lyrics_island = !settings.lyrics_island;
+                        settings.save();
+                        with_app(|app| app.apply_settings(settings.clone()));
+                        true
+                    }
+                    Command::ToggleLyricsProjector => {
+                        settings.lyrics_projector = !settings.lyrics_projector;
+                        settings.save();
+                        with_app(|app| app.apply_settings(settings.clone()));
+                        true
+                    }
+                    Command::ToggleRealBars => {
+                        settings.real_bars = !settings.real_bars;
+                        settings.save();
+                        with_app(|app| app.apply_settings(settings.clone()));
+                        true
+                    }
+                    Command::ToggleHighRefresh => {
+                        settings.high_refresh = !settings.high_refresh;
+                        settings.save();
+                        with_app(|app| app.apply_settings(settings.clone()));
+                        true
+                    }
+                    Command::ToggleTranslucent => {
+                        settings.translucent = !settings.translucent;
+                        settings.save();
+                        with_app(|app| app.apply_settings(settings.clone()));
+                        true
+                    }
+                    Command::SetHotkey(h) => {
+                        settings.hotkey = h;
+                        settings.save();
+                        with_app(|app| app.apply_settings(settings.clone()));
+                        true
+                    }
+                    Command::ToggleFullscreen => {
+                        settings.hide_fullscreen = !settings.hide_fullscreen;
+                        settings.save();
+                        with_app(|app| app.apply_settings(settings.clone()));
+                        true
+                    }
+                });
             }
             LRESULT(0)
         }
@@ -2229,6 +2728,9 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             LRESULT(0)
         }
         WM_DESTROY => {
+            unsafe {
+                let _ = KillTimer(Some(hwnd), FULLSCREEN_TIMER);
+            }
             fullscreen::unregister(hwnd);
             with_app(|app| app.tray.remove());
             unsafe { PostQuitMessage(0) };
@@ -2252,9 +2754,9 @@ mod tests {
     #[test]
     fn en_reposo_no_hay_temporizador() {
         // Nada se mueve: el temporizador se apaga (0 % de CPU).
-        assert_eq!(timer_for(&Motion::default(), false), None);
+        assert_eq!(timer_for(&Motion::default(), false, FRAME_MS), None);
         // Cada cosa pide solo el ritmo que necesita.
-        let only = |m: Motion| timer_for(&m, false);
+        let only = |m: Motion| timer_for(&m, false, FRAME_MS);
         let progress = Motion {
             progress: true,
             ..Default::default()
@@ -2275,7 +2777,13 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(only(sliding), Some(FRAME_MS));
-        assert_eq!(timer_for(&Motion::default(), true), Some(FRAME_MS));
+        assert_eq!(
+            timer_for(&Motion::default(), true, FRAME_MS),
+            Some(FRAME_MS)
+        );
+        // Con alta tasa de refresco (por ejemplo 240 Hz = 4 ms, 120 Hz = 8 ms):
+        assert_eq!(timer_for(&Motion::default(), true, 4), Some(4));
+        assert_eq!(timer_for(&Motion::default(), true, 8), Some(8));
         // Con letra, despierta justo al verso siguiente aunque no haya otra cosa.
         let verse = Motion {
             lyric_ms: Some(1200),
@@ -2288,6 +2796,25 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(only(both), Some(100));
+        // Con la franja del borde y proyector de letra activo:
+        let projecting = Motion {
+            projecting: true,
+            edge_ms: Some(1000),
+            ..Default::default()
+        };
+        assert_eq!(only(projecting), Some(FRAME_MS));
+        let strip_verse = Motion {
+            edge_ms: Some(1000),
+            lyric_ms: Some(300),
+            ..Default::default()
+        };
+        assert_eq!(only(strip_verse), Some(300));
+        let strip_edge_first = Motion {
+            edge_ms: Some(400),
+            lyric_ms: Some(1500),
+            ..Default::default()
+        };
+        assert_eq!(only(strip_edge_first), Some(400));
     }
 
     #[test]
@@ -2373,13 +2900,23 @@ mod tests {
             .unwrap();
             let (w, h) = (723u32, 217u32);
             let mut surface = Surface::new(w, h).unwrap();
-            for px in surface.pixmap.data_mut().as_chunks_mut::<4>().0.iter_mut().take(5000) {
+            for px in surface
+                .pixmap
+                .data_mut()
+                .as_chunks_mut::<4>()
+                .0
+                .iter_mut()
+                .take(5000)
+            {
                 *px = [20, 20, 20, 255];
             }
             surface.copy_to_dib();
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
             let pos = POINT { x: -2000, y: -2000 };
-            let size = SIZE { cx: w as i32, cy: h as i32 };
+            let size = SIZE {
+                cx: w as i32,
+                cy: h as i32,
+            };
             let src = POINT::default();
             let blend = BLENDFUNCTION {
                 BlendOp: AC_SRC_OVER as u8,
@@ -2387,7 +2924,12 @@ mod tests {
                 SourceConstantAlpha: 255,
                 AlphaFormat: AC_SRC_ALPHA as u8,
             };
-            let small = RECT { left: 300, top: 0, right: 420, bottom: 60 };
+            let small = RECT {
+                left: 300,
+                top: 0,
+                right: 420,
+                bottom: 60,
+            };
             let runs = 300;
             let cases: [(&str, Option<&RECT>); 2] =
                 [("ventana entera", None), ("solo la isla", Some(&small))];
@@ -2468,6 +3010,7 @@ mod tests {
                     sung: Some(10.0 + (i % 20) as f32),
                     status: None,
                 }),
+                false,
             )
             .unwrap();
             surface.copy_to_dib();
@@ -2478,7 +3021,16 @@ mod tests {
                 h,
             );
             let zone = (island.x0, island.y0, island.x1, island.y1);
-            text.draw(surface.dib(), w, h, zone, &areas, "Para No Verte Mas", "La Mosca", 0.0);
+            text.draw(
+                surface.dib(),
+                w,
+                h,
+                zone,
+                &areas,
+                "Para No Verte Mas",
+                "La Mosca",
+                0.0,
+            );
             totals[0] += (mid - start).as_secs_f64();
             totals[1] += mid.elapsed().as_secs_f64();
         }
@@ -2503,7 +3055,16 @@ mod tests {
         for (name, title) in [("solo titulo", "Para No Verte Mas"), ("sin texto", "")] {
             let start = Instant::now();
             for _ in 0..runs {
-                text.draw(surface.dib(), w, h, (0, 0, w, h), &only_title, title, "", 0.0);
+                text.draw(
+                    surface.dib(),
+                    w,
+                    h,
+                    (0, 0, w, h),
+                    &only_title,
+                    title,
+                    "",
+                    0.0,
+                );
             }
             println!("{name}: {:.3} ms", ms(start.elapsed().as_secs_f64()));
         }
@@ -2533,21 +3094,46 @@ mod tests {
         let frame = |surface: &mut Surface, text: &mut TextRenderer| {
             surface.copy_to_dib();
             let start = Instant::now();
-            text.draw(surface.dib(), w, h, (0, 0, w, h), &areas, "Notch Isla", "Prueba", 0.0);
+            text.draw(
+                surface.dib(),
+                w,
+                h,
+                (0, 0, w, h),
+                &areas,
+                "Notch Isla",
+                "Prueba",
+                0.0,
+            );
             start.elapsed()
         };
         let first = frame(&mut surface, &mut text);
         // El título se ve: hay píxeles claros sobre el negro.
-        let bright = surface.dib().as_chunks::<4>().0.iter().filter(|p| p[1] > 128).count();
+        let bright = surface
+            .dib()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|p| p[1] > 128)
+            .count();
         assert!(bright > 30, "pixeles de texto: {bright}");
         // El mismo cuadro otra vez: se reutiliza lo dibujado (igual de claro y más barato).
         let mut again = Duration::ZERO;
         for _ in 0..20 {
             again += frame(&mut surface, &mut text);
         }
-        let repeat_bright = surface.dib().as_chunks::<4>().0.iter().filter(|p| p[1] > 128).count();
+        let repeat_bright = surface
+            .dib()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|p| p[1] > 128)
+            .count();
         assert_eq!(repeat_bright, bright);
-        assert!(again / 20 < first, "repetido: {:?}, primero: {first:?}", again / 20);
+        assert!(
+            again / 20 < first,
+            "repetido: {:?}, primero: {first:?}",
+            again / 20
+        );
     }
 
     #[test]
@@ -2575,5 +3161,31 @@ mod tests {
         let px = |x: usize, y: usize| surface.pixmap.data()[(y * 8 + x) * 4..][..4].to_vec();
         assert_eq!(px(3, 2), [0, 0, 0, 0]);
         assert_eq!(px(0, 0), [255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn limites_de_la_isla_en_pantalla() {
+        let rc = RECT {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1080,
+        };
+        let (lw, _) = island::window_size();
+        let scale = 1.0;
+        let width = (lw * scale).ceil() as u32;
+        let (min_x, max_x) = island_bounds(&rc, width, scale);
+        let center_x = rc.left + ((rc.right - rc.left) - width as i32) / 2;
+
+        // La posición centrada queda dentro de los límites:
+        assert!(center_x >= min_x && center_x <= max_x);
+
+        // Al margen máximo izquierdo y derecho, la isla expandida no se sale de la pantalla:
+        let half_w = width as i32 / 2;
+        let min_cx = min_x + half_w;
+        let max_cx = max_x + half_w;
+        let max_island_w = (island::EXPANDED_LYRICS.0 * scale).round() as i32;
+        assert!(min_cx - max_island_w / 2 >= rc.left);
+        assert!(max_cx + max_island_w / 2 <= rc.right);
     }
 }

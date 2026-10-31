@@ -97,15 +97,53 @@ static OPEN: AtomicBool = AtomicBool::new(false);
 /// Ventana del menú abierto, para el gancho de mouse.
 static MENU_HWND: AtomicIsize = AtomicIsize::new(0);
 
+/// Acción que debe tomar el menú tras pulsar una opción.
+pub enum MenuAction {
+    /// Cierra el menú (la opción ya se procesó).
+    Close,
+    /// Mantiene el menú abierto y actualiza las opciones (por ejemplo, alternar casillas de verificación).
+    KeepOpen(Vec<Item>),
+}
+
+type MenuCallback = (*mut (), unsafe fn(*mut (), usize) -> MenuAction);
+
+thread_local! {
+    static HANDLER: std::cell::Cell<Option<MenuCallback>> = const { std::cell::Cell::new(None) };
+}
+
 /// Abre el menú junto al cursor y espera. Devuelve el `id` elegido, o `None` si se cerró sin
 /// elegir (o si no se pudo crear: entonces no pasa nada más).
 pub fn show(items: Vec<Item>) -> Option<usize> {
+    let mut chosen = None;
+    show_interactive(items, |id| {
+        chosen = Some(id);
+        MenuAction::Close
+    });
+    chosen
+}
+
+/// Abre el menú interactivo, permitiendo procesar opciones y mantenerlo abierto con nuevos items.
+pub fn show_interactive<F>(items: Vec<Item>, mut on_action: F)
+where
+    F: FnMut(usize) -> MenuAction,
+{
     if OPEN.swap(true, Ordering::SeqCst) {
-        return None;
+        return;
     }
-    let result = run(items).ok().flatten();
-    OPEN.store(false, Ordering::SeqCst);
-    result
+    unsafe fn call_handler<F: FnMut(usize) -> MenuAction>(ptr: *mut (), id: usize) -> MenuAction {
+        unsafe { (*(ptr as *mut F))(id) }
+    }
+    let ptr = &mut on_action as *mut F as *mut ();
+    HANDLER.set(Some((ptr, call_handler::<F>)));
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            HANDLER.set(None);
+            OPEN.store(false, Ordering::SeqCst);
+        }
+    }
+    let _guard = Reset;
+    let _ = run(items);
 }
 
 /// Opción ya maquetada.
@@ -184,6 +222,31 @@ struct State {
     opened: Instant,
     /// `Some` al terminar: la opción elegida o `None` si se cerró.
     done: Option<Option<usize>>,
+    dwrite: IDWriteFactory,
+    font: IDWriteTextFormat,
+    label_font: IDWriteTextFormat,
+}
+
+impl State {
+    fn update_items(&mut self, items: Vec<Item>) {
+        let mut texts = Vec::new();
+        let entries = build(
+            &self.dwrite,
+            &self.font,
+            &self.label_font,
+            items,
+            &mut texts,
+        );
+        let width = text_width(&entries, &texts, self.scale, false).clamp(MIN_W, MAX_W);
+        self.entries = entries;
+        self.texts = texts;
+        self.width = self.width.max(width);
+        if self.open.len() < self.entries.len() {
+            self.open.resize(self.entries.len(), false);
+        }
+        relayout(self);
+        render(self);
+    }
 }
 
 thread_local! {
@@ -257,6 +320,9 @@ fn run(items: Vec<Item>) -> Result<Option<usize>> {
                 target,
                 opened: Instant::now(),
                 done: None,
+                dwrite,
+                font,
+                label_font,
             })
         });
         with_state(|st| {
@@ -660,10 +726,26 @@ fn row_at(st: &State, y: f32) -> Option<usize> {
         .filter(|&i| st.rows[i].kind.selectable())
 }
 
-/// Elige la fila `i`: una opción termina el menú; un grupo se despliega o se pliega.
+/// Elige la fila `i`: una opción termina el menú o lo mantiene abierto según `MenuAction`; un grupo se despliega o se pliega.
 fn activate(st: &mut State, i: usize) {
     match st.rows.get(i).map(|r| r.kind) {
-        Some(RowKind::Action { id, .. }) => st.done = Some(Some(id)),
+        Some(RowKind::Action { id, .. }) => {
+            let action = HANDLER.with(|cell| {
+                if let Some((ptr, invoke)) = cell.get() {
+                    unsafe { invoke(ptr, id) }
+                } else {
+                    MenuAction::Close
+                }
+            });
+            match action {
+                MenuAction::Close => {
+                    st.done = Some(Some(id));
+                }
+                MenuAction::KeepOpen(items) => {
+                    st.update_items(items);
+                }
+            }
+        }
         Some(RowKind::Group { index, .. }) => {
             st.open[index] = !st.open[index];
             relayout(st);

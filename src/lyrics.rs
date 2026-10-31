@@ -111,7 +111,10 @@ pub fn sung(lines: &[Verse], i: usize, t: f32) -> (f32, f32) {
         return (0.0, 0.0);
     };
     let len = v.text.encode_utf16().count() as f32;
-    let gap = lines.get(i + 1).map_or(f32::MAX, |n| n.start - v.start).max(0.0);
+    let gap = lines
+        .get(i + 1)
+        .map_or(f32::MAX, |n| n.start - v.start)
+        .max(0.0);
 
     let mut marks: Vec<(f32, f32)> = Vec::with_capacity(v.words.len() + 2);
     if v.words.first().is_none_or(|&(_, at)| at > 0) {
