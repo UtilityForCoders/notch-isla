@@ -60,11 +60,13 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::Shell::NIN_BALLOONUSERCLICK;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetCursorPos, GetMessageW, KillTimer,
-    LoadCursorW, PostMessageW, PostQuitMessage, RegisterClassExW, SetTimer, SetWindowPos, ShowWindow, TranslateMessage,
-    UpdateLayeredWindow, UpdateLayeredWindowIndirect, IDC_ARROW, UPDATELAYEREDWINDOWINFO, MA_NOACTIVATE, MB_ICONASTERISK, MSG, SW_HIDE,
-    SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SW_SHOWNOACTIVATE, ULW_ALPHA, WM_APP, WM_CONTEXTMENU, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED,
-    WM_CAPTURECHANGED, WM_HOTKEY, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONUP, WM_TIMER,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetCursorPos, GetMessageW,
+    KillTimer, LoadCursorW, PostMessageW, PostQuitMessage, RegisterClassExW, SetTimer,
+    SetWindowPos, ShowWindow, TranslateMessage, UpdateLayeredWindow, UpdateLayeredWindowIndirect,
+    IDC_ARROW, MA_NOACTIVATE, MB_ICONASTERISK, MSG, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
+    SW_HIDE, SW_SHOWNOACTIVATE, ULW_ALPHA, UPDATELAYEREDWINDOWINFO, WM_APP, WM_CAPTURECHANGED,
+    WM_CONTEXTMENU, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_HOTKEY, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONUP, WM_TIMER,
     WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
@@ -368,16 +370,14 @@ impl HighRefreshDriver {
                     }
 
                     let is_active = *thread_active.0.lock().unwrap();
-                    if is_active {
-                        if !thread_pending.swap(true, Ordering::SeqCst) {
-                            unsafe {
-                                let _ = PostMessageW(
-                                    Some(hwnd),
-                                    WM_ANIM_TICK,
-                                    windows::Win32::Foundation::WPARAM(0),
-                                    windows::Win32::Foundation::LPARAM(0),
-                                );
-                            }
+                    if is_active && !thread_pending.swap(true, Ordering::SeqCst) {
+                        unsafe {
+                            let _ = PostMessageW(
+                                Some(hwnd),
+                                WM_ANIM_TICK,
+                                windows::Win32::Foundation::WPARAM(0),
+                                windows::Win32::Foundation::LPARAM(0),
+                            );
                         }
                     }
                 }
@@ -934,7 +934,12 @@ impl App {
         }
         // Recién activada: se pide la letra de lo que suena ahora.
         self.request_lyrics();
-        self.lyrics_spring.set_target(if self.settings.lyrics_island { 1.0 } else { 0.0 });
+        self.lyrics_spring
+            .set_target(if self.settings.lyrics_island {
+                1.0
+            } else {
+                0.0
+            });
         self.start_animation();
         if delay_changed {
             if self.idle_hidden && self.settings.hide_delay == 0 {
@@ -978,7 +983,12 @@ impl App {
             // El botón está en la isla expandida: cambia la letra de la isla, no la del proyector.
             self.settings.lyrics_island = !self.settings.lyrics_island;
             self.settings.save();
-            self.lyrics_spring.set_target(if self.settings.lyrics_island { 1.0 } else { 0.0 });
+            self.lyrics_spring
+                .set_target(if self.settings.lyrics_island {
+                    1.0
+                } else {
+                    0.0
+                });
             self.request_lyrics();
         } else {
             media::press(button);
@@ -1079,7 +1089,7 @@ impl App {
     fn redraw(&mut self) {
         let motion = self.render();
         let target = timer_for(&motion, false, self.frame_ms());
-        if target.is_some_and(|needed| self.timer_ms.map_or(true, |cur| needed < cur))
+        if target.is_some_and(|needed| self.timer_ms.is_none_or(|cur| needed < cur))
             || self.timer_ms.is_none()
         {
             self.set_timer(target);
@@ -1091,9 +1101,8 @@ impl App {
         if self.timer_ms == ms {
             return;
         }
-        let needs_high_refresh = self.settings.high_refresh
-            && self.hz > 60
-            && ms.is_some_and(|interval| interval < 15);
+        let needs_high_refresh =
+            self.settings.high_refresh && self.hz > 60 && ms.is_some_and(|interval| interval < 15);
 
         unsafe {
             if needs_high_refresh {
@@ -1351,9 +1360,11 @@ impl App {
         unsafe {
             let _ = GetCursorPos(&mut pt);
         }
-        let Some((start_cursor_x, start_pos_x, has_moved)) = self.drag_island.as_ref().map(|d| {
-            (d.start_cursor_x, d.start_pos_x, d.has_moved)
-        }) else {
+        let Some((start_cursor_x, start_pos_x, has_moved)) = self
+            .drag_island
+            .as_ref()
+            .map(|d| (d.start_cursor_x, d.start_pos_x, d.has_moved))
+        else {
             return;
         };
         let delta = pt.x - start_cursor_x;
@@ -1769,9 +1780,7 @@ impl App {
         let mut lyric_ms = None;
         let mut project_sung = None;
         let mut project_painting = false;
-        let should_project = self.spring.value < 0.4
-            && self.settings.lyrics_projector
-            && playing;
+        let should_project = self.spring.value < 0.4 && self.settings.lyrics_projector && playing;
         let frame_ms = self.frame_ms();
         let lyric = if should_project {
             self.media.as_ref().and_then(|m| {
@@ -2742,7 +2751,10 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(only(sliding), Some(FRAME_MS));
-        assert_eq!(timer_for(&Motion::default(), true, FRAME_MS), Some(FRAME_MS));
+        assert_eq!(
+            timer_for(&Motion::default(), true, FRAME_MS),
+            Some(FRAME_MS)
+        );
         // Con alta tasa de refresco (por ejemplo 240 Hz = 4 ms, 120 Hz = 8 ms):
         assert_eq!(timer_for(&Motion::default(), true, 4), Some(4));
         assert_eq!(timer_for(&Motion::default(), true, 8), Some(8));
@@ -2862,13 +2874,23 @@ mod tests {
             .unwrap();
             let (w, h) = (723u32, 217u32);
             let mut surface = Surface::new(w, h).unwrap();
-            for px in surface.pixmap.data_mut().as_chunks_mut::<4>().0.iter_mut().take(5000) {
+            for px in surface
+                .pixmap
+                .data_mut()
+                .as_chunks_mut::<4>()
+                .0
+                .iter_mut()
+                .take(5000)
+            {
                 *px = [20, 20, 20, 255];
             }
             surface.copy_to_dib();
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
             let pos = POINT { x: -2000, y: -2000 };
-            let size = SIZE { cx: w as i32, cy: h as i32 };
+            let size = SIZE {
+                cx: w as i32,
+                cy: h as i32,
+            };
             let src = POINT::default();
             let blend = BLENDFUNCTION {
                 BlendOp: AC_SRC_OVER as u8,
@@ -2876,7 +2898,12 @@ mod tests {
                 SourceConstantAlpha: 255,
                 AlphaFormat: AC_SRC_ALPHA as u8,
             };
-            let small = RECT { left: 300, top: 0, right: 420, bottom: 60 };
+            let small = RECT {
+                left: 300,
+                top: 0,
+                right: 420,
+                bottom: 60,
+            };
             let runs = 300;
             let cases: [(&str, Option<&RECT>); 2] =
                 [("ventana entera", None), ("solo la isla", Some(&small))];
@@ -2968,7 +2995,16 @@ mod tests {
                 h,
             );
             let zone = (island.x0, island.y0, island.x1, island.y1);
-            text.draw(surface.dib(), w, h, zone, &areas, "Para No Verte Mas", "La Mosca", 0.0);
+            text.draw(
+                surface.dib(),
+                w,
+                h,
+                zone,
+                &areas,
+                "Para No Verte Mas",
+                "La Mosca",
+                0.0,
+            );
             totals[0] += (mid - start).as_secs_f64();
             totals[1] += mid.elapsed().as_secs_f64();
         }
@@ -2993,7 +3029,16 @@ mod tests {
         for (name, title) in [("solo titulo", "Para No Verte Mas"), ("sin texto", "")] {
             let start = Instant::now();
             for _ in 0..runs {
-                text.draw(surface.dib(), w, h, (0, 0, w, h), &only_title, title, "", 0.0);
+                text.draw(
+                    surface.dib(),
+                    w,
+                    h,
+                    (0, 0, w, h),
+                    &only_title,
+                    title,
+                    "",
+                    0.0,
+                );
             }
             println!("{name}: {:.3} ms", ms(start.elapsed().as_secs_f64()));
         }
@@ -3023,21 +3068,46 @@ mod tests {
         let frame = |surface: &mut Surface, text: &mut TextRenderer| {
             surface.copy_to_dib();
             let start = Instant::now();
-            text.draw(surface.dib(), w, h, (0, 0, w, h), &areas, "Notch Isla", "Prueba", 0.0);
+            text.draw(
+                surface.dib(),
+                w,
+                h,
+                (0, 0, w, h),
+                &areas,
+                "Notch Isla",
+                "Prueba",
+                0.0,
+            );
             start.elapsed()
         };
         let first = frame(&mut surface, &mut text);
         // El título se ve: hay píxeles claros sobre el negro.
-        let bright = surface.dib().as_chunks::<4>().0.iter().filter(|p| p[1] > 128).count();
+        let bright = surface
+            .dib()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|p| p[1] > 128)
+            .count();
         assert!(bright > 30, "pixeles de texto: {bright}");
         // El mismo cuadro otra vez: se reutiliza lo dibujado (igual de claro y más barato).
         let mut again = Duration::ZERO;
         for _ in 0..20 {
             again += frame(&mut surface, &mut text);
         }
-        let repeat_bright = surface.dib().as_chunks::<4>().0.iter().filter(|p| p[1] > 128).count();
+        let repeat_bright = surface
+            .dib()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|p| p[1] > 128)
+            .count();
         assert_eq!(repeat_bright, bright);
-        assert!(again / 20 < first, "repetido: {:?}, primero: {first:?}", again / 20);
+        assert!(
+            again / 20 < first,
+            "repetido: {:?}, primero: {first:?}",
+            again / 20
+        );
     }
 
     #[test]

@@ -95,10 +95,9 @@ pub fn refresh_rate(handle: HMONITOR) -> u32 {
             &mut devmode,
         )
         .as_bool()
+            && devmode.dmDisplayFrequency > 1
         {
-            if devmode.dmDisplayFrequency > 1 {
-                return devmode.dmDisplayFrequency;
-            }
+            return devmode.dmDisplayFrequency;
         }
     }
     60
@@ -118,14 +117,17 @@ mod tests {
         let monitor = find("");
         let hz = refresh_rate(monitor);
         println!("Monitor Hz: {hz}");
-        assert!(hz >= 30 && hz <= 1000);
+        assert!((30..=1000).contains(&hz));
         unsafe {
             let start = std::time::Instant::now();
             for _ in 0..10 {
                 let _ = DwmFlush();
             }
             let avg_ms = start.elapsed().as_secs_f64() * 1000.0 / 10.0;
-            println!("DwmFlush avg ms per frame: {avg_ms:.2} ms ({:.1} fps)", 1000.0 / avg_ms);
+            println!(
+                "DwmFlush avg ms per frame: {avg_ms:.2} ms ({:.1} fps)",
+                1000.0 / avg_ms
+            );
         }
     }
 }

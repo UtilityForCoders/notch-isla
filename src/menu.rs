@@ -105,8 +105,10 @@ pub enum MenuAction {
     KeepOpen(Vec<Item>),
 }
 
+type MenuCallback = (*mut (), unsafe fn(*mut (), usize) -> MenuAction);
+
 thread_local! {
-    static HANDLER: std::cell::Cell<Option<(*mut (), unsafe fn(*mut (), usize) -> MenuAction)>> = const { std::cell::Cell::new(None) };
+    static HANDLER: std::cell::Cell<Option<MenuCallback>> = const { std::cell::Cell::new(None) };
 }
 
 /// Abre el menú junto al cursor y espera. Devuelve el `id` elegido, o `None` si se cerró sin
@@ -228,7 +230,13 @@ struct State {
 impl State {
     fn update_items(&mut self, items: Vec<Item>) {
         let mut texts = Vec::new();
-        let entries = build(&self.dwrite, &self.font, &self.label_font, items, &mut texts);
+        let entries = build(
+            &self.dwrite,
+            &self.font,
+            &self.label_font,
+            items,
+            &mut texts,
+        );
         let width = text_width(&entries, &texts, self.scale, false).clamp(MIN_W, MAX_W);
         self.entries = entries;
         self.texts = texts;

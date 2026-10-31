@@ -420,7 +420,6 @@ pub fn show_island_menu(
     }
 }
 
-
 /// Convierte el dibujo de `island::tray_icon` en un HICON del tamaño que usa la bandeja.
 fn make_icon() -> Result<HICON> {
     unsafe {

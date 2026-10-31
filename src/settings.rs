@@ -65,7 +65,7 @@ impl Settings {
             hotkey,
             offset_x: read_dword(w!("OffsetX")).map_or(0, |v| v as i32),
             high_refresh: read_dword(w!("HighRefresh")).is_some_and(|v| v != 0),
-            translucent: read_dword(w!("Translucent")).map_or(true, |v| v != 0),
+            translucent: read_dword(w!("Translucent")).is_none_or(|v| v != 0),
         }
     }
 

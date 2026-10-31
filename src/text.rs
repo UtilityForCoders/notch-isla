@@ -12,18 +12,19 @@ use windows::Win32::Graphics::Direct2D::Common::{
     D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_PIXEL_FORMAT, D2D_RECT_F,
 };
 use windows::Win32::Graphics::Direct2D::{
-    D2D1CreateFactory, ID2D1RenderTarget, ID2D1Factory, ID2D1SolidColorBrush,
-    D2D1_ANTIALIAS_MODE_ALIASED,
-    D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_FEATURE_LEVEL_DEFAULT,
-    D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_SOFTWARE, D2D1_RENDER_TARGET_USAGE_NONE,
-    D2D1_ELLIPSE, D2D1_ROUNDED_RECT, D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE,
+    D2D1CreateFactory, ID2D1Factory, ID2D1RenderTarget, ID2D1SolidColorBrush,
+    D2D1_ANTIALIAS_MODE_ALIASED, D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE,
+    D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_FEATURE_LEVEL_DEFAULT, D2D1_RENDER_TARGET_PROPERTIES,
+    D2D1_RENDER_TARGET_TYPE_SOFTWARE, D2D1_RENDER_TARGET_USAGE_NONE, D2D1_ROUNDED_RECT,
+    D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE,
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWriteCreateFactory, IDWriteFactory, IDWriteTextFormat, IDWriteTextLayout,
     DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
     DWRITE_FONT_WEIGHT, DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_WEIGHT_REGULAR,
     DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_HIT_TEST_METRICS, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
-    DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_METRICS, DWRITE_WORD_WRAPPING_NO_WRAP, DWRITE_WORD_WRAPPING_WRAP,
+    DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_METRICS, DWRITE_WORD_WRAPPING_NO_WRAP,
+    DWRITE_WORD_WRAPPING_WRAP,
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Imaging::{
@@ -113,7 +114,8 @@ impl TextRenderer {
             let wic: IWICImagingFactory =
                 CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER)?;
             // Imagen mínima hasta el primer cuadro, que la crea del tamaño de la ventana.
-            let canvas = wic.CreateBitmap(1, 1, &GUID_WICPixelFormat32bppPBGRA, WICBitmapCacheOnDemand)?;
+            let canvas =
+                wic.CreateBitmap(1, 1, &GUID_WICPixelFormat32bppPBGRA, WICBitmapCacheOnDemand)?;
             let (target, brush) = make_target(&d2d, &canvas)?;
             let dwrite: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
             let title = make_format(&dwrite, DWRITE_FONT_WEIGHT_SEMI_BOLD, 14.5 * scale)?;
@@ -258,7 +260,8 @@ impl TextRenderer {
             self.target.BeginDraw();
             self.target.SetTransform(&Matrix3x2::identity());
             // Solo la zona que cambió: se borra el texto del cuadro anterior y se dibuja el nuevo.
-            self.target.PushAxisAlignedClip(&zone_rect, D2D1_ANTIALIAS_MODE_ALIASED);
+            self.target
+                .PushAxisAlignedClip(&zone_rect, D2D1_ANTIALIAS_MODE_ALIASED);
             self.target.Clear(Some(&D2D1_COLOR_F::default()));
 
             // 1. Título y artista
@@ -334,7 +337,8 @@ impl TextRenderer {
                         right: lx + lw,
                         bottom: cy + 70.0 * s,
                     };
-                    self.target.PushAxisAlignedClip(&clip, D2D1_ANTIALIAS_MODE_ALIASED);
+                    self.target
+                        .PushAxisAlignedClip(&clip, D2D1_ANTIALIAS_MODE_ALIASED);
 
                     if let Some(status) = &lyrics.status {
                         if let Some(line) = cached_line(
@@ -418,7 +422,8 @@ impl TextRenderer {
 
             // 4. Globo con el tiempo al que se saltaría, encima de todo.
             if let Some(tip) = &areas.seek {
-                if let Some(line) = line_for(&self.dwrite, &self.time, &mut self.seek_line, &tip.text)
+                if let Some(line) =
+                    line_for(&self.dwrite, &self.time, &mut self.seek_line, &tip.text)
                 {
                     let (w, h) = (line.width + 14.0 * s, 20.0 * s);
                     let x = (tip.x - w / 2.0).clamp(tip.min_x, (tip.max_x - w).max(tip.min_x));
@@ -448,7 +453,9 @@ impl TextRenderer {
                     let _ = line.layout.SetMaxWidth(w);
                     let _ = line.layout.SetMaxHeight(h);
                     let _ = line.layout.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
-                    let _ = line.layout.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+                    let _ = line
+                        .layout
+                        .SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
                     self.brush.SetColor(&D2D1_COLOR_F {
                         r: 1.0,
                         g: 1.0,
@@ -520,7 +527,8 @@ impl TextRenderer {
             let Ok(lock) = canvas.Lock(&rect, WICBitmapLockRead.0 as u32) else {
                 return;
             };
-            let (Ok(stride), mut size, mut data) = (lock.GetStride(), 0u32, std::ptr::null_mut()) else {
+            let (Ok(stride), mut size, mut data) = (lock.GetStride(), 0u32, std::ptr::null_mut())
+            else {
                 return;
             };
             if lock.GetDataPointer(&mut size, &mut data).is_err() || data.is_null() {
@@ -533,7 +541,12 @@ impl TextRenderer {
                 let s = &src[row * stride as usize..][..row_bytes];
                 let at = (y0 as usize + row) * dib_stride + x0 as usize * 4;
                 let d = &mut dib[at..at + row_bytes];
-                for (d, s) in d.as_chunks_mut::<4>().0.iter_mut().zip(s.as_chunks::<4>().0) {
+                for (d, s) in d
+                    .as_chunks_mut::<4>()
+                    .0
+                    .iter_mut()
+                    .zip(s.as_chunks::<4>().0)
+                {
                     let a = s[3] as u32;
                     if a == 0 {
                         continue;
@@ -557,7 +570,9 @@ fn signature(areas: &LayoutAreas, title: &str, subtitle: &str) -> u64 {
     let a = &areas.text;
     [a.x, a.w, a.cy, a.alpha].into_iter().for_each(&mut f);
     if let Some(t) = &areas.time {
-        [t.cur_x, t.rem_x, t.y, t.alpha].into_iter().for_each(&mut f);
+        [t.cur_x, t.rem_x, t.y, t.alpha]
+            .into_iter()
+            .for_each(&mut f);
     }
     if let Some(l) = &areas.lyrics {
         [l.x, l.w, l.cy, l.shift, l.alpha, l.sung.unwrap_or(-1.0)]
@@ -565,12 +580,22 @@ fn signature(areas: &LayoutAreas, title: &str, subtitle: &str) -> u64 {
             .for_each(&mut f);
     }
     if let Some(s) = &areas.seek {
-        [s.x, s.bar_cy, s.min_x, s.max_x, s.alpha].into_iter().for_each(&mut f);
+        [s.x, s.bar_cy, s.min_x, s.max_x, s.alpha]
+            .into_iter()
+            .for_each(&mut f);
     }
     (title, subtitle).hash(&mut h);
-    areas.time.as_ref().map(|t| (&t.current, &t.remaining)).hash(&mut h);
+    areas
+        .time
+        .as_ref()
+        .map(|t| (&t.current, &t.remaining))
+        .hash(&mut h);
     areas.seek.as_ref().map(|s| &s.text).hash(&mut h);
-    areas.lyrics.as_ref().map(|l| (&l.lines, &l.status)).hash(&mut h);
+    areas
+        .lyrics
+        .as_ref()
+        .map(|l| (&l.lines, &l.status))
+        .hash(&mut h);
     h.finish()
 }
 
@@ -637,7 +662,10 @@ fn draw_simple_text(
             }
             brush.SetColor(&D2D1_COLOR_F { r, g, b, a });
             target.DrawTextLayout(
-                Vector2 { X: x, Y: y }, &line.layout, brush, D2D1_DRAW_TEXT_OPTIONS_NONE,
+                Vector2 { X: x, Y: y },
+                &line.layout,
+                brush,
+                D2D1_DRAW_TEXT_OPTIONS_NONE,
             );
         }
     }
@@ -970,8 +998,8 @@ mod tests {
     #[test]
     fn la_memoria_de_versos_no_crece() {
         // Una canción entera pasando por el carrusel: se guardan a lo sumo `LYRIC_CACHE`.
-        let dwrite: IDWriteFactory = unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED) }
-            .expect("DirectWrite");
+        let dwrite: IDWriteFactory =
+            unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED) }.expect("DirectWrite");
         let format = make_format(&dwrite, DWRITE_FONT_WEIGHT_REGULAR, 12.5).unwrap();
         let mut cache = Vec::new();
         for i in 0..200 {

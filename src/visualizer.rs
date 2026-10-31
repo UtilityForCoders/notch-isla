@@ -470,7 +470,9 @@ mod tests {
     fn analizar_es_barato() {
         let slack = if cfg!(debug_assertions) { 20.0 } else { 1.0 };
         let mut analyzer = Analyzer::new();
-        let noise: Vec<f32> = (0..FFT).map(|i| ((i * 7919) % 200) as f32 / 400.0 - 0.25).collect();
+        let noise: Vec<f32> = (0..FFT)
+            .map(|i| ((i * 7919) % 200) as f32 / 400.0 - 0.25)
+            .collect();
         let runs = 300;
         let start = std::time::Instant::now();
         for _ in 0..runs {
