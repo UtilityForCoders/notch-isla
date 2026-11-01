@@ -21,10 +21,10 @@ use windows::Win32::System::WinRT::{
     CreateDispatcherQueueController, DispatcherQueueOptions, DQTAT_COM_STA, DQTYPE_THREAD_CURRENT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GetWindow, RegisterClassW, SetWindowPos,
-    ShowWindow, GW_HWNDPREV, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE,
-    SWP_SHOWWINDOW, SW_HIDE, WNDCLASSW, WS_DISABLED, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, DeferWindowPos, DestroyWindow, GetWindow, RegisterClassW,
+    SetWindowPos, ShowWindow, GW_HWNDPREV, HDWP, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER,
+    SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_HIDE, WNDCLASSW, WS_DISABLED, WS_EX_NOACTIVATE,
+    WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 use windows::UI::Composition::Desktop::DesktopWindowTarget;
 use windows::UI::Composition::{
@@ -376,6 +376,39 @@ impl Backdrop {
             self.shown = false;
         }
     }
+
+    /// Desplaza el fondo ya compuesto en la misma operación nativa que el contenido.
+    pub fn defer_move(&self, batch: HDWP, dx: i32) -> Result<HDWP> {
+        if let Some((x, y, _, _)) = self.placement.filter(|_| self.shown) {
+            unsafe {
+                DeferWindowPos(
+                    batch,
+                    self.hwnd,
+                    None,
+                    x + dx,
+                    y,
+                    0,
+                    0,
+                    SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+                )
+            }
+        } else {
+            Ok(batch)
+        }
+    }
+
+    pub fn moved_by(&mut self, dx: i32) {
+        if self.shown {
+            if let Some(placement) = self.placement.as_mut() {
+                placement.0 += dx;
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub fn is_shown(&self) -> bool {
+        self.shown
+    }
 }
 
 impl Drop for Backdrop {
@@ -644,6 +677,27 @@ mod tests {
                 backdrop.place_behind(content);
                 pump();
             }
+            // Trasladar las cuatro capas juntas conserva el texto y el desenfoque sin
+            // volver a pasar por el rasterizador ni por las propiedades de composición.
+            use windows::Win32::UI::WindowsAndMessaging::{BeginDeferWindowPos, EndDeferWindowPos};
+            let batch = BeginDeferWindowPos(4).unwrap();
+            let batch = DeferWindowPos(
+                batch,
+                content,
+                None,
+                250,
+                200,
+                0,
+                0,
+                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+            )
+            .unwrap();
+            let batch = backdrop.defer_move(batch, 50).unwrap();
+            let batch = projector.defer_move(batch, 50).unwrap();
+            EndDeferWindowPos(batch).unwrap();
+            backdrop.moved_by(50);
+            projector.moved_by(50);
+            pump();
             // Captura opcional del patrón propio (no del escritorio completo) para revisión visual.
             if let Ok(path) = std::env::var("NOTCH_BLUR_CAPTURE") {
                 use windows::Win32::Graphics::Gdi::{BitBlt, SRCCOPY};
@@ -668,14 +722,14 @@ mod tests {
             }
             let screen = GetDC(None);
             let mut brightest = 0;
-            for x in 386..414 {
+            for x in 436..464 {
                 for y in 262..274 {
                     brightest = brightest.max(GetPixel(screen, x, y).0 & 255);
                 }
             }
             ReleaseDC(None, screen);
             let screen = GetDC(None);
-            let outside = GetPixel(screen, 400, 290).0;
+            let outside = GetPixel(screen, 450, 290).0;
             ReleaseDC(None, screen);
             projector.hide();
             backdrop.hide();

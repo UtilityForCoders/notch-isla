@@ -28,8 +28,9 @@ use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Gdi::{AC_SRC_ALPHA, AC_SRC_OVER, BLENDFUNCTION};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, RegisterClassExW, ShowWindow,
-    UpdateLayeredWindow, SW_HIDE, SW_SHOWNOACTIVATE, ULW_ALPHA, WNDCLASSEXW, WS_EX_LAYERED,
+    CreateWindowExW, DefWindowProcW, DeferWindowPos, DestroyWindow, GetWindowRect,
+    RegisterClassExW, ShowWindow, UpdateLayeredWindow, HDWP, SWP_NOACTIVATE, SWP_NOSIZE,
+    SWP_NOZORDER, SW_HIDE, SW_SHOWNOACTIVATE, ULW_ALPHA, WNDCLASSEXW, WS_EX_LAYERED,
     WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
@@ -165,6 +166,39 @@ impl Projector {
         self.presence.reset(0.0);
         self.verse = None;
         self.last_frame = Instant::now();
+    }
+
+    pub fn defer_move(&self, batch: HDWP, dx: i32) -> Result<HDWP> {
+        if !self.shown {
+            return Ok(batch);
+        }
+        let mut rect = RECT::default();
+        let batch = unsafe {
+            GetWindowRect(self.hwnd, &mut rect)?;
+            DeferWindowPos(
+                batch,
+                self.hwnd,
+                None,
+                rect.left + dx,
+                rect.top,
+                0,
+                0,
+                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+            )?
+        };
+        if let Some(backdrop) = self.backdrop.as_ref() {
+            backdrop.defer_move(batch, dx)
+        } else {
+            Ok(batch)
+        }
+    }
+
+    pub fn moved_by(&mut self, dx: i32) {
+        if self.shown {
+            if let Some(backdrop) = self.backdrop.as_mut() {
+                backdrop.moved_by(dx);
+            }
+        }
     }
 
     /// Cambió el DPI: letra y ventana se rehacen a la nueva escala.

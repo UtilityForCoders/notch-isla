@@ -69,6 +69,62 @@ fn isla_con_desenfoque_sigue_ocultandose_y_recibiendo_clics() {
             app.update_visibility();
             app.redraw();
         });
+        if std::env::var_os("NOTCH_DRAG_BENCH").is_some() {
+            with_app(|app| {
+                app.settings.hide_delay = 0;
+                app.stop_idle_countdown();
+                app.pos.y = 0;
+                app.presence.reset(1.0);
+                app.spring.reset(1.0);
+            });
+            for translucent in [false, true] {
+                with_app(|app| {
+                    app.settings.translucent = translucent;
+                    app.redraw();
+                    assert_eq!(
+                        app.backdrop
+                            .as_ref()
+                            .is_some_and(|backdrop| backdrop.is_shown()),
+                        translucent,
+                        "el caso medido debe tener el desenfoque realmente activo"
+                    );
+                });
+                let mut times = Vec::new();
+                for frame in 0..240 {
+                    let start = Instant::now();
+                    with_app(|app| {
+                        let rc = app.monitor_rect();
+                        let center =
+                            rc.left + ((rc.right - rc.left) - app.surface.width as i32) / 2;
+                        let offset = if frame < 120 {
+                            frame * 2
+                        } else {
+                            (240 - frame) * 2
+                        };
+                        app.set_island_x(center + offset - 120);
+                    });
+                    let mut msg = MSG::default();
+                    if PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+                        DispatchMessageW(&msg);
+                    }
+                    times.push(start.elapsed().as_secs_f64() * 1000.0);
+                }
+                times.sort_by(f64::total_cmp);
+                eprintln!(
+                    "ARRASTRE blur={translucent}: media={:.3} ms p95={:.3} ms max={:.3} ms",
+                    times.iter().sum::<f64>() / times.len() as f64,
+                    times[228],
+                    times[239]
+                );
+            }
+            with_app(|app| {
+                app.set_timer(None);
+                app.tray.remove();
+            });
+            let _ = DestroyWindow(hwnd);
+            APP.with(|cell| cell.borrow_mut().take());
+            return;
+        }
         let seconds = std::env::var("NOTCH_STRESS_SECONDS")
             .ok()
             .and_then(|value| value.parse::<u64>().ok())

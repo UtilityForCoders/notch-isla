@@ -64,15 +64,16 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::Shell::NIN_BALLOONUSERCLICK;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetCursorPos, GetMessageW,
-    KillTimer, LoadCursorW, PostMessageW, PostQuitMessage, RegisterClassExW, SetTimer,
-    SetWindowPos, ShowWindow, TranslateMessage, UpdateLayeredWindow, UpdateLayeredWindowIndirect,
-    HWND_TOPMOST, IDC_ARROW, MA_NOACTIVATE, MB_ICONASTERISK, MSG, SWP_NOACTIVATE, SWP_NOMOVE,
-    SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOWNOACTIVATE, ULW_ALPHA,
-    UPDATELAYEREDWINDOWINFO, WM_APP, WM_CAPTURECHANGED, WM_CONTEXTMENU, WM_DESTROY,
-    WM_DISPLAYCHANGE, WM_DPICHANGED, WM_HOTKEY, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE,
-    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONUP, WM_TIMER, WNDCLASSEXW, WS_EX_LAYERED,
-    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    BeginDeferWindowPos, CreateWindowExW, DefWindowProcW, DeferWindowPos, DestroyWindow,
+    DispatchMessageW, EndDeferWindowPos, GetCursorPos, GetMessageW, KillTimer, LoadCursorW,
+    PostMessageW, PostQuitMessage, RegisterClassExW, SetTimer, SetWindowPos, ShowWindow,
+    TranslateMessage, UpdateLayeredWindow, UpdateLayeredWindowIndirect, HWND_TOPMOST, IDC_ARROW,
+    MA_NOACTIVATE, MB_ICONASTERISK, MSG, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE,
+    SWP_NOZORDER, SW_HIDE, SW_SHOWNOACTIVATE, ULW_ALPHA, UPDATELAYEREDWINDOWINFO, WM_APP,
+    WM_CAPTURECHANGED, WM_CONTEXTMENU, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_HOTKEY,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONUP,
+    WM_TIMER, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    WS_POPUP,
 };
 
 /// Aviso de "el mouse salió de la ventana" (definido aquí para no cargar todo el módulo Win32_UI_Controls).
@@ -1491,22 +1492,44 @@ impl App {
         let (min_x, max_x) = island_bounds(&rc, self.surface.width, self.scale);
         let clamped_x = target_x.clamp(min_x, max_x);
         if self.pos.x != clamped_x {
+            let dx = clamped_x - self.pos.x;
             self.pos.x = clamped_x;
             self.x_spring.reset(clamped_x as f32);
             let center_x = rc.left + ((rc.right - rc.left) - self.surface.width as i32) / 2;
             self.settings.offset_x = ((clamped_x - center_x) as f32 / self.scale).round() as i32;
-            unsafe {
-                let _ = SetWindowPos(
-                    self.hwnd,
-                    None,
-                    self.pos.x,
-                    self.pos.y,
-                    0,
-                    0,
-                    SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
-                );
+            let moved = (|| -> Result<()> {
+                let mut batch = unsafe {
+                    let batch = BeginDeferWindowPos(4)?;
+                    DeferWindowPos(
+                        batch,
+                        self.hwnd,
+                        None,
+                        self.pos.x,
+                        self.pos.y,
+                        0,
+                        0,
+                        SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+                    )?
+                };
+                if let Some(backdrop) = self.backdrop.as_ref() {
+                    batch = backdrop.defer_move(batch, dx)?;
+                }
+                if let Some(projector) = self.projector.as_ref() {
+                    batch = projector.defer_move(batch, dx)?;
+                }
+                unsafe { EndDeferWindowPos(batch) }
+            })();
+            if moved.is_ok() {
+                if let Some(backdrop) = self.backdrop.as_mut() {
+                    backdrop.moved_by(dx);
+                }
+                if let Some(projector) = self.projector.as_mut() {
+                    projector.moved_by(dx);
+                }
+            } else {
+                // UpdateLayeredWindow vuelve a sincronizar la posición si el lote no se acepta.
+                self.redraw();
             }
-            self.redraw();
         }
     }
 
