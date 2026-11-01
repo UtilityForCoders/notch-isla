@@ -7,7 +7,7 @@ Objetivo: controlar la música que suena en el PC (Spotify, YouTube, etc.) desde
 
 | Paso | Qué hace | Estado |
 |---|---|---|
-| 1 | Píldora negra arriba al centro que se expande con rebote al pasar el mouse | Hecho |
+| 1 | Píldora arriba al centro que se expande con rebote al hacer clic | Hecho |
 | 2 | Leer la canción que suena (título, artista, carátula) vía SMTC | Hecho |
 | 3 | Controles: play/pausa, siguiente, anterior | Hecho |
 | 4 | Ícono en la bandeja, inicio con Windows, una sola instancia, ocultar en pantalla completa y sin música | Hecho |
@@ -51,7 +51,7 @@ cargo run --example icon
 - La isla aparece cuando alguna app reproduce música y se oculta si no hay nada o si una app está a pantalla completa.
 - Si no la usas, a los 3 s (se cambia en la bandeja) sube y se oculta para no tapar lo que hay debajo (pestañas del navegador, etc.). Queda una línea fina en el borde superior, con el avance de la canción en el color de la carátula; lleva el mouse a esa línea para traer la isla de vuelta. **Ctrl + Alt + N** la oculta o la trae en cualquier momento; el atajo se cambia o se desactiva en la bandeja (**Cambiar atajo...** espera la combinación que presiones: Ctrl, Alt o Win más una tecla).
 - Es una píldora flotante arriba al centro. Contraída muestra una mini carátula y barras de audio (con el color de la carátula) que siguen el sonido real de la app que suena: graves, medios y agudos. Se puede volver a la animación simple con **Barras con el sonido real** en la bandeja.
-- Pasa el mouse sobre la píldora para expandirla: en una sola fila, carátula, título, artista y los botones anterior / play-pausa / siguiente.
+- Haz clic sobre la píldora para expandirla: en una sola fila, carátula, título, artista y los botones anterior / play-pausa / siguiente. Ese primer clic solo abre los controles. Al retirar el puntero se encoge tras una breve espera. Si prefieres la apertura automática, activa **Expandir al pasar el puntero** en la bandeja.
 - En la esquina de la carátula, el ícono de la app que suena (Spotify, Chrome...). Si hay varias apps con música, unos puntos bajo la carátula lo indican y un clic en ella pasa a la siguiente.
 - Debajo, una barra de progreso con el color de la carátula; haz clic en ella para saltar a ese punto de la canción (si la app informa el tiempo).
 - Gira la rueda del mouse sobre la isla para subir o bajar el volumen de la app que suena (como en el Mezclador de volumen de Windows); con **Ctrl** apretado cambia el volumen general. La barra muestra el nivel un momento. Si no se encuentra el sonido de la app, la rueda cambia el volumen general. En los navegadores el volumen es el de todo el navegador, no el de una pestaña.
@@ -59,11 +59,12 @@ cargo run --example icon
 - **Letra sincronizada** (opcional): en la bandeja, **Mostrar letra de la canción** tiene dos opciones que se activan por separado. **Con la isla expandida** muestra la letra dentro de la isla como un carrusel que sube un verso cada vez que empieza el siguiente (también se activa con el botón de letra de la isla). **Con la isla encogida** muestra el verso que se canta en un "proyector" bajo la isla: una píldora negra que se ajusta al largo de cada verso, que aparece desvaneciéndose y que sigue a la isla (también cuando se oculta en el borde). Los clics la atraviesan, así que no tapa nada. La letra se pide a [LRCLIB](https://lrclib.net) una vez por canción (se envían título, artista, álbum y duración; ver [PRIVACY.md](PRIVACY.md)). Funciona con las apps que informan el avance de la canción, como Spotify.
 - Si el título o el artista no caben, se desplazan de un lado al otro.
 - **Salida de audio**: al cambiar a otra salida (audífonos, parlantes), la isla baja un momento con su nombre, aunque no haya música. Un clic cierra el aviso.
-- Clic derecho en el ícono de la bandeja:
+- Clic derecho en el ícono de la bandeja: abre el menú nativo de Windows, con submenús y navegación por teclado. Al cambiar un ajuste vuelve a abrirse en el mismo lugar; se cierra con Esc o al hacer clic fuera.
   - **Ocultarse sola tras**: 3, 5, 10 o 30 segundos, o nunca.
   - **Pantalla**: en qué monitor va la isla (si hay más de uno).
   - **Temporizador**: de 5 a 60 minutos; al terminar suena y la isla avisa.
   - **Desenfoque del fondo**: suave, medio, intenso o muy intenso, para la isla y la letra flotante. Se puede desactivar para usar negro opaco. Windows compone el fondo en vivo; si el efecto no está disponible, se usa el fondo opaco.
+  - **Expandir al pasar el puntero**: permite volver al modo de apertura sin clic; desactivado por defecto para evitar expansiones accidentales.
   - **Avisar al cambiar la salida de audio**, **Ocultar en pantalla completa**, **Iniciar con Windows** y **Salir**.
   - Los ajustes se guardan en `HKEY_CURRENT_USER\Software\NotchIsla`.
 - Al minuto de abrirse y luego cada 6 horas, consulta en GitHub si hay una versión nueva (o al momento, con **Buscar actualizaciones** en la bandeja). Si la app está instalada, descarga el instalador en segundo plano, lo verifica (tamaño y SHA-256 publicados por GitHub) y avisa: un clic en el aviso, o en **Instalar la versión X** del menú de la bandeja, actualiza sin ventanas y la isla vuelve a abrirse sola. La isla avisa "Instalando la versión X" antes de cerrarse y, al volver, "Notch Isla se actualizó" o "No se pudo instalar la versión X". Si la instalación falla, un ayudante (una copia temporal de la app) vuelve a abrir la isla igual, así nunca queda cerrada sin aviso. La versión portable solo avisa y abre la página de descarga. Ver [PRIVACY.md](PRIVACY.md).
