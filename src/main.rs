@@ -412,6 +412,7 @@ struct App {
     scale: f32,
     spring: Spring,
     hovered: bool,
+    expanded_by_click: bool,
     /// Intervalo del temporizador de animación, o `None` si está apagado (reposo).
     timer_ms: Option<u32>,
     last_tick: Instant,
@@ -513,6 +514,7 @@ impl App {
             scale,
             spring: Spring::new(0.0, EXPAND_SPRING.0, EXPAND_SPRING.1),
             hovered: false,
+            expanded_by_click: false,
             timer_ms: None,
             last_tick: Instant::now(),
             started: Instant::now(),
@@ -810,9 +812,11 @@ impl App {
         }
     }
 
-    /// Expandida mientras el mouse está encima o hay un aviso.
+    /// El puntero solo expande si se eligió ese modo; un clic abre los controles.
     fn update_expansion(&mut self) {
-        let expand = self.visible && (self.hovered || self.lingering || self.notice.is_some());
+        let requested = self.expanded_by_click || self.settings.expand_on_hover;
+        let expand = self.visible
+            && (self.notice.is_some() || (requested && (self.hovered || self.lingering)));
         self.aim_expansion(expand);
     }
 
@@ -1151,6 +1155,7 @@ impl App {
                 self.shown = false;
             }
             self.visible = false;
+            self.expanded_by_click = false;
             self.presence.reset(0.0);
             self.high_refresh_driver.set_active(false);
             self.stop_idle_countdown();
@@ -1202,6 +1207,7 @@ impl App {
         } else {
             self.stop_idle_countdown();
             // Sale hacia arriba y a la vez se contrae; la ventana se oculta al terminar (en `tick`).
+            self.expanded_by_click = false;
             self.presence.set_target(0.0);
             self.hovered = false;
             self.lingering = false;
@@ -1499,7 +1505,8 @@ impl App {
         }
         self.hovered = hovered;
         // Al salir sigue expandida un momento (`COLLAPSE_TIMER`); al volver se cancela.
-        self.lingering = !hovered && self.visible;
+        self.lingering =
+            !hovered && self.visible && (self.expanded_by_click || self.settings.expand_on_hover);
         unsafe {
             if self.lingering {
                 SetTimer(Some(self.hwnd), COLLAPSE_TIMER, COLLAPSE_DELAY_MS, None);
@@ -1532,6 +1539,7 @@ impl App {
             let _ = KillTimer(Some(self.hwnd), COLLAPSE_TIMER);
         }
         self.lingering = false;
+        self.expanded_by_click = false;
         self.update_expansion();
     }
 
@@ -2451,6 +2459,14 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                         app.end_notice();
                         return;
                     }
+                    // El clic que abre los controles no debe activar la carátula o un botón
+                    // que acaba de aparecer bajo el puntero.
+                    if !app.settings.expand_on_hover && !app.expanded_by_click {
+                        app.expanded_by_click = true;
+                        app.set_hovered(true);
+                        app.update_expansion();
+                        return;
+                    }
                     match drag.pending_hit {
                         Some(Hit::Button(button)) => app.press(button),
                         Some(Hit::Seek(fraction)) => app.seek(fraction),
@@ -2717,6 +2733,16 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                         settings.translucent = !settings.translucent;
                         settings.save();
                         with_app(|app| app.apply_settings(settings.clone()));
+                        true
+                    }
+                    Command::ToggleExpandOnHover => {
+                        settings.expand_on_hover = !settings.expand_on_hover;
+                        settings.save();
+                        with_app(|app| {
+                            app.expanded_by_click = false;
+                            app.apply_settings(settings.clone());
+                            app.update_expansion();
+                        });
                         true
                     }
                     Command::SetHotkey(h) => {

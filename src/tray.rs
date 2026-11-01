@@ -45,6 +45,7 @@ const CMD_LYRICS_PROJECTOR: usize = 13;
 const CMD_CENTER: usize = 14;
 const CMD_HIGH_REFRESH: usize = 15;
 const CMD_TRANSLUCENT: usize = 16;
+const CMD_EXPAND_ON_HOVER: usize = 17;
 /// Las opciones de los submenús van numeradas a partir de estas bases.
 const CMD_HIDE_DELAY: usize = 100;
 const CMD_MONITOR: usize = 200;
@@ -85,6 +86,7 @@ pub enum Command {
     ToggleHighRefresh,
     /// Alternar fondo translúcido estilo acrílico.
     ToggleTranslucent,
+    ToggleExpandOnHover,
 }
 
 /// Lo que el menú necesita saber para marcar las opciones actuales.
@@ -287,6 +289,11 @@ pub fn build_items(state: &MenuState) -> Vec<Item> {
         settings.offset_x == 0,
     ));
     items.push(action(
+        CMD_EXPAND_ON_HOVER,
+        "Expandir al pasar el puntero",
+        settings.expand_on_hover,
+    ));
+    items.push(action(
         CMD_AUTOSTART,
         "Iniciar con Windows",
         autostart::is_enabled(),
@@ -331,6 +338,7 @@ fn id_to_command(id: usize, state: &MenuState) -> Option<Command> {
         CMD_CENTER => Some(Command::Center),
         CMD_HIGH_REFRESH => Some(Command::ToggleHighRefresh),
         CMD_TRANSLUCENT => Some(Command::ToggleTranslucent),
+        CMD_EXPAND_ON_HOVER => Some(Command::ToggleExpandOnHover),
         CMD_HOTKEY_CHANGE => Some(Command::ChangeHotkey),
         CMD_HOTKEY_DEFAULT => Some(Command::SetHotkey(Some(hotkey::DEFAULT))),
         CMD_HOTKEY_OFF => Some(Command::SetHotkey(None)),

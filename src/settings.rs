@@ -39,6 +39,8 @@ pub struct Settings {
     pub high_refresh: bool,
     /// Fondo translúcido con efecto acrílico y borde sutil (si no, negro opaco).
     pub translucent: bool,
+    /// Expandir al pasar el puntero; por defecto se requiere un clic.
+    pub expand_on_hover: bool,
 }
 
 impl Settings {
@@ -66,6 +68,7 @@ impl Settings {
             offset_x: read_dword(w!("OffsetX")).map_or(0, |v| v as i32),
             high_refresh: read_dword(w!("HighRefresh")).is_some_and(|v| v != 0),
             translucent: read_dword(w!("Translucent")).is_none_or(|v| v != 0),
+            expand_on_hover: read_dword(w!("ExpandOnHover")).is_some_and(|v| v != 0),
         }
     }
 
@@ -82,6 +85,7 @@ impl Settings {
         write_dword(w!("OffsetX"), self.offset_x as u32);
         write_dword(w!("HighRefresh"), self.high_refresh as u32);
         write_dword(w!("Translucent"), self.translucent as u32);
+        write_dword(w!("ExpandOnHover"), self.expand_on_hover as u32);
     }
 
     /// Alguna de las dos letras está activada: hay que pedirla.
