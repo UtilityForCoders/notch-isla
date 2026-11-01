@@ -28,7 +28,7 @@ use windows::UI::Composition::Desktop::DesktopWindowTarget;
 use windows::UI::Composition::{
     CompositionEffectSourceParameter, CompositionRoundedRectangleGeometry, Compositor, SpriteVisual,
 };
-use windows_numerics::Vector2;
+use windows_numerics::{Vector2, Vector3};
 
 thread_local! {
     static COMPOSITOR: OnceCell<Option<(DispatcherQueueController, Compositor)>> = const { OnceCell::new() };
@@ -168,6 +168,7 @@ pub struct Backdrop {
     geometry: CompositionRoundedRectangleGeometry,
     radius: u32,
     shown: bool,
+    placement: Option<(i32, i32, u32, u32)>,
 }
 
 impl Backdrop {
@@ -219,6 +220,7 @@ impl Backdrop {
                     geometry,
                     radius: u32::MAX,
                     shown: false,
+                    placement: None,
                 }),
                 Err(error) => {
                     let _ = DestroyWindow(hwnd);
@@ -232,12 +234,12 @@ impl Backdrop {
     pub fn show(
         &mut self,
         content: HWND,
-        rect: (f32, f32, f32, f32),
-        corner: f32,
+        viewport: (i32, i32, u32, u32),
+        shape: (f32, f32, f32, f32, f32),
         radius: u32,
         opacity: f32,
     ) -> bool {
-        let result = self.update(content, rect, corner, radius, opacity);
+        let result = self.update(content, viewport, shape, radius, opacity);
         if result.is_err() {
             self.hide();
         }
@@ -247,8 +249,8 @@ impl Backdrop {
     fn update(
         &mut self,
         content: HWND,
-        (x, y, w, h): (f32, f32, f32, f32),
-        corner: f32,
+        viewport: (i32, i32, u32, u32),
+        (x, y, w, h, corner): (f32, f32, f32, f32, f32),
         radius: u32,
         opacity: f32,
     ) -> Result<()> {
@@ -265,7 +267,7 @@ impl Backdrop {
                 .compositor
                 .CreateEffectFactory(&effect)?
                 .CreateBrush()?;
-            brush.SetSourceParameter(&name, &self.compositor.CreateHostBackdropBrush()?)?;
+            brush.SetSourceParameter(&name, &self.compositor.CreateBackdropBrush()?)?;
             self.visual.SetBrush(&brush)?;
             self.radius = radius;
         }
@@ -274,22 +276,28 @@ impl Backdrop {
             Y: h.max(1.0),
         };
         self.visual.SetSize(size)?;
+        self.visual.SetOffset(Vector3 { X: x, Y: y, Z: 0.0 })?;
         self.geometry.SetSize(size)?;
         self.geometry.SetCornerRadius(Vector2 {
             X: corner,
             Y: corner,
         })?;
         self.visual.SetOpacity(opacity.clamp(0.0, 1.0))?;
-        unsafe {
-            SetWindowPos(
-                self.hwnd,
-                Some(content),
-                x.round() as i32,
-                y.round() as i32,
-                w.ceil().max(1.0) as i32,
-                h.ceil().max(1.0) as i32,
-                SWP_NOACTIVATE | SWP_SHOWWINDOW,
-            )?;
+        // La ventana conserva el tamaño del lienzo. Solo cambia el visual dentro de una
+        // transacción de composición: no se redimensiona el HWND a mitad de la animación.
+        if !self.shown || self.placement != Some(viewport) {
+            unsafe {
+                SetWindowPos(
+                    self.hwnd,
+                    Some(content),
+                    viewport.0,
+                    viewport.1,
+                    viewport.2 as i32,
+                    viewport.3 as i32,
+                    SWP_NOACTIVATE | SWP_SHOWWINDOW,
+                )?;
+            }
+            self.placement = Some(viewport);
         }
         self.shown = true;
         Ok(())
@@ -338,8 +346,8 @@ mod tests {
             backdrop
                 .update(
                     windows::Win32::UI::WindowsAndMessaging::HWND_TOPMOST,
-                    (-32000.0, -32000.0, 200.0, 40.0),
-                    20.0,
+                    (-32000, -32000, 200, 40),
+                    (0.0, 0.0, 200.0, 40.0, 20.0),
                     radius,
                     1.0,
                 )
@@ -350,5 +358,128 @@ mod tests {
         assert!(!unsafe { IsWindowVisible(backdrop.hwnd).as_bool() });
         assert!(!backdrop.shown);
         backdrop.hide();
+    }
+
+    #[test]
+    #[ignore = "muestra un patrón de prueba brevemente para medir el desenfoque real en pantalla"]
+    fn difumina_pixeles_del_escritorio() {
+        use std::time::{Duration, Instant};
+        use windows::Win32::Foundation::RECT;
+        use windows::Win32::Graphics::Gdi::{
+            CreateSolidBrush, DeleteObject, FillRect, GetDC, GetPixel, ReleaseDC,
+        };
+        use windows::Win32::UI::WindowsAndMessaging::{
+            DispatchMessageW, PeekMessageW, HWND_TOPMOST, MSG, PM_REMOVE, SW_SHOWNOACTIVATE,
+        };
+        unsafe {
+            CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok().unwrap();
+            let mut backdrop = Backdrop::new().unwrap();
+            let instance = GetModuleHandleW(None).unwrap();
+            let source = CreateWindowExW(
+                WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+                windows::core::w!("NotchIslaDesenfoque"),
+                windows::core::w!("Patrón de prueba"),
+                WS_POPUP,
+                200,
+                200,
+                400,
+                200,
+                None,
+                None,
+                Some(instance.into()),
+                None,
+            )
+            .unwrap();
+            let _ = ShowWindow(source, SW_SHOWNOACTIVATE);
+            let dc = GetDC(Some(source));
+            for x in 0..40 {
+                let brush = CreateSolidBrush(windows::Win32::Foundation::COLORREF(if x % 2 == 0 {
+                    0
+                } else {
+                    0xffffff
+                }));
+                FillRect(
+                    dc,
+                    &RECT {
+                        left: x * 10,
+                        top: 0,
+                        right: x * 10 + 10,
+                        bottom: 200,
+                    },
+                    brush,
+                );
+                let _ = DeleteObject(brush.into());
+            }
+            ReleaseDC(Some(source), dc);
+            let pump = || {
+                let until = Instant::now() + Duration::from_millis(300);
+                while Instant::now() < until {
+                    let mut msg = MSG::default();
+                    while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+                        DispatchMessageW(&msg);
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            };
+            let sample = |x| {
+                let screen = GetDC(None);
+                let a = GetPixel(screen, x, 300).0 & 255;
+                let b = GetPixel(screen, x + 10, 300).0 & 255;
+                ReleaseDC(None, screen);
+                (a, b)
+            };
+            pump();
+            let baseline = sample(385);
+            assert!(
+                baseline.0.abs_diff(baseline.1) > 220,
+                "patrón visible: {baseline:?}"
+            );
+            backdrop
+                .update(
+                    HWND_TOPMOST,
+                    (200, 200, 400, 200),
+                    (0.0, 0.0, 400.0, 200.0, 20.0),
+                    0,
+                    1.0,
+                )
+                .unwrap();
+            pump();
+            let unblurred = sample(385);
+            assert!(
+                unblurred.0.abs_diff(unblurred.1) > 180,
+                "el radio cero no debe difuminar: {unblurred:?}"
+            );
+            for expanded in [true, false, true, false] {
+                let shape = if expanded {
+                    (0.0, 0.0, 400.0, 200.0, 20.0)
+                } else {
+                    (140.0, 60.0, 120.0, 80.0, 20.0)
+                };
+                backdrop
+                    .update(HWND_TOPMOST, (200, 200, 400, 200), shape, 24, 1.0)
+                    .unwrap();
+                pump();
+                let (a, b) = sample(385);
+                assert!(
+                    a.abs_diff(b) < 60 && a > 40 && b > 40,
+                    "contraste tras difuminar: {a}, {b}"
+                );
+                if !expanded {
+                    let outside = sample(305);
+                    assert!(
+                        outside.0.abs_diff(outside.1) > 220,
+                        "no deben quedar restos al encogerse: {outside:?}"
+                    );
+                }
+            }
+            backdrop.hide();
+            pump();
+            let after = sample(385);
+            let _ = DestroyWindow(source);
+            assert!(
+                after.0.abs_diff(after.1) > 220,
+                "el fondo desaparece al ocultarse: {after:?}"
+            );
+        }
     }
 }

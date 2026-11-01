@@ -280,8 +280,13 @@ impl Projector {
             self.backdrop.as_mut().is_some_and(|backdrop| {
                 backdrop.show(
                     self.hwnd,
-                    (cx as f32 - sw / 2.0 + x, top as f32 + y, w, h),
-                    (h / 2.0).min(18.0 * s),
+                    (
+                        cx - self.surface.width as i32 / 2,
+                        top,
+                        self.surface.width,
+                        self.surface.height,
+                    ),
+                    (x, y, w, h, (h / 2.0).min(18.0 * s)),
                     (self.blur_radius as f32 * s).round() as u32,
                     self.presence.value,
                 )

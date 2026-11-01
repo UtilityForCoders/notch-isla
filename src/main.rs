@@ -1795,8 +1795,8 @@ impl App {
             self.backdrop.as_mut().is_some_and(|backdrop| {
                 backdrop.show(
                     self.hwnd,
-                    (self.pos.x as f32 + x, self.pos.y as f32 + y, w, h),
-                    r,
+                    (self.pos.x, self.pos.y, sw, sh),
+                    (x, y, w, h, r),
                     (self.settings.blur_radius as f32 * self.scale).round() as u32,
                     self.presence.value,
                 )
