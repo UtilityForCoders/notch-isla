@@ -246,6 +246,9 @@ impl Projector {
             }
             self.shown = true;
         }
+        if let Some(backdrop) = self.backdrop.as_mut() {
+            backdrop.place_behind(self.hwnd);
+        }
         moving
     }
 

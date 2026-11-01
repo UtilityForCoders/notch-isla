@@ -2022,6 +2022,9 @@ impl App {
                 );
             }
         }
+        if let Some(backdrop) = self.backdrop.as_mut() {
+            backdrop.place_behind(self.hwnd);
+        }
         Motion {
             scroll_ms,
             bars,

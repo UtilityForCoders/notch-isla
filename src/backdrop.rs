@@ -11,6 +11,7 @@ use windows::System::DispatcherQueueController;
 use windows::Win32::Foundation::{E_INVALIDARG, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Direct2D::CLSID_D2D1GaussianBlur;
 use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_USE_HOSTBACKDROPBRUSH};
+use windows::Win32::Graphics::Gdi::{CreateRoundRectRgn, DeleteObject, SetWindowRgn};
 use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
 use windows::Win32::System::WinRT::Composition::ICompositorDesktopInterop;
 use windows::Win32::System::WinRT::Graphics::Direct2D::{
@@ -21,8 +22,9 @@ use windows::Win32::System::WinRT::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, RegisterClassW, SetWindowPos, ShowWindow,
-    SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE, WNDCLASSW, WS_DISABLED, WS_EX_NOACTIVATE,
-    WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_SHOWWINDOW, SW_HIDE, WNDCLASSW,
+    WS_DISABLED, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    WS_EX_TRANSPARENT, WS_POPUP,
 };
 use windows::UI::Composition::Desktop::DesktopWindowTarget;
 use windows::UI::Composition::{
@@ -169,6 +171,7 @@ pub struct Backdrop {
     radius: u32,
     shown: bool,
     placement: Option<(i32, i32, u32, u32)>,
+    region: Option<(i32, i32, i32, i32, i32)>,
 }
 
 impl Backdrop {
@@ -221,6 +224,7 @@ impl Backdrop {
                     radius: u32::MAX,
                     shown: false,
                     placement: None,
+                    region: None,
                 }),
                 Err(error) => {
                     let _ = DestroyWindow(hwnd);
@@ -283,6 +287,36 @@ impl Backdrop {
             Y: corner,
         })?;
         self.visual.SetOpacity(opacity.clamp(0.0, 1.0))?;
+        // El efecto de backdrop puede extenderse más allá del clip del visual. Limitar
+        // también la región nativa impide que DWM pinte halos fuera de la píldora.
+        let region = (
+            x.floor() as i32,
+            y.floor() as i32,
+            (x + w).ceil() as i32,
+            (y + h).ceil() as i32,
+            (corner * 2.0).round() as i32,
+        );
+        if self.region != Some(region) {
+            unsafe {
+                let clip = CreateRoundRectRgn(
+                    region.0,
+                    region.1,
+                    region.2 + 1,
+                    region.3 + 1,
+                    region.4,
+                    region.4,
+                );
+                if clip.is_invalid() {
+                    return Err(windows::core::Error::from_thread());
+                }
+                if SetWindowRgn(self.hwnd, Some(clip), self.shown) == 0 {
+                    let _ = DeleteObject(clip.into());
+                    return Err(windows::core::Error::from_thread());
+                }
+                // Windows pasa a ser dueño de la región después de SetWindowRgn.
+            }
+            self.region = Some(region);
+        }
         // La ventana conserva el tamaño del lienzo. Solo cambia el visual dentro de una
         // transacción de composición: no se redimensiona el HWND a mitad de la animación.
         if !self.shown || self.placement != Some(viewport) {
@@ -301,6 +335,27 @@ impl Backdrop {
         }
         self.shown = true;
         Ok(())
+    }
+
+    /// La letra y los controles siempre quedan por encima, también después de mostrar,
+    /// mover o volver a subir una ventana layered al grupo de ventanas topmost.
+    pub fn place_behind(&mut self, content: HWND) {
+        if self.shown {
+            let result = unsafe {
+                SetWindowPos(
+                    self.hwnd,
+                    Some(content),
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE | SWP_NOOWNERZORDER,
+                )
+            };
+            if result.is_err() {
+                self.hide();
+            }
+        }
     }
 
     pub fn hide(&mut self) {
@@ -472,13 +527,158 @@ mod tests {
                     );
                 }
             }
+            // Un fondo claro hace visibles las manchas que una rejilla puede ocultar.
+            let dc = GetDC(Some(source));
+            let brush = CreateSolidBrush(windows::Win32::Foundation::COLORREF(0xffe0c0));
+            FillRect(
+                dc,
+                &RECT {
+                    left: 0,
+                    top: 0,
+                    right: 400,
+                    bottom: 200,
+                },
+                brush,
+            );
+            let _ = DeleteObject(brush.into());
+            ReleaseDC(Some(source), dc);
+            // Dos ventanas layered como en la app: isla y proyector. El texto debe
+            // seguir nítido cuando se dibuja encima de su propia capa de desenfoque.
+            use windows::Win32::Foundation::{COLORREF, POINT, SIZE};
+            use windows::Win32::Graphics::Gdi::{AC_SRC_ALPHA, AC_SRC_OVER, BLENDFUNCTION};
+            use windows::Win32::UI::WindowsAndMessaging::{
+                UpdateLayeredWindow, ULW_ALPHA, WS_EX_LAYERED,
+            };
+            let content = CreateWindowExW(
+                WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                windows::core::w!("NotchIslaDesenfoque"),
+                windows::core::w!("Isla de prueba"),
+                WS_POPUP,
+                200,
+                200,
+                400,
+                200,
+                None,
+                None,
+                Some(instance.into()),
+                None,
+            )
+            .unwrap();
+            let mut surface = crate::Surface::new(400, 200).unwrap();
+            let mut paint = tiny_skia::Paint {
+                anti_alias: true,
+                ..Default::default()
+            };
+            paint.set_color_rgba8(20, 20, 24, 100);
+            crate::island::fill_rounded_rect(
+                &mut surface.pixmap,
+                &paint,
+                140.0,
+                8.0,
+                120.0,
+                34.0,
+                17.0,
+            );
+            paint.set_color_rgba8(255, 255, 255, 255);
+            crate::island::fill_rounded_rect(
+                &mut surface.pixmap,
+                &paint,
+                177.0,
+                20.0,
+                46.0,
+                10.0,
+                5.0,
+            );
+            surface.copy_to_dib();
+            UpdateLayeredWindow(
+                content,
+                None,
+                Some(&POINT { x: 200, y: 200 }),
+                Some(&SIZE { cx: 400, cy: 200 }),
+                Some(surface.dc),
+                Some(&POINT::default()),
+                COLORREF(0),
+                Some(&BLENDFUNCTION {
+                    BlendOp: AC_SRC_OVER as u8,
+                    BlendFlags: 0,
+                    SourceConstantAlpha: 255,
+                    AlphaFormat: AC_SRC_ALPHA as u8,
+                }),
+                ULW_ALPHA,
+            )
+            .unwrap();
+            let _ = ShowWindow(content, SW_SHOWNOACTIVATE);
+            backdrop
+                .update(
+                    content,
+                    (200, 200, 400, 200),
+                    (140.0, 8.0, 120.0, 34.0, 17.0),
+                    24,
+                    1.0,
+                )
+                .unwrap();
+            let mut projector = crate::projector::Projector::new(1.0).unwrap();
+            for _ in 0..10 {
+                projector.render(Some("TEST"), None, 400, 242, true, 24);
+                // Equivalente a `App::raise`: no debe dejar el fondo por encima de la letra.
+                SetWindowPos(
+                    content,
+                    Some(HWND_TOPMOST),
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                )
+                .unwrap();
+                backdrop.place_behind(content);
+                pump();
+            }
+            // Captura opcional del patrón propio (no del escritorio completo) para revisión visual.
+            if let Ok(path) = std::env::var("NOTCH_BLUR_CAPTURE") {
+                use windows::Win32::Graphics::Gdi::{BitBlt, SRCCOPY};
+                let capture = crate::Surface::new(400, 200).unwrap();
+                let screen = GetDC(None);
+                BitBlt(capture.dc, 0, 0, 400, 200, Some(screen), 200, 200, SRCCOPY).unwrap();
+                ReleaseDC(None, screen);
+                let pixels = std::slice::from_raw_parts(capture.bits, 400 * 200 * 4);
+                let mut bmp = Vec::new();
+                bmp.extend_from_slice(b"BM");
+                bmp.extend_from_slice(&(54u32 + pixels.len() as u32).to_le_bytes());
+                bmp.extend_from_slice(&[0; 4]);
+                bmp.extend_from_slice(&54u32.to_le_bytes());
+                bmp.extend_from_slice(&40u32.to_le_bytes());
+                bmp.extend_from_slice(&400i32.to_le_bytes());
+                bmp.extend_from_slice(&(-200i32).to_le_bytes());
+                bmp.extend_from_slice(&1u16.to_le_bytes());
+                bmp.extend_from_slice(&32u16.to_le_bytes());
+                bmp.extend_from_slice(&[0; 24]);
+                bmp.extend_from_slice(pixels);
+                std::fs::write(path, bmp).unwrap();
+            }
+            let screen = GetDC(None);
+            let mut brightest = 0;
+            for x in 386..414 {
+                for y in 262..274 {
+                    brightest = brightest.max(GetPixel(screen, x, y).0 & 255);
+                }
+            }
+            ReleaseDC(None, screen);
+            let screen = GetDC(None);
+            let outside = GetPixel(screen, 400, 290).0;
+            ReleaseDC(None, screen);
+            projector.hide();
             backdrop.hide();
+            let _ = DestroyWindow(content);
             pump();
-            let after = sample(385);
             let _ = DestroyWindow(source);
             assert!(
-                after.0.abs_diff(after.1) > 220,
-                "el fondo desaparece al ocultarse: {after:?}"
+                brightest > 240,
+                "el texto no debe quedar debajo del desenfoque: {brightest}"
+            );
+            assert_eq!(
+                outside, 0xffe0c0,
+                "no debe haber halos debajo del proyector"
             );
         }
     }
