@@ -29,8 +29,8 @@ use windows::Win32::Graphics::DirectWrite::{
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Gdi::{
-    GetMonitorInfoW, MonitorFromPoint, AC_SRC_ALPHA, AC_SRC_OVER, BLENDFUNCTION, MONITORINFO,
-    MONITOR_DEFAULTTONEAREST,
+    GetMonitorInfoW, MonitorFromPoint, MonitorFromWindow, AC_SRC_ALPHA, AC_SRC_OVER, BLENDFUNCTION,
+    MONITORINFO, MONITOR_DEFAULTTONEAREST,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
@@ -39,13 +39,16 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     VK_LEFT, VK_RETURN, VK_RIGHT, VK_SPACE, VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetCursorPos,
-    GetMessageW, GetWindowRect, LoadCursorW, PostMessageW, PostQuitMessage, RegisterClassExW,
-    SetForegroundWindow, SetWindowsHookExW, ShowWindow, TranslateMessage, UnhookWindowsHookEx,
-    UpdateLayeredWindow, IDC_ARROW, MSG, MSLLHOOKSTRUCT, SW_SHOWNOACTIVATE, ULW_ALPHA, WA_INACTIVE,
-    WH_MOUSE_LL, WM_ACTIVATE, WM_CAPTURECHANGED, WM_CLOSE, WM_DESTROY, WM_KEYDOWN, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_TIMER,
-    WNDCLASSEXW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
+    FindWindowExW, FindWindowW, GetAncestor, GetCursorPos, GetForegroundWindow, GetMessageW,
+    GetWindowRect, LoadCursorW, PostMessageW, PostQuitMessage, RegisterClassExW,
+    SetForegroundWindow, SetTimer, SetWindowsHookExW, ShowWindow, TranslateMessage,
+    UnhookWindowsHookEx, UpdateLayeredWindow, GA_ROOTOWNER, IDC_ARROW, KBDLLHOOKSTRUCT,
+    MA_NOACTIVATE, MSG, MSLLHOOKSTRUCT, SW_SHOWNOACTIVATE, ULW_ALPHA, WA_INACTIVE, WH_KEYBOARD_LL,
+    WH_MOUSE_LL, WM_ACTIVATE, WM_CAPTURECHANGED, WM_CLOSE, WM_DESTROY, WM_KEYDOWN, WM_KEYUP,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_RBUTTONDOWN,
+    WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WNDCLASSEXW, WS_EX_LAYERED,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 use windows_numerics::Vector2;
 
@@ -95,11 +98,14 @@ const MIN_W: f32 = 190.0;
 const MAX_W: f32 = 360.0;
 const FONT: f32 = 13.0;
 const LABEL_FONT: f32 = 12.0;
+const FOCUS_TIMER: usize = 2;
 
 /// Hay un menú abierto: otro clic en la bandeja mientras tanto no abre uno encima.
 static OPEN: AtomicBool = AtomicBool::new(false);
 /// Ventana del menú abierto, para el gancho de mouse.
 static MENU_HWND: AtomicIsize = AtomicIsize::new(0);
+static MENU_FOCUS: AtomicIsize = AtomicIsize::new(0);
+static SLIDER_CAPTURE: AtomicBool = AtomicBool::new(false);
 
 /// Acción que debe tomar el menú tras pulsar una opción.
 pub enum MenuAction {
@@ -131,7 +137,7 @@ pub fn show_interactive<F>(items: Vec<Item>, mut on_action: F)
 where
     F: FnMut(usize) -> MenuAction,
 {
-    show_with_handler(items, &mut on_action);
+    show_with_handler(items, &mut on_action, false);
 }
 
 /// El menú usa un dueño propio y estable, independiente de la isla y de Explorer.
@@ -139,10 +145,10 @@ pub fn show_tray<F>(items: Vec<Item>, mut on_action: F)
 where
     F: FnMut(usize) -> MenuAction,
 {
-    show_with_handler(items, &mut on_action);
+    show_with_handler(items, &mut on_action, true);
 }
 
-fn show_with_handler<F>(items: Vec<Item>, mut on_action: F)
+fn show_with_handler<F>(items: Vec<Item>, mut on_action: F, from_tray: bool)
 where
     F: FnMut(usize) -> MenuAction,
 {
@@ -162,7 +168,7 @@ where
         }
     }
     let _guard = Reset;
-    let _ = run(items);
+    let _ = run(items, from_tray);
 }
 
 /// Opción ya maquetada.
@@ -303,10 +309,20 @@ fn with_state(f: impl FnOnce(&mut State)) {
     }
 }
 
-fn run(items: Vec<Item>) -> Result<Option<usize>> {
+fn run(items: Vec<Item>, from_tray: bool) -> Result<Option<usize>> {
     unsafe {
         let mut anchor = POINT::default();
         GetCursorPos(&mut anchor)?;
+        // La barra se oculta al perder el foco. El menú de bandeja recibe mouse/teclado
+        // sin activarse: Explorer conserva el foco sin cambiar la preferencia de autoocultar.
+        let focus = if from_tray {
+            taskbar_at(anchor).filter(|taskbar| {
+                let _ = SetForegroundWindow(*taskbar);
+                foreground_is(*taskbar)
+            })
+        } else {
+            None
+        };
         let monitor = MonitorFromPoint(anchor, MONITOR_DEFAULTTONEAREST);
         let mut info = MONITORINFO {
             cbSize: std::mem::size_of::<MONITORINFO>() as u32,
@@ -362,7 +378,7 @@ fn run(items: Vec<Item>) -> Result<Option<usize>> {
             Some(GetModuleHandleW(None)?.into()),
             None,
         )?);
-        let hwnd = create_window(Some(host.0))?;
+        let hwnd = create_window(Some(host.0), focus.is_some())?;
         let open = vec![false; entries.len()];
         STATE.with(|cell| {
             *cell.borrow_mut() = Some(State {
@@ -395,9 +411,16 @@ fn run(items: Vec<Item>) -> Result<Option<usize>> {
         });
         MENU_HWND.store(hwnd.0 as isize, Ordering::SeqCst);
         let hook = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook), None, 0).ok();
+        let keyboard = focus
+            .and_then(|_| SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook), None, 0).ok());
+        if keyboard.is_some() {
+            MENU_FOCUS.store(focus.unwrap().0 as isize, Ordering::SeqCst);
+            SetTimer(Some(hwnd), FOCUS_TIMER, 100, None);
+        }
         let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-        // Al frente para recibir el teclado y saber si otra ventana pasa adelante.
-        let _ = SetForegroundWindow(hwnd);
+        if keyboard.is_none() {
+            let _ = SetForegroundWindow(hwnd);
+        }
 
         // Bucle propio hasta que el menú termine; la isla sigue recibiendo sus mensajes.
         let mut msg = MSG::default();
@@ -423,6 +446,11 @@ fn run(items: Vec<Item>) -> Result<Option<usize>> {
         if let Some(hook) = hook {
             let _ = UnhookWindowsHookEx(hook);
         }
+        if let Some(keyboard) = keyboard {
+            let _ = UnhookWindowsHookEx(keyboard);
+        }
+        MENU_FOCUS.store(0, Ordering::SeqCst);
+        SLIDER_CAPTURE.store(false, Ordering::SeqCst);
         MENU_HWND.store(0, Ordering::SeqCst);
         let state = STATE.with(|c| c.borrow_mut().take());
         let _ = DestroyWindow(hwnd);
@@ -430,7 +458,66 @@ fn run(items: Vec<Item>) -> Result<Option<usize>> {
     }
 }
 
-fn create_window(owner: Option<HWND>) -> Result<HWND> {
+fn taskbar_at(anchor: POINT) -> Option<HWND> {
+    unsafe {
+        let monitor = MonitorFromPoint(anchor, MONITOR_DEFAULTTONEAREST);
+        let primary = FindWindowW(w!("Shell_TrayWnd"), None).ok()?;
+        if MonitorFromWindow(primary, MONITOR_DEFAULTTONEAREST) == monitor {
+            return Some(primary);
+        }
+        let mut previous = None;
+        while let Ok(window) = FindWindowExW(None, previous, w!("Shell_SecondaryTrayWnd"), None) {
+            if MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST) == monitor {
+                return Some(window);
+            }
+            previous = Some(window);
+        }
+        Some(primary)
+    }
+}
+
+fn foreground_is(window: HWND) -> bool {
+    unsafe {
+        let foreground = GetForegroundWindow();
+        foreground == window || GetAncestor(foreground, GA_ROOTOWNER) == window
+    }
+}
+
+unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    let focus = HWND(MENU_FOCUS.load(Ordering::SeqCst) as _);
+    let hwnd = HWND(MENU_HWND.load(Ordering::SeqCst) as _);
+    if code >= 0 && !focus.is_invalid() && !hwnd.is_invalid() {
+        let event = wparam.0 as u32;
+        let key = unsafe { &*(lparam.0 as *const KBDLLHOOKSTRUCT) }.vkCode as u16;
+        let navigation = [
+            VK_UP.0,
+            VK_DOWN.0,
+            VK_LEFT.0,
+            VK_RIGHT.0,
+            VK_RETURN.0,
+            VK_SPACE.0,
+            VK_ESCAPE.0,
+        ]
+        .contains(&key);
+        if foreground_is(focus) && navigation {
+            if matches!(event, WM_KEYDOWN | WM_SYSKEYDOWN) {
+                unsafe {
+                    let _ = PostMessageW(Some(hwnd), WM_KEYDOWN, WPARAM(key as usize), LPARAM(0));
+                }
+            }
+            if matches!(event, WM_KEYDOWN | WM_SYSKEYDOWN | WM_KEYUP | WM_SYSKEYUP) {
+                return LRESULT(1);
+            }
+        } else if matches!(event, WM_KEYDOWN | WM_SYSKEYDOWN) {
+            unsafe {
+                let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+            }
+        }
+    }
+    unsafe { CallNextHookEx(None, code, wparam, lparam) }
+}
+
+fn create_window(owner: Option<HWND>, passive: bool) -> Result<HWND> {
     static REGISTERED: AtomicBool = AtomicBool::new(false);
     unsafe {
         let instance = GetModuleHandleW(None)?;
@@ -447,7 +534,14 @@ fn create_window(owner: Option<HWND>) -> Result<HWND> {
             RegisterClassExW(&wc);
         }
         CreateWindowExW(
-            WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+            WS_EX_LAYERED
+                | WS_EX_TOPMOST
+                | WS_EX_TOOLWINDOW
+                | if passive {
+                    WS_EX_NOACTIVATE
+                } else {
+                    Default::default()
+                },
             class,
             w!("Menú de Notch Isla"),
             WS_POPUP,
@@ -994,6 +1088,16 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
         return LRESULT(0);
     }
     match msg {
+        WM_MOUSEACTIVATE if MENU_FOCUS.load(Ordering::SeqCst) != 0 => {
+            LRESULT(MA_NOACTIVATE as isize)
+        }
+        WM_TIMER if wparam.0 == FOCUS_TIMER => {
+            let focus = HWND(MENU_FOCUS.load(Ordering::SeqCst) as _);
+            if !focus.is_invalid() && !foreground_is(focus) {
+                with_state(|st| st.done = Some(None));
+            }
+            LRESULT(0)
+        }
         WM_MOUSEMOVE => {
             let x = (lparam.0 & 0xFFFF) as u16 as i16 as f32;
             let y = ((lparam.0 >> 16) & 0xFFFF) as u16 as i16 as f32;
@@ -1028,6 +1132,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             with_state(|st| {
                 if let Some(RowKind::Slider { id, .. }) = row_at(st, y).map(|i| st.rows[i].kind) {
                     st.dragging_slider = Some(id);
+                    SLIDER_CAPTURE.store(MENU_FOCUS.load(Ordering::SeqCst) != 0, Ordering::SeqCst);
                     unsafe {
                         SetCapture(hwnd);
                     }
@@ -1037,6 +1142,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             LRESULT(0)
         }
         WM_CAPTURECHANGED => {
+            SLIDER_CAPTURE.store(false, Ordering::SeqCst);
             with_state(|st| st.dragging_slider = None);
             LRESULT(0)
         }
@@ -1058,6 +1164,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 if st.dragging_slider.is_some() {
                     update_slider(st, x);
                     st.dragging_slider = None;
+                    SLIDER_CAPTURE.store(false, Ordering::SeqCst);
                     unsafe {
                         let _ = ReleaseCapture();
                     }
@@ -1115,7 +1222,9 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
         }
         // Otra ventana pasó al frente (Alt+Tab, clic en otra app): se cierra.
         WM_ACTIVATE if (wparam.0 & 0xFFFF) as u32 == WA_INACTIVE => {
-            with_state(|st| st.done = Some(None));
+            if MENU_FOCUS.load(Ordering::SeqCst) == 0 {
+                with_state(|st| st.done = Some(None));
+            }
             LRESULT(0)
         }
         // Lo manda el gancho de mouse al hacer clic fuera.
@@ -1135,6 +1244,29 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
         WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN
     );
     let menu = MENU_HWND.load(Ordering::SeqCst);
+    if code >= 0
+        && menu != 0
+        && SLIDER_CAPTURE.load(Ordering::SeqCst)
+        && matches!(wparam.0 as u32, WM_MOUSEMOVE | WM_LBUTTONUP)
+    {
+        let hwnd = HWND(menu as _);
+        let info = unsafe { &*(lparam.0 as *const MSLLHOOKSTRUCT) };
+        let mut rect = RECT::default();
+        unsafe {
+            if GetWindowRect(hwnd, &mut rect).is_ok() {
+                let x = (info.pt.x - rect.left) as i16 as u16 as usize;
+                let y = (info.pt.y - rect.top) as i16 as u16 as usize;
+                let down = usize::from(wparam.0 as u32 == WM_MOUSEMOVE);
+                let _ = PostMessageW(
+                    Some(hwnd),
+                    wparam.0 as u32,
+                    WPARAM(down),
+                    LPARAM((x | (y << 16)) as isize),
+                );
+                return LRESULT(1);
+            }
+        }
+    }
     if code >= 0 && down && menu != 0 {
         let hwnd = HWND(menu as _);
         let info = unsafe { &*(lparam.0 as *const MSLLHOOKSTRUCT) };
@@ -1176,10 +1308,56 @@ mod tests {
     fn cambiar_opciones_y_arrastrar_no_recrea_el_menu() {
         use std::time::{Duration, Instant};
         use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
+        use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
         use windows::Win32::UI::HiDpi::GetDpiForWindow;
+        use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
         use windows::Win32::UI::WindowsAndMessaging::{IsWindowVisible, SendMessageW};
+        fn activate_for_test(window: HWND) {
+            if foreground_is(window) {
+                return;
+            }
+            unsafe {
+                let current = GetCurrentThreadId();
+                let foreground = GetWindowThreadProcessId(GetForegroundWindow(), None);
+                // El test no nace de un clic real en la bandeja; prepara ese mismo foco.
+                let attached =
+                    foreground != current && AttachThreadInput(current, foreground, true).as_bool();
+                let _ = SetForegroundWindow(window);
+                if attached {
+                    let _ = AttachThreadInput(current, foreground, false);
+                }
+                if !foreground_is(window) {
+                    use windows::Win32::UI::Input::KeyboardAndMouse::{
+                        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
+                        VK_MENU,
+                    };
+                    let keys = [Default::default(), KEYEVENTF_KEYUP].map(|flags| INPUT {
+                        r#type: INPUT_KEYBOARD,
+                        Anonymous: INPUT_0 {
+                            ki: KEYBDINPUT {
+                                wVk: VK_MENU,
+                                dwFlags: flags,
+                                ..Default::default()
+                            },
+                        },
+                    });
+                    SendInput(&keys, std::mem::size_of::<INPUT>() as i32);
+                    let _ = SetForegroundWindow(window);
+                }
+            }
+        }
+        struct Restore(HWND);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                activate_for_test(self.0);
+            }
+        }
+        let _restore = Restore(unsafe { GetForegroundWindow() });
         unsafe {
             CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok().unwrap();
+            let mut anchor = POINT::default();
+            GetCursorPos(&mut anchor).unwrap();
+            activate_for_test(taskbar_at(anchor).expect("barra de tareas"));
         }
         let driver = std::thread::spawn(|| {
             let deadline = Instant::now() + Duration::from_secs(3);
@@ -1200,6 +1378,16 @@ mod tests {
                 }
             }
             let _close = Close(hwnd);
+            let shell = HWND(MENU_FOCUS.load(Ordering::SeqCst) as _);
+            assert!(
+                !shell.is_invalid(),
+                "el menú de bandeja debe conservar el foco en Explorer"
+            );
+            assert!(foreground_is(shell));
+            assert_eq!(
+                unsafe { SendMessageW(hwnd, WM_MOUSEACTIVATE, None, None) }.0,
+                MA_NOACTIVATE as isize
+            );
             let s = unsafe { GetDpiForWindow(hwnd) } as f32 / 96.0;
             let point =
                 |x: f32, y: f32| LPARAM(((x * s) as u32 | (((y * s) as u32) << 16)) as isize);
@@ -1218,10 +1406,45 @@ mod tests {
             let y = PAD + ROW_H + SLIDER_H / 2.0;
             unsafe {
                 SendMessageW(hwnd, WM_LBUTTONDOWN, Some(WPARAM(1)), Some(point(60.0, y)));
-                SendMessageW(hwnd, WM_MOUSEMOVE, Some(WPARAM(1)), Some(point(500.0, y)));
-                SendMessageW(hwnd, WM_LBUTTONUP, Some(WPARAM(0)), Some(point(500.0, y)));
+                let mut rect = RECT::default();
+                GetWindowRect(hwnd, &mut rect).unwrap();
+                let info = MSLLHOOKSTRUCT {
+                    pt: POINT {
+                        x: rect.right + 100,
+                        y: rect.top + (y * s) as i32,
+                    },
+                    ..Default::default()
+                };
+                let info = LPARAM((&info as *const MSLLHOOKSTRUCT) as isize);
+                assert_eq!(mouse_hook(0, WPARAM(WM_MOUSEMOVE as usize), info).0, 1);
+                assert_eq!(mouse_hook(0, WPARAM(WM_LBUTTONUP as usize), info).0, 1);
+                // Navegación por teclado encaminada al menú sin activar su ventana.
+                for key in [VK_DOWN, VK_RETURN] {
+                    let info = KBDLLHOOKSTRUCT {
+                        vkCode: key.0 as u32,
+                        ..Default::default()
+                    };
+                    assert_eq!(
+                        keyboard_hook(
+                            0,
+                            WPARAM(WM_KEYDOWN as usize),
+                            LPARAM((&info as *const KBDLLHOOKSTRUCT) as isize)
+                        )
+                        .0,
+                        1
+                    );
+                }
             }
-            assert_eq!(MENU_HWND.load(Ordering::SeqCst), hwnd.0 as isize);
+            std::thread::sleep(Duration::from_secs(3));
+            if foreground_is(shell) {
+                assert_eq!(MENU_HWND.load(Ordering::SeqCst), hwnd.0 as isize);
+            } else {
+                assert_eq!(
+                    MENU_HWND.load(Ordering::SeqCst),
+                    0,
+                    "cerrar al pasar a otra aplicación"
+                );
+            }
         });
         let mut toggles = 0;
         let mut value = 16;
@@ -1265,7 +1488,7 @@ mod tests {
             MenuAction::KeepOpen(items(toggles % 2 != 0, value))
         });
         driver.join().unwrap();
-        assert_eq!(toggles, 3);
+        assert_eq!(toggles, 4);
         assert_eq!(value, 40);
     }
 }
