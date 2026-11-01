@@ -19,12 +19,13 @@ mod spring;
 mod system;
 mod text;
 mod tray;
+mod ui;
 mod update;
 mod visualizer;
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -297,6 +298,7 @@ fn main() -> Result<()> {
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
+            ui::promote_timers();
         }
 
         APP.with(|cell| cell.borrow_mut().take());
@@ -310,7 +312,7 @@ thread_local! {
 
 /// Ejecuta `f` con el estado de la app si está disponible (evita pánicos por reentrada).
 fn with_app(f: impl FnOnce(&mut App)) -> bool {
-    APP.with(|cell| match cell.try_borrow_mut() {
+    let ran = APP.with(|cell| match cell.try_borrow_mut() {
         Ok(mut guard) => match guard.as_mut() {
             Some(app) => {
                 f(app);
@@ -319,7 +321,11 @@ fn with_app(f: impl FnOnce(&mut App)) -> bool {
             None => false,
         },
         Err(_) => false,
-    })
+    });
+    if ran {
+        ui::flush();
+    }
+    ran
 }
 
 /// Estado del arrastre horizontal de la isla por la parte superior.
@@ -337,14 +343,24 @@ struct DragIsland {
 struct HighRefreshDriver {
     active: Arc<(Mutex<bool>, Condvar)>,
     pending: Arc<AtomicBool>,
+    interval_ms: Arc<AtomicU32>,
+    running: Arc<AtomicBool>,
 }
 
 impl HighRefreshDriver {
     fn new(hwnd: HWND) -> Self {
+        Self::with_sync(hwnd, || unsafe { monitors::DwmFlush().ok() })
+    }
+
+    fn with_sync(hwnd: HWND, sync: fn() -> Result<()>) -> Self {
         let active = Arc::new((Mutex::new(false), Condvar::new()));
         let pending = Arc::new(AtomicBool::new(false));
         let thread_active = Arc::clone(&active);
         let thread_pending = Arc::clone(&pending);
+        let interval_ms = Arc::new(AtomicU32::new(FRAME_MS));
+        let thread_interval = Arc::clone(&interval_ms);
+        let running = Arc::new(AtomicBool::new(true));
+        let thread_running = Arc::clone(&running);
         let hwnd_raw = hwnd.0 as isize;
 
         std::thread::Builder::new()
@@ -356,37 +372,60 @@ impl HighRefreshDriver {
                     {
                         let (lock, cvar) = &*thread_active;
                         let mut is_active = lock.lock().unwrap();
-                        while !*is_active {
+                        while !*is_active && thread_running.load(Ordering::Acquire) {
                             is_active = cvar.wait(is_active).unwrap();
+                        }
+                        if !thread_running.load(Ordering::Acquire) {
+                            return;
                         }
                     }
 
                     // Sincroniza con el refresco de pantalla del DWM (hardware VSync):
-                    unsafe {
-                        let res = monitors::DwmFlush();
-                        if res.is_err() {
+                    let started = Instant::now();
+                    {
+                        if sync().is_err() {
                             // Si DWM se suspende o falla (ej. juego en pantalla completa exclusiva),
                             // dormimos brevemente para no saturar el hilo ni quemar CPU.
                             std::thread::sleep(std::time::Duration::from_millis(15));
                         }
                     }
+                    // DwmFlush puede volver inmediatamente (composición, sesión remota,
+                    // cambios de pantalla). Un éxito no garantiza que haya esperado un VSync.
+                    let interval = Duration::from_millis(
+                        thread_interval.load(Ordering::Relaxed).max(1) as u64,
+                    );
+                    if let Some(remaining) = interval.checked_sub(started.elapsed()) {
+                        std::thread::sleep(remaining);
+                    }
+                    if !thread_running.load(Ordering::Acquire) {
+                        return;
+                    }
 
                     let is_active = *thread_active.0.lock().unwrap();
                     if is_active && !thread_pending.swap(true, Ordering::SeqCst) {
                         unsafe {
-                            let _ = PostMessageW(
+                            if PostMessageW(
                                 Some(hwnd),
                                 WM_ANIM_TICK,
                                 windows::Win32::Foundation::WPARAM(0),
                                 windows::Win32::Foundation::LPARAM(0),
-                            );
+                            )
+                            .is_err()
+                            {
+                                return;
+                            }
                         }
                     }
                 }
             })
             .expect("iniciar hilo vsync");
 
-        Self { active, pending }
+        Self {
+            active,
+            pending,
+            interval_ms,
+            running,
+        }
     }
 
     fn set_active(&self, active: bool) {
@@ -402,6 +441,15 @@ impl HighRefreshDriver {
 
     fn frame_processed(&self) {
         self.pending.store(false, Ordering::SeqCst);
+    }
+}
+
+impl Drop for HighRefreshDriver {
+    fn drop(&mut self) {
+        let mut active = self.active.0.lock().unwrap();
+        self.running.store(false, Ordering::Release);
+        *active = false;
+        self.active.1.notify_one();
     }
 }
 
@@ -1106,6 +1154,9 @@ impl App {
 
     /// Enciende, cambia de intervalo o apaga el temporizador de animación.
     fn set_timer(&mut self, ms: Option<u32>) {
+        self.high_refresh_driver
+            .interval_ms
+            .store(self.frame_ms(), Ordering::Relaxed);
         if self.timer_ms == ms {
             return;
         }
@@ -2411,6 +2462,23 @@ fn mouse_pos(lparam: LPARAM) -> (f32, f32) {
 }
 
 extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    let deferrable = msg >= WM_APP
+        || matches!(
+            msg,
+            WM_MOUSEMOVE
+                | WM_MOUSELEAVE
+                | WM_LBUTTONDOWN
+                | WM_LBUTTONUP
+                | WM_RBUTTONUP
+                | WM_MOUSEWHEEL
+                | WM_CAPTURECHANGED
+                | WM_TIMER
+                | WM_HOTKEY
+        );
+    if deferrable && APP.with(|app| app.try_borrow_mut().is_err()) {
+        ui::defer(wndproc, hwnd, msg, wparam, lparam);
+        return LRESULT(0);
+    }
     match msg {
         WM_MOUSEMOVE => {
             let (x, y) = mouse_pos(lparam);
@@ -2554,15 +2622,18 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
         }
         WM_ANIM_TICK => {
             with_app(|app| {
-                app.high_refresh_driver.frame_processed();
                 if app.settings.high_refresh {
                     app.tick();
                 }
+                app.high_refresh_driver.frame_processed();
             });
             LRESULT(0)
         }
         WM_TIMER if wparam.0 == ANIM_TIMER => {
-            with_app(|app| app.tick());
+            with_app(|app| {
+                app.tick();
+                app.high_refresh_driver.frame_processed();
+            });
             LRESULT(0)
         }
         WM_TIMER if wparam.0 == IDLE_TIMER => {
@@ -2693,7 +2764,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                     timer_left,
                 };
                 use tray::Command;
-                tray::show_menu(state, |cmd, settings| match cmd {
+                tray::show_menu(hwnd, state, |cmd, settings| match cmd {
                     Command::ToggleAutostart => {
                         autostart::set(!autostart::is_enabled());
                         true
@@ -2840,6 +2911,106 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "prueba prolongada de refresco alto; NOTCH_STRESS_SECONDS controla su duración"]
+    fn refresco_alto_no_satura_la_cola_ni_bloquea_temporizadores() {
+        use std::cell::Cell;
+        use windows::Win32::UI::WindowsAndMessaging::{PeekMessageW, PM_REMOVE};
+        thread_local! {
+            static DRIVER: RefCell<Option<HighRefreshDriver>> = const { RefCell::new(None) };
+            static FRAMES: Cell<u64> = const { Cell::new(0) };
+            static TIMERS: Cell<u64> = const { Cell::new(0) };
+        }
+        extern "system" fn stress_proc(
+            hwnd: HWND,
+            msg: u32,
+            wparam: WPARAM,
+            lparam: LPARAM,
+        ) -> LRESULT {
+            if msg == WM_ANIM_TICK {
+                FRAMES.set(FRAMES.get() + 1);
+                // Cuadro costoso y DwmFlush que retorna inmediatamente: caso adverso real.
+                std::thread::sleep(Duration::from_millis(3));
+                DRIVER.with(|driver| driver.borrow().as_ref().unwrap().frame_processed());
+                return LRESULT(0);
+            }
+            if msg == WM_TIMER {
+                TIMERS.set(TIMERS.get() + 1);
+                return LRESULT(0);
+            }
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+        }
+        unsafe {
+            let instance = GetModuleHandleW(None).unwrap();
+            let class = w!("NotchIslaStressRefresh");
+            RegisterClassExW(&WNDCLASSEXW {
+                cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+                lpfnWndProc: Some(stress_proc),
+                hInstance: instance.into(),
+                lpszClassName: class,
+                ..Default::default()
+            });
+            let hwnd = CreateWindowExW(
+                WS_EX_TOOLWINDOW,
+                class,
+                class,
+                WS_POPUP,
+                0,
+                0,
+                1,
+                1,
+                None,
+                None,
+                Some(instance.into()),
+                None,
+            )
+            .unwrap();
+            let driver = HighRefreshDriver::with_sync(hwnd, || Ok(()));
+            let running = Arc::clone(&driver.running);
+            driver.interval_ms.store(4, Ordering::Relaxed);
+            driver.set_active(true);
+            DRIVER.with(|cell| *cell.borrow_mut() = Some(driver));
+            SetTimer(Some(hwnd), 99, 20, None);
+            let seconds = std::env::var("NOTCH_STRESS_SECONDS")
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(10)
+                .max(1);
+            let started = Instant::now();
+            while started.elapsed() < Duration::from_secs(seconds) {
+                let mut msg = MSG::default();
+                if PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+                    DispatchMessageW(&msg);
+                    ui::promote_timers();
+                } else {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+            }
+            DRIVER.with(|cell| cell.borrow_mut().take());
+            let _ = KillTimer(Some(hwnd), 99);
+            let _ = DestroyWindow(hwnd);
+            let frames = FRAMES.get();
+            let timers = TIMERS.get();
+            assert!(
+                frames > seconds * 10 && frames <= seconds * 260,
+                "cuadros limitados al ritmo pedido: {frames} en {seconds} s"
+            );
+            assert!(
+                timers >= seconds * 15,
+                "los temporizadores deben seguir funcionando: {timers} en {seconds} s"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+            assert_eq!(
+                Arc::strong_count(&running),
+                1,
+                "el hilo de refresco debe terminar al cerrar"
+            );
+            eprintln!(
+                "{seconds} s: {frames} cuadros, {timers} temporizadores; cola sin saturación"
+            );
+        }
+    }
 
     #[test]
     fn en_reposo_no_hay_temporizador() {

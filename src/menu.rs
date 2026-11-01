@@ -10,7 +10,6 @@
 
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
-use std::time::Instant;
 
 use tiny_skia::{Color, Paint, PathBuilder};
 use windows::core::{w, Result};
@@ -40,14 +39,13 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     VK_LEFT, VK_RETURN, VK_RIGHT, VK_SPACE, VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, FindWindowW,
-    GetAncestor, GetClassNameW, GetCursorPos, GetMessageW, GetWindowRect, KillTimer, LoadCursorW,
-    PostMessageW, PostQuitMessage, RegisterClassExW, SetForegroundWindow, SetTimer,
-    SetWindowsHookExW, ShowWindow, TranslateMessage, UnhookWindowsHookEx, UpdateLayeredWindow,
-    WindowFromPoint, GA_ROOT, IDC_ARROW, MSG, MSLLHOOKSTRUCT, SW_SHOWNOACTIVATE, ULW_ALPHA,
-    WA_INACTIVE, WH_MOUSE_LL, WM_ACTIVATE, WM_CAPTURECHANGED, WM_CLOSE, WM_DESTROY, WM_KEYDOWN,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_RBUTTONDOWN, WM_RBUTTONUP,
-    WM_TIMER, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetCursorPos,
+    GetMessageW, GetWindowRect, LoadCursorW, PostMessageW, PostQuitMessage, RegisterClassExW,
+    SetForegroundWindow, SetWindowsHookExW, ShowWindow, TranslateMessage, UnhookWindowsHookEx,
+    UpdateLayeredWindow, IDC_ARROW, MSG, MSLLHOOKSTRUCT, SW_SHOWNOACTIVATE, ULW_ALPHA, WA_INACTIVE,
+    WH_MOUSE_LL, WM_ACTIVATE, WM_CAPTURECHANGED, WM_CLOSE, WM_DESTROY, WM_KEYDOWN, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_TIMER,
+    WNDCLASSEXW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 use windows_numerics::Vector2;
 
@@ -97,10 +95,6 @@ const MIN_W: f32 = 190.0;
 const MAX_W: f32 = 360.0;
 const FONT: f32 = 13.0;
 const LABEL_FONT: f32 = 12.0;
-/// Entrada: aparece desvaneciéndose en este tiempo.
-const FADE_SECS: f32 = 0.12;
-const FADE_TIMER: usize = 1;
-const FRAME_MS: u32 = 15;
 
 /// Hay un menú abierto: otro clic en la bandeja mientras tanto no abre uno encima.
 static OPEN: AtomicBool = AtomicBool::new(false);
@@ -137,18 +131,22 @@ pub fn show_interactive<F>(items: Vec<Item>, mut on_action: F)
 where
     F: FnMut(usize) -> MenuAction,
 {
-    show_with_origin(items, &mut on_action, false);
+    show_with_origin(items, &mut on_action, None);
 }
 
-/// Asocia la ventana propia con la barra o el panel de iconos ocultos de Explorer.
-pub fn show_tray<F>(items: Vec<Item>, mut on_action: F)
+/// El dueño es una ventana del propio proceso: no acopla el bucle de UI con Explorer.
+pub fn show_tray<F>(owner: HWND, items: Vec<Item>, mut on_action: F)
 where
     F: FnMut(usize) -> MenuAction,
 {
-    show_with_origin(items, &mut on_action, true);
+    show_with_origin(
+        items,
+        &mut on_action,
+        (!owner.is_invalid()).then_some(owner),
+    );
 }
 
-fn show_with_origin<F>(items: Vec<Item>, mut on_action: F, from_tray: bool)
+fn show_with_origin<F>(items: Vec<Item>, mut on_action: F, owner: Option<HWND>)
 where
     F: FnMut(usize) -> MenuAction,
 {
@@ -168,7 +166,7 @@ where
         }
     }
     let _guard = Reset;
-    let _ = run(items, from_tray);
+    let _ = run(items, owner);
 }
 
 /// Opción ya maquetada.
@@ -261,7 +259,6 @@ struct State {
     surface: Surface,
     pos: POINT,
     target: ID2D1DCRenderTarget,
-    opened: Instant,
     /// `Some` al terminar: la opción elegida o `None` si se cerró.
     done: Option<Option<usize>>,
     dwrite: IDWriteFactory,
@@ -296,16 +293,21 @@ thread_local! {
 }
 
 fn with_state(f: impl FnOnce(&mut State)) {
-    STATE.with(|cell| {
+    let ran = STATE.with(|cell| {
         if let Ok(mut guard) = cell.try_borrow_mut() {
             if let Some(state) = guard.as_mut() {
                 f(state);
+                return true;
             }
         }
+        false
     });
+    if ran {
+        crate::ui::flush();
+    }
 }
 
-fn run(items: Vec<Item>, from_tray: bool) -> Result<Option<usize>> {
+fn run(items: Vec<Item>, owner: Option<HWND>) -> Result<Option<usize>> {
     unsafe {
         let mut anchor = POINT::default();
         GetCursorPos(&mut anchor)?;
@@ -340,7 +342,6 @@ fn run(items: Vec<Item>, from_tray: bool) -> Result<Option<usize>> {
         })?;
         target.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
 
-        let owner = if from_tray { tray_owner(anchor) } else { None };
         let hwnd = create_window(owner)?;
         let open = vec![false; entries.len()];
         STATE.with(|cell| {
@@ -362,7 +363,6 @@ fn run(items: Vec<Item>, from_tray: bool) -> Result<Option<usize>> {
                 surface: Surface::new(1, 1).expect("superficie mínima"),
                 pos: POINT::default(),
                 target,
-                opened: Instant::now(),
                 done: None,
                 dwrite,
                 font,
@@ -378,7 +378,6 @@ fn run(items: Vec<Item>, from_tray: bool) -> Result<Option<usize>> {
         let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         // Al frente para recibir el teclado y saber si otra ventana pasa adelante.
         let _ = SetForegroundWindow(hwnd);
-        SetTimer(Some(hwnd), FADE_TIMER, FRAME_MS, None);
 
         // Bucle propio hasta que el menú termine; la isla sigue recibiendo sus mensajes.
         let mut msg = MSG::default();
@@ -398,6 +397,7 @@ fn run(items: Vec<Item>, from_tray: bool) -> Result<Option<usize>> {
             }
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
+            crate::ui::promote_timers();
         }
 
         if let Some(hook) = hook {
@@ -407,22 +407,6 @@ fn run(items: Vec<Item>, from_tray: bool) -> Result<Option<usize>> {
         let state = STATE.with(|c| c.borrow_mut().take());
         let _ = DestroyWindow(hwnd);
         Ok(state.and_then(|s| s.done).flatten())
-    }
-}
-
-fn tray_owner(anchor: POINT) -> Option<HWND> {
-    unsafe {
-        let root = GetAncestor(WindowFromPoint(anchor), GA_ROOT);
-        let mut class = [0u16; 128];
-        let len = GetClassNameW(root, &mut class) as usize;
-        match String::from_utf16_lossy(&class[..len]).as_str() {
-            "Shell_TrayWnd"
-            | "Shell_SecondaryTrayWnd"
-            | "NotifyIconOverflowWindow"
-            | "TopLevelWindowForOverflowXamlIsland" => Some(root),
-            // Apertura desde el teclado o puntero que ya salió de la bandeja.
-            _ => FindWindowW(w!("Shell_TrayWnd"), None).ok(),
-        }
     }
 }
 
@@ -859,11 +843,10 @@ fn render(st: &mut State) {
             let _ = st.target.EndDraw(None, None);
         }
 
-        let t = st.opened.elapsed().as_secs_f32() / FADE_SECS;
         let blend = BLENDFUNCTION {
             BlendOp: AC_SRC_OVER as u8,
             BlendFlags: 0,
-            SourceConstantAlpha: (t.clamp(0.0, 1.0) * 255.0) as u8,
+            SourceConstantAlpha: 255,
             AlphaFormat: AC_SRC_ALPHA as u8,
         };
         let size = SIZE {
@@ -973,6 +956,23 @@ fn step(st: &mut State, dir: i32) {
 }
 
 extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    let deferrable = matches!(
+        msg,
+        WM_MOUSEMOVE
+            | 0x02A3
+            | WM_LBUTTONDOWN
+            | WM_LBUTTONUP
+            | WM_RBUTTONUP
+            | WM_KEYDOWN
+            | WM_CAPTURECHANGED
+            | WM_ACTIVATE
+            | WM_CLOSE
+            | WM_TIMER
+    );
+    if deferrable && STATE.with(|state| state.try_borrow_mut().is_err()) {
+        crate::ui::defer(wndproc, hwnd, msg, wparam, lparam);
+        return LRESULT(0);
+    }
     match msg {
         WM_MOUSEMOVE => {
             let x = (lparam.0 & 0xFFFF) as u16 as i16 as f32;
@@ -1090,17 +1090,6 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                     }
                 }
                 _ => {}
-            });
-            LRESULT(0)
-        }
-        WM_TIMER if wparam.0 == FADE_TIMER => {
-            with_state(|st| {
-                render(st);
-                if st.opened.elapsed().as_secs_f32() >= FADE_SECS {
-                    unsafe {
-                        let _ = KillTimer(Some(hwnd), FADE_TIMER);
-                    }
-                }
             });
             LRESULT(0)
         }
@@ -1232,16 +1221,31 @@ mod tests {
                 },
             ]
         };
-        show_tray(items(false, value), |id| {
+        show_tray(HWND::default(), items(false, value), |id| {
             if id == 1 {
                 toggles += 1;
+                if toggles == 1 {
+                    // Windows puede despachar otro clic dentro de una llamada COM del
+                    // callback. Debe esperar a que se libere State, no desaparecer.
+                    let hwnd = HWND(MENU_HWND.load(Ordering::SeqCst) as _);
+                    let s = unsafe { GetDpiForWindow(hwnd) } as f32 / 96.0;
+                    let y = ((PAD + ROW_H / 2.0) * s) as u32;
+                    unsafe {
+                        SendMessageW(
+                            hwnd,
+                            WM_LBUTTONUP,
+                            Some(WPARAM(0)),
+                            Some(LPARAM(((y << 16) | (40.0 * s) as u32) as isize)),
+                        );
+                    }
+                }
             } else {
                 value = (id - 500) as u32;
             }
             MenuAction::KeepOpen(items(toggles % 2 != 0, value))
         });
         driver.join().unwrap();
-        assert_eq!(toggles, 2);
+        assert_eq!(toggles, 3);
         assert_eq!(value, 40);
     }
 }
