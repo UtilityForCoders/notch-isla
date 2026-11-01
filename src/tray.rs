@@ -54,7 +54,6 @@ const CMD_TIMER: usize = 300;
 const CMD_OUTPUT_DEFAULT: usize = 400;
 const CMD_OUTPUT: usize = 401;
 const CMD_BLUR_RADIUS: usize = 500;
-const BLUR_RADII: [u32; 4] = [4, 10, 16, 32];
 
 /// Duraciones del temporizador en minutos.
 pub const TIMER_MINUTES: [u32; 6] = [5, 10, 15, 25, 45, 60];
@@ -286,16 +285,13 @@ pub fn build_items(state: &MenuState) -> Vec<Item> {
         "Activar desenfoque",
         settings.translucent,
     )];
-    for (i, label) in ["Suave", "Medio", "Intenso", "Muy intenso"]
-        .iter()
-        .enumerate()
-    {
-        blur.push(action(
-            CMD_BLUR_RADIUS + i,
-            label,
-            settings.translucent && settings.blur_radius == BLUR_RADII[i],
-        ));
-    }
+    blur.push(Item::Slider {
+        id: CMD_BLUR_RADIUS,
+        label: format!("Intensidad: {} %", settings.blur_radius * 100 / 40),
+        value: settings.blur_radius,
+        min: 0,
+        max: 40,
+    });
     items.push(Item::Group {
         label: "Desenfoque del fondo".to_string(),
         items: blur,
@@ -360,8 +356,8 @@ fn id_to_command(id: usize, state: &MenuState) -> Option<Command> {
         CMD_HOTKEY_DEFAULT => Some(Command::SetHotkey(Some(hotkey::DEFAULT))),
         CMD_HOTKEY_OFF => Some(Command::SetHotkey(None)),
         _ => {
-            if let Some(i) = pick(CMD_BLUR_RADIUS, BLUR_RADII.len()) {
-                Some(Command::BlurRadius(BLUR_RADII[i]))
+            if let Some(i) = pick(CMD_BLUR_RADIUS, 41) {
+                Some(Command::BlurRadius(i as u32))
             } else if let Some(i) = pick(CMD_HIDE_DELAY, HIDE_DELAYS.len()) {
                 Some(Command::HideDelay(HIDE_DELAYS[i]))
             } else if let Some(i) = pick(CMD_MONITOR, state.monitors.len()) {
@@ -376,12 +372,12 @@ fn id_to_command(id: usize, state: &MenuState) -> Option<Command> {
 /// No recibe `&Tray` a propósito: el menú corre su propio bucle de mensajes y la ventana
 /// sigue recibiendo mensajes mientras está abierto (no debe haber un préstamo de la app activo).
 /// Permite ejecutar comandos de configuración manteniendo el menú abierto e interactivo.
-pub fn show_menu<F>(owner: HWND, mut state: MenuState, mut on_command: F)
+pub fn show_menu<F>(mut state: MenuState, mut on_command: F)
 where
     F: FnMut(Command, &mut Settings) -> bool,
 {
     let items = build_items(&state);
-    menu::show_tray(owner, items, move |id| {
+    menu::show_tray(items, move |id| {
         let Some(cmd) = id_to_command(id, &state) else {
             return menu::MenuAction::Close;
         };

@@ -41,7 +41,7 @@ pub struct Settings {
     pub translucent: bool,
     /// Expandir al pasar el puntero; por defecto se requiere un clic.
     pub expand_on_hover: bool,
-    /// Desviación del desenfoque gaussiano en píxeles lógicos (4 a 40).
+    /// Desviación del desenfoque gaussiano en píxeles lógicos (0 a 40).
     pub blur_radius: u32,
 }
 
@@ -71,7 +71,7 @@ impl Settings {
             high_refresh: read_dword(w!("HighRefresh")).is_some_and(|v| v != 0),
             translucent: read_dword(w!("Translucent")).is_none_or(|v| v != 0),
             expand_on_hover: read_dword(w!("ExpandOnHover")).is_some_and(|v| v != 0),
-            blur_radius: read_dword(w!("BlurRadius")).unwrap_or(16).clamp(4, 40),
+            blur_radius: read_dword(w!("BlurRadius")).unwrap_or(16).min(40),
         }
     }
 

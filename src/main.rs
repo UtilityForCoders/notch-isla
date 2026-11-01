@@ -2690,7 +2690,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                     timer_left,
                 };
                 use tray::Command;
-                tray::show_menu(hwnd, state, |cmd, settings| match cmd {
+                tray::show_menu(state, |cmd, settings| match cmd {
                     Command::ToggleAutostart => {
                         autostart::set(!autostart::is_enabled());
                         true
