@@ -40,6 +40,10 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     VK_SPACE, VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
+    AppendMenuW, CreatePopupMenu, DestroyMenu, TrackPopupMenuEx, HMENU, MF_CHECKED, MF_DISABLED,
+    MF_POPUP, MF_SEPARATOR, MF_STRING, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_NULL,
+};
+use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetCursorPos,
     GetMessageW, GetWindowRect, KillTimer, LoadCursorW, PostMessageW, PostQuitMessage,
     RegisterClassExW, SetForegroundWindow, SetTimer, SetWindowsHookExW, ShowWindow,
@@ -120,6 +124,95 @@ pub fn show(items: Vec<Item>) -> Option<usize> {
         MenuAction::Close
     });
     chosen
+}
+
+/// La bandeja usa el bucle de menús de Explorer/Windows para conservar el anclaje
+/// con la barra de tareas, incluso cuando está configurada para ocultarse sola.
+pub fn show_tray<F>(owner: HWND, mut items: Vec<Item>, mut on_action: F)
+where
+    F: FnMut(usize) -> MenuAction,
+{
+    if OPEN.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            OPEN.store(false, Ordering::SeqCst);
+        }
+    }
+    let _guard = Reset;
+    let mut anchor = POINT::default();
+    unsafe {
+        if GetCursorPos(&mut anchor).is_err() {
+            return;
+        }
+    }
+    loop {
+        let Ok(menu) = native_menu(&items) else {
+            break;
+        };
+        let id = unsafe {
+            let _ = SetForegroundWindow(owner);
+            let id = TrackPopupMenuEx(
+                menu.0,
+                (TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON).0,
+                anchor.x,
+                anchor.y,
+                owner,
+                None,
+            );
+            // Necesario para que la siguiente apertura se cierre correctamente al hacer clic fuera.
+            let _ = PostMessageW(Some(owner), WM_NULL, WPARAM(0), LPARAM(0));
+            id.0 as usize
+        };
+        if id == 0 {
+            break;
+        }
+        match on_action(id) {
+            MenuAction::Close => break,
+            MenuAction::KeepOpen(updated) => items = updated,
+        }
+    }
+}
+
+struct NativeMenu(HMENU);
+
+impl Drop for NativeMenu {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = DestroyMenu(self.0);
+        }
+    }
+}
+
+fn native_menu(items: &[Item]) -> Result<NativeMenu> {
+    let menu = NativeMenu(unsafe { CreatePopupMenu()? });
+    for item in items {
+        let (flags, id, label, child) = match item {
+            Item::Action { id, label, checked } => (
+                MF_STRING | if *checked { MF_CHECKED } else { MF_STRING },
+                *id,
+                label.as_str(),
+                None,
+            ),
+            Item::Label(label) => (MF_STRING | MF_DISABLED, 0, label.as_str(), None),
+            Item::Separator => (MF_SEPARATOR, 0, "", None),
+            Item::Group { label, items } => {
+                let child = native_menu(items)?;
+                (MF_POPUP, child.0 .0 as usize, label.as_str(), Some(child))
+            }
+        };
+        let label: Vec<u16> = label.encode_utf16().chain(Some(0)).collect();
+        unsafe {
+            AppendMenuW(menu.0, flags, id, windows::core::PCWSTR(label.as_ptr()))?;
+        }
+        // El menú padre se encarga de destruir los submenús después de agregarlos.
+        if let Some(child) = child {
+            std::mem::forget(child);
+        }
+    }
+    Ok(menu)
 }
 
 /// Abre el menú interactivo, permitiendo procesar opciones y mantenerlo abierto con nuevos items.
