@@ -147,6 +147,19 @@ impl Projector {
         }
     }
 
+    /// Oculta de inmediato, incluso si se detiene el temporizador por pantalla completa.
+    pub fn hide(&mut self) {
+        if self.shown {
+            unsafe {
+                let _ = ShowWindow(self.hwnd, SW_HIDE);
+            }
+            self.shown = false;
+        }
+        self.presence.reset(0.0);
+        self.verse = None;
+        self.last_frame = Instant::now();
+    }
+
     /// Cambió el DPI: letra y ventana se rehacen a la nueva escala.
     pub fn set_scale(&mut self, scale: f32) {
         if scale == self.scale {

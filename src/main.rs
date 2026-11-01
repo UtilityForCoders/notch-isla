@@ -1141,6 +1141,9 @@ impl App {
         if self.hidden_by_fullscreen() {
             // En pantalla completa (juego, video, presentación), la isla no debe aparecer
             // y si estaba visible se oculta de inmediato sin animaciones lentas que se traben.
+            if let Some(projector) = self.projector.as_mut() {
+                projector.hide();
+            }
             if self.shown {
                 unsafe {
                     let _ = ShowWindow(self.hwnd, SW_HIDE);
@@ -1538,6 +1541,9 @@ impl App {
 
     fn tick(&mut self) {
         if self.hidden_by_fullscreen() {
+            if let Some(projector) = self.projector.as_mut() {
+                projector.hide();
+            }
             if self.shown {
                 unsafe {
                     let _ = ShowWindow(self.hwnd, SW_HIDE);
@@ -1806,7 +1812,10 @@ impl App {
         let mut lyric_ms = None;
         let mut project_sung = None;
         let mut project_painting = false;
-        let should_project = self.spring.value < 0.4 && self.settings.lyrics_projector && playing;
+        let should_project = !self.hidden_by_fullscreen()
+            && self.spring.value < 0.4
+            && self.settings.lyrics_projector
+            && playing;
         let frame_ms = self.frame_ms();
         let lyric = if should_project {
             self.media.as_ref().and_then(|m| {
@@ -1843,6 +1852,7 @@ impl App {
         if lyric.is_some() && self.projector.is_none() {
             self.projector = Projector::new(self.scale).ok();
         }
+        let hide_projector = self.hidden_by_fullscreen();
         if let Some(projector) = self.projector.as_mut() {
             let island_bottom = island::bottom(
                 self.surface.width as f32,
@@ -1856,7 +1866,12 @@ impl App {
             let bottom = island_bottom.max(4.0 * self.scale);
             let cx = self.pos.x + self.surface.width as i32 / 2;
             let top = self.pos.y + (bottom - 2.0 * self.scale) as i32;
-            projecting = projector.render(lyric, project_sung, cx, top, self.settings.translucent);
+            if hide_projector {
+                projector.hide();
+            } else {
+                projecting =
+                    projector.render(lyric, project_sung, cx, top, self.settings.translucent);
+            }
         }
 
         let mut scroll_ms = None;
