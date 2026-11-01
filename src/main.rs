@@ -16,6 +16,8 @@ mod projector;
 mod routing;
 mod settings;
 mod spring;
+#[cfg(test)]
+mod stability_tests;
 mod system;
 mod text;
 mod tray;
