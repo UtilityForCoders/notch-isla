@@ -372,12 +372,12 @@ fn id_to_command(id: usize, state: &MenuState) -> Option<Command> {
 /// No recibe `&Tray` a propósito: el menú corre su propio bucle de mensajes y la ventana
 /// sigue recibiendo mensajes mientras está abierto (no debe haber un préstamo de la app activo).
 /// Permite ejecutar comandos de configuración manteniendo el menú abierto e interactivo.
-pub fn show_menu<F>(owner: HWND, mut state: MenuState, mut on_command: F)
+pub fn show_menu<F>(mut state: MenuState, mut on_command: F)
 where
     F: FnMut(Command, &mut Settings) -> bool,
 {
     let items = build_items(&state);
-    menu::show_tray(owner, items, move |id| {
+    menu::show_tray(items, move |id| {
         let Some(cmd) = id_to_command(id, &state) else {
             return menu::MenuAction::Close;
         };

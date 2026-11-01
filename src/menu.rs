@@ -131,22 +131,18 @@ pub fn show_interactive<F>(items: Vec<Item>, mut on_action: F)
 where
     F: FnMut(usize) -> MenuAction,
 {
-    show_with_origin(items, &mut on_action, None);
+    show_with_handler(items, &mut on_action);
 }
 
-/// El dueño es una ventana del propio proceso: no acopla el bucle de UI con Explorer.
-pub fn show_tray<F>(owner: HWND, items: Vec<Item>, mut on_action: F)
+/// El menú usa un dueño propio y estable, independiente de la isla y de Explorer.
+pub fn show_tray<F>(items: Vec<Item>, mut on_action: F)
 where
     F: FnMut(usize) -> MenuAction,
 {
-    show_with_origin(
-        items,
-        &mut on_action,
-        (!owner.is_invalid()).then_some(owner),
-    );
+    show_with_handler(items, &mut on_action);
 }
 
-fn show_with_origin<F>(items: Vec<Item>, mut on_action: F, owner: Option<HWND>)
+fn show_with_handler<F>(items: Vec<Item>, mut on_action: F)
 where
     F: FnMut(usize) -> MenuAction,
 {
@@ -166,7 +162,7 @@ where
         }
     }
     let _guard = Reset;
-    let _ = run(items, owner);
+    let _ = run(items);
 }
 
 /// Opción ya maquetada.
@@ -307,7 +303,7 @@ fn with_state(f: impl FnOnce(&mut State)) {
     }
 }
 
-fn run(items: Vec<Item>, owner: Option<HWND>) -> Result<Option<usize>> {
+fn run(items: Vec<Item>) -> Result<Option<usize>> {
     unsafe {
         let mut anchor = POINT::default();
         GetCursorPos(&mut anchor)?;
@@ -342,7 +338,31 @@ fn run(items: Vec<Item>, owner: Option<HWND>) -> Result<Option<usize>> {
         })?;
         target.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
 
-        let hwnd = create_window(owner)?;
+        // Un dueño oculto propio mantiene el menú vivo aunque la isla se oculte,
+        // y evita prestar ventanas de Explorer que pertenecen a otro hilo/proceso.
+        struct Host(HWND);
+        impl Drop for Host {
+            fn drop(&mut self) {
+                unsafe {
+                    let _ = DestroyWindow(self.0);
+                }
+            }
+        }
+        let host = Host(CreateWindowExW(
+            WS_EX_TOOLWINDOW,
+            w!("STATIC"),
+            w!("NotchIslaMenuHost"),
+            WS_POPUP,
+            0,
+            0,
+            0,
+            0,
+            None,
+            None,
+            Some(GetModuleHandleW(None)?.into()),
+            None,
+        )?);
+        let hwnd = create_window(Some(host.0))?;
         let open = vec![false; entries.len()];
         STATE.with(|cell| {
             *cell.borrow_mut() = Some(State {
@@ -1221,7 +1241,7 @@ mod tests {
                 },
             ]
         };
-        show_tray(HWND::default(), items(false, value), |id| {
+        show_tray(items(false, value), |id| {
             if id == 1 {
                 toggles += 1;
                 if toggles == 1 {
