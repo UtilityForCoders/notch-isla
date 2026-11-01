@@ -21,10 +21,10 @@ use windows::Win32::System::WinRT::{
     CreateDispatcherQueueController, DispatcherQueueOptions, DQTAT_COM_STA, DQTYPE_THREAD_CURRENT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, RegisterClassW, SetWindowPos, ShowWindow,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_SHOWWINDOW, SW_HIDE, WNDCLASSW,
-    WS_DISABLED, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    WS_EX_TRANSPARENT, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GetWindow, RegisterClassW, SetWindowPos,
+    ShowWindow, GW_HWNDPREV, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE,
+    SWP_SHOWWINDOW, SW_HIDE, WNDCLASSW, WS_DISABLED, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 use windows::UI::Composition::Desktop::DesktopWindowTarget;
 use windows::UI::Composition::{
@@ -172,6 +172,7 @@ pub struct Backdrop {
     shown: bool,
     placement: Option<(i32, i32, u32, u32)>,
     region: Option<(i32, i32, i32, i32, i32)>,
+    last_visual: Option<[f32; 6]>,
 }
 
 impl Backdrop {
@@ -225,6 +226,7 @@ impl Backdrop {
                     shown: false,
                     placement: None,
                     region: None,
+                    last_visual: None,
                 }),
                 Err(error) => {
                     let _ = DestroyWindow(hwnd);
@@ -275,18 +277,22 @@ impl Backdrop {
             self.visual.SetBrush(&brush)?;
             self.radius = radius;
         }
-        let size = Vector2 {
-            X: w.max(1.0),
-            Y: h.max(1.0),
-        };
-        self.visual.SetSize(size)?;
-        self.visual.SetOffset(Vector3 { X: x, Y: y, Z: 0.0 })?;
-        self.geometry.SetSize(size)?;
-        self.geometry.SetCornerRadius(Vector2 {
-            X: corner,
-            Y: corner,
-        })?;
-        self.visual.SetOpacity(opacity.clamp(0.0, 1.0))?;
+        let visual = [x, y, w, h, corner, opacity.clamp(0.0, 1.0)];
+        if self.last_visual != Some(visual) {
+            let size = Vector2 {
+                X: w.max(1.0),
+                Y: h.max(1.0),
+            };
+            self.visual.SetSize(size)?;
+            self.visual.SetOffset(Vector3 { X: x, Y: y, Z: 0.0 })?;
+            self.geometry.SetSize(size)?;
+            self.geometry.SetCornerRadius(Vector2 {
+                X: corner,
+                Y: corner,
+            })?;
+            self.visual.SetOpacity(visual[5])?;
+            self.last_visual = Some(visual);
+        }
         // El efecto de backdrop puede extenderse más allá del clip del visual. Limitar
         // también la región nativa impide que DWM pinte halos fuera de la píldora.
         let region = (
@@ -341,6 +347,10 @@ impl Backdrop {
     /// mover o volver a subir una ventana layered al grupo de ventanas topmost.
     pub fn place_behind(&mut self, content: HWND) {
         if self.shown {
+            // No reenviar WINDOWPOS/repintados a DWM en cada cuadro si el orden ya es correcto.
+            if unsafe { GetWindow(self.hwnd, GW_HWNDPREV) }.ok() == Some(content) {
+                return;
+            }
             let result = unsafe {
                 SetWindowPos(
                     self.hwnd,
