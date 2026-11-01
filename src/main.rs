@@ -5,6 +5,7 @@ mod appicon;
 mod audio;
 mod autostart;
 mod backdrop;
+mod frame_wait;
 mod fullscreen;
 mod hotkey;
 mod island;
@@ -27,7 +28,7 @@ mod visualizer;
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -346,7 +347,7 @@ struct DragIsland {
 struct HighRefreshDriver {
     active: Arc<(Mutex<bool>, Condvar)>,
     pending: Arc<AtomicBool>,
-    interval_ms: Arc<AtomicU32>,
+    interval_ns: Arc<AtomicU64>,
     running: Arc<AtomicBool>,
 }
 
@@ -360,8 +361,8 @@ impl HighRefreshDriver {
         let pending = Arc::new(AtomicBool::new(false));
         let thread_active = Arc::clone(&active);
         let thread_pending = Arc::clone(&pending);
-        let interval_ms = Arc::new(AtomicU32::new(FRAME_MS));
-        let thread_interval = Arc::clone(&interval_ms);
+        let interval_ns = Arc::new(AtomicU64::new(FRAME_MS as u64 * 1_000_000));
+        let thread_interval = Arc::clone(&interval_ns);
         let running = Arc::new(AtomicBool::new(true));
         let thread_running = Arc::clone(&running);
         let hwnd_raw = hwnd.0 as isize;
@@ -370,6 +371,7 @@ impl HighRefreshDriver {
             .name("notch-vsync".into())
             .spawn(move || {
                 let hwnd = HWND(hwnd_raw as *mut core::ffi::c_void);
+                let waiter = frame_wait::FrameWait::new();
                 loop {
                     // Duerme hasta que haya una animación que requiera alta tasa de refresco:
                     {
@@ -385,20 +387,18 @@ impl HighRefreshDriver {
 
                     // Sincroniza con el refresco de pantalla del DWM (hardware VSync):
                     let started = Instant::now();
-                    {
-                        if sync().is_err() {
-                            // Si DWM se suspende o falla (ej. juego en pantalla completa exclusiva),
-                            // dormimos brevemente para no saturar el hilo ni quemar CPU.
-                            std::thread::sleep(std::time::Duration::from_millis(15));
-                        }
-                    }
+                    let synced = sync().is_ok();
                     // DwmFlush puede volver inmediatamente (composición, sesión remota,
                     // cambios de pantalla). Un éxito no garantiza que haya esperado un VSync.
-                    let interval = Duration::from_millis(
-                        thread_interval.load(Ordering::Relaxed).max(1) as u64,
-                    );
-                    if let Some(remaining) = interval.checked_sub(started.elapsed()) {
-                        std::thread::sleep(remaining);
+                    let interval =
+                        Duration::from_nanos(thread_interval.load(Ordering::Relaxed).max(1));
+                    let elapsed = started.elapsed();
+                    // Si DWM ya esperó el refresco, no añadir otra espera: incluso una
+                    // fracción de ms puede hacernos perder el siguiente VSync a 240 Hz.
+                    if !synced || elapsed < interval / 2 {
+                        if let Some(remaining) = interval.checked_sub(elapsed) {
+                            waiter.wait(remaining);
+                        }
                     }
                     if !thread_running.load(Ordering::Acquire) {
                         return;
@@ -426,7 +426,7 @@ impl HighRefreshDriver {
         Self {
             active,
             pending,
-            interval_ms,
+            interval_ns,
             running,
         }
     }
@@ -468,6 +468,7 @@ struct App {
     /// Intervalo del temporizador de animación, o `None` si está apagado (reposo).
     timer_ms: Option<u32>,
     last_tick: Instant,
+    last_vsync: Option<Instant>,
     /// Reloj de las barras de audio.
     started: Instant,
     /// Si DirectWrite fallara, la isla sigue funcionando sin texto.
@@ -570,6 +571,7 @@ impl App {
             expanded_by_click: false,
             timer_ms: None,
             last_tick: Instant::now(),
+            last_vsync: None,
             started: Instant::now(),
             text: TextRenderer::new(scale).ok(),
             media: None,
@@ -1157,9 +1159,14 @@ impl App {
 
     /// Enciende, cambia de intervalo o apaga el temporizador de animación.
     fn set_timer(&mut self, ms: Option<u32>) {
+        let interval = if self.settings.high_refresh && self.hz > 60 {
+            1_000_000_000 / self.hz as u64
+        } else {
+            FRAME_MS as u64 * 1_000_000
+        };
         self.high_refresh_driver
-            .interval_ms
-            .store(self.frame_ms(), Ordering::Relaxed);
+            .interval_ns
+            .store(interval, Ordering::Relaxed);
         if self.timer_ms == ms {
             return;
         }
@@ -2649,6 +2656,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             with_app(|app| {
                 if app.settings.high_refresh {
                     app.tick();
+                    app.last_vsync = Some(Instant::now());
                 }
                 app.high_refresh_driver.frame_processed();
             });
@@ -2656,6 +2664,16 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
         }
         WM_TIMER if wparam.0 == ANIM_TIMER => {
             with_app(|app| {
+                let vsync_active = app.settings.high_refresh
+                    && app.hz > 60
+                    && app.timer_ms.is_some_and(|interval| interval < 15);
+                if vsync_active
+                    && app
+                        .last_vsync
+                        .is_some_and(|last| last.elapsed() < Duration::from_millis(30))
+                {
+                    return;
+                }
                 app.tick();
                 app.high_refresh_driver.frame_processed();
             });
@@ -2941,7 +2959,6 @@ mod tests {
     #[ignore = "prueba prolongada de refresco alto; NOTCH_STRESS_SECONDS controla su duración"]
     fn refresco_alto_no_satura_la_cola_ni_bloquea_temporizadores() {
         use std::cell::Cell;
-        use windows::Win32::UI::WindowsAndMessaging::{PeekMessageW, PM_REMOVE};
         thread_local! {
             static DRIVER: RefCell<Option<HighRefreshDriver>> = const { RefCell::new(None) };
             static FRAMES: Cell<u64> = const { Cell::new(0) };
@@ -2991,9 +3008,21 @@ mod tests {
                 None,
             )
             .unwrap();
-            let driver = HighRefreshDriver::with_sync(hwnd, || Ok(()));
+            let real_vsync = std::env::var_os("NOTCH_REAL_VSYNC").is_some();
+            let hz = if real_vsync {
+                monitors::refresh_rate(monitors::find(""))
+            } else {
+                240
+            };
+            let driver = if real_vsync {
+                HighRefreshDriver::new(hwnd)
+            } else {
+                HighRefreshDriver::with_sync(hwnd, || Ok(()))
+            };
             let running = Arc::clone(&driver.running);
-            driver.interval_ms.store(4, Ordering::Relaxed);
+            driver
+                .interval_ns
+                .store(1_000_000_000 / hz as u64, Ordering::Relaxed);
             driver.set_active(true);
             DRIVER.with(|cell| *cell.borrow_mut() = Some(driver));
             SetTimer(Some(hwnd), 99, 20, None);
@@ -3005,12 +3034,11 @@ mod tests {
             let started = Instant::now();
             while started.elapsed() < Duration::from_secs(seconds) {
                 let mut msg = MSG::default();
-                if PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
-                    DispatchMessageW(&msg);
-                    ui::promote_timers();
-                } else {
-                    std::thread::sleep(Duration::from_millis(1));
+                if !GetMessageW(&mut msg, None, 0, 0).as_bool() {
+                    break;
                 }
+                DispatchMessageW(&msg);
+                ui::promote_timers();
             }
             DRIVER.with(|cell| cell.borrow_mut().take());
             let _ = KillTimer(Some(hwnd), 99);
@@ -3018,7 +3046,7 @@ mod tests {
             let frames = FRAMES.get();
             let timers = TIMERS.get();
             assert!(
-                frames > seconds * 10 && frames <= seconds * 260,
+                frames > seconds * 10 && frames <= seconds * (hz as u64 * 110 / 100 + 1),
                 "cuadros limitados al ritmo pedido: {frames} en {seconds} s"
             );
             assert!(
@@ -3032,7 +3060,7 @@ mod tests {
                 "el hilo de refresco debe terminar al cerrar"
             );
             eprintln!(
-                "{seconds} s: {frames} cuadros, {timers} temporizadores; cola sin saturación"
+                "{seconds} s: {frames} cuadros, {timers} temporizadores; objetivo {hz} Hz, VSync real={real_vsync}"
             );
         }
     }
