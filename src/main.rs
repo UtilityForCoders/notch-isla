@@ -4,6 +4,7 @@
 mod appicon;
 mod audio;
 mod autostart;
+mod backdrop;
 mod fullscreen;
 mod hotkey;
 mod island;
@@ -490,6 +491,7 @@ struct App {
     /// Proyector de la letra bajo la isla. Se crea la primera vez que hay un verso que mostrar
     /// (con la letra apagada no ocupa memoria); si no se pudiera crear, la isla sigue igual.
     projector: Option<Projector>,
+    backdrop: Option<backdrop::Backdrop>,
     /// Escucha el audio de la app que suena para las barras reales.
     visualizer: Visualizer,
     /// Frecuencia de refresco de la pantalla actual en Hz (60, 120, 240, etc.).
@@ -555,6 +557,7 @@ impl App {
             lyrics_pending: HashSet::new(),
             lyric_slide: None,
             projector: None,
+            backdrop: backdrop::Backdrop::new().ok(),
             visualizer: Visualizer::default(),
             hz: monitors::refresh_rate(monitor),
             high_refresh_driver: HighRefreshDriver::new(hwnd),
@@ -1145,6 +1148,9 @@ impl App {
         if self.hidden_by_fullscreen() {
             // En pantalla completa (juego, video, presentación), la isla no debe aparecer
             // y si estaba visible se oculta de inmediato sin animaciones lentas que se traben.
+            if let Some(backdrop) = self.backdrop.as_mut() {
+                backdrop.hide();
+            }
             if let Some(projector) = self.projector.as_mut() {
                 projector.hide();
             }
@@ -1774,6 +1780,33 @@ impl App {
             None => self.surface.full(),
         };
         self.surface.clear(dirty);
+        let blur_active = if self.settings.translucent
+            && !self.hidden_by_fullscreen()
+            && self.presence.value > 0.01
+        {
+            let (x, y, w, h, r) = island::backdrop_geometry(
+                sw as f32,
+                sh as f32,
+                self.scale,
+                self.spring.value,
+                self.presence.value,
+                shape,
+            );
+            self.backdrop.as_mut().is_some_and(|backdrop| {
+                backdrop.show(
+                    self.hwnd,
+                    (self.pos.x as f32 + x, self.pos.y as f32 + y, w, h),
+                    r,
+                    (self.settings.blur_radius as f32 * self.scale).round() as u32,
+                    self.presence.value,
+                )
+            })
+        } else {
+            if let Some(backdrop) = self.backdrop.as_mut() {
+                backdrop.hide();
+            }
+            false
+        };
         let areas = island::draw(
             &mut self.surface.pixmap,
             self.scale,
@@ -1789,7 +1822,7 @@ impl App {
             self.started.elapsed().as_secs_f32(),
             time_info,
             lyrics_info,
-            self.settings.translucent,
+            blur_active,
         );
         let lyrics_area = areas.as_ref().and_then(|a| a.lyrics.as_ref());
         let lyric_sliding = lyrics_area.is_some_and(|l| l.shift != 0.0);
@@ -1877,8 +1910,14 @@ impl App {
             if hide_projector {
                 projector.hide();
             } else {
-                projecting =
-                    projector.render(lyric, project_sung, cx, top, self.settings.translucent);
+                projecting = projector.render(
+                    lyric,
+                    project_sung,
+                    cx,
+                    top,
+                    self.settings.translucent,
+                    self.settings.blur_radius,
+                );
             }
         }
 
@@ -2731,6 +2770,13 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                     }
                     Command::ToggleTranslucent => {
                         settings.translucent = !settings.translucent;
+                        settings.save();
+                        with_app(|app| app.apply_settings(settings.clone()));
+                        true
+                    }
+                    Command::BlurRadius(radius) => {
+                        settings.blur_radius = radius;
+                        settings.translucent = true;
                         settings.save();
                         with_app(|app| app.apply_settings(settings.clone()));
                         true

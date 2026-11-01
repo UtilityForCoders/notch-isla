@@ -63,6 +63,7 @@ cargo run --example icon
   - **Ocultarse sola tras**: 3, 5, 10 o 30 segundos, o nunca.
   - **Pantalla**: en qué monitor va la isla (si hay más de uno).
   - **Temporizador**: de 5 a 60 minutos; al terminar suena y la isla avisa.
+  - **Desenfoque del fondo**: suave, medio, intenso o muy intenso, para la isla y la letra flotante. Se puede desactivar para usar negro opaco. Windows compone el fondo en vivo; si el efecto no está disponible, se usa el fondo opaco.
   - **Avisar al cambiar la salida de audio**, **Ocultar en pantalla completa**, **Iniciar con Windows** y **Salir**.
   - Los ajustes se guardan en `HKEY_CURRENT_USER\Software\NotchIsla`.
 - Al minuto de abrirse y luego cada 6 horas, consulta en GitHub si hay una versión nueva (o al momento, con **Buscar actualizaciones** en la bandeja). Si la app está instalada, descarga el instalador en segundo plano, lo verifica (tamaño y SHA-256 publicados por GitHub) y avisa: un clic en el aviso, o en **Instalar la versión X** del menú de la bandeja, actualiza sin ventanas y la isla vuelve a abrirse sola. La isla avisa "Instalando la versión X" antes de cerrarse y, al volver, "Notch Isla se actualizó" o "No se pudo instalar la versión X". Si la instalación falla, un ayudante (una copia temporal de la app) vuelve a abrir la isla igual, así nunca queda cerrada sin aviso. La versión portable solo avisa y abre la página de descarga. Ver [PRIVACY.md](PRIVACY.md).

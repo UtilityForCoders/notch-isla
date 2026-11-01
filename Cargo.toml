@@ -20,6 +20,13 @@ features = [
     # SMTC: la música que suena en cualquier app (Spotify, navegador...).
     "Foundation",
     "Foundation_Collections",
+    "Graphics_Effects",
+    "System",
+    "UI_Composition",
+    "UI_Composition_Desktop",
+    "Win32_System_WinRT_Composition",
+    "Win32_System_WinRT_Graphics_Direct2D",
+    "Win32_Graphics_Dwm",
     "Media_Control",
     # Carátula: abrir la miniatura y decodificarla (JPEG/PNG) con WIC.
     "Graphics_Imaging",

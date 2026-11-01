@@ -53,6 +53,8 @@ const CMD_TIMER: usize = 300;
 /// Menú de salida de audio de la isla.
 const CMD_OUTPUT_DEFAULT: usize = 400;
 const CMD_OUTPUT: usize = 401;
+const CMD_BLUR_RADIUS: usize = 500;
+const BLUR_RADII: [u32; 4] = [4, 10, 16, 32];
 
 /// Duraciones del temporizador en minutos.
 pub const TIMER_MINUTES: [u32; 6] = [5, 10, 15, 25, 45, 60];
@@ -84,9 +86,10 @@ pub enum Command {
     Center,
     /// Alternar adaptación de animaciones a los Hz del monitor.
     ToggleHighRefresh,
-    /// Alternar fondo translúcido estilo acrílico.
+    /// Alternar desenfoque real del fondo.
     ToggleTranslucent,
     ToggleExpandOnHover,
+    BlurRadius(u32),
 }
 
 /// Lo que el menú necesita saber para marcar las opciones actuales.
@@ -278,11 +281,25 @@ pub fn build_items(state: &MenuState) -> Vec<Item> {
         "Adaptar animaciones a los Hz de la pantalla",
         settings.high_refresh,
     ));
-    items.push(action(
+    let mut blur = vec![action(
         CMD_TRANSLUCENT,
-        "Fondo translúcido",
+        "Activar desenfoque",
         settings.translucent,
-    ));
+    )];
+    for (i, label) in ["Suave", "Medio", "Intenso", "Muy intenso"]
+        .iter()
+        .enumerate()
+    {
+        blur.push(action(
+            CMD_BLUR_RADIUS + i,
+            label,
+            settings.translucent && settings.blur_radius == BLUR_RADII[i],
+        ));
+    }
+    items.push(Item::Group {
+        label: "Desenfoque del fondo".to_string(),
+        items: blur,
+    });
     items.push(action(
         CMD_CENTER,
         "Centrar en la pantalla",
@@ -343,7 +360,9 @@ fn id_to_command(id: usize, state: &MenuState) -> Option<Command> {
         CMD_HOTKEY_DEFAULT => Some(Command::SetHotkey(Some(hotkey::DEFAULT))),
         CMD_HOTKEY_OFF => Some(Command::SetHotkey(None)),
         _ => {
-            if let Some(i) = pick(CMD_HIDE_DELAY, HIDE_DELAYS.len()) {
+            if let Some(i) = pick(CMD_BLUR_RADIUS, BLUR_RADII.len()) {
+                Some(Command::BlurRadius(BLUR_RADII[i]))
+            } else if let Some(i) = pick(CMD_HIDE_DELAY, HIDE_DELAYS.len()) {
                 Some(Command::HideDelay(HIDE_DELAYS[i]))
             } else if let Some(i) = pick(CMD_MONITOR, state.monitors.len()) {
                 Some(Command::Monitor(i))

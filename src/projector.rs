@@ -79,6 +79,8 @@ pub struct Projector {
     height: Spring,
     shown: bool,
     last_frame: Instant,
+    backdrop: Option<crate::backdrop::Backdrop>,
+    blur_radius: u32,
 }
 
 impl Projector {
@@ -143,12 +145,17 @@ impl Projector {
                 height: Spring::new(0.0, 260.0, 24.0),
                 shown: false,
                 last_frame: Instant::now(),
+                backdrop: crate::backdrop::Backdrop::new().ok(),
+                blur_radius: 16,
             })
         }
     }
 
     /// Oculta de inmediato, incluso si se detiene el temporizador por pantalla completa.
     pub fn hide(&mut self) {
+        if let Some(backdrop) = self.backdrop.as_mut() {
+            backdrop.hide();
+        }
         if self.shown {
             unsafe {
                 let _ = ShowWindow(self.hwnd, SW_HIDE);
@@ -185,7 +192,9 @@ impl Projector {
         cx: i32,
         top: i32,
         translucent: bool,
+        blur_radius: u32,
     ) -> bool {
+        self.blur_radius = blur_radius;
         let dt = self.last_frame.elapsed().as_secs_f32().min(0.05);
         self.last_frame = Instant::now();
         let s = self.scale;
@@ -219,6 +228,9 @@ impl Projector {
 
         let visible = self.presence.value > 0.01;
         if !visible {
+            if let Some(backdrop) = self.backdrop.as_mut() {
+                backdrop.hide();
+            }
             if self.shown {
                 unsafe {
                     let _ = ShowWindow(self.hwnd, SW_HIDE);
@@ -264,6 +276,23 @@ impl Projector {
         // Baja desde detrás de la isla mientras aparece.
         let y = DROP * s * self.presence.value.clamp(0.0, 1.0);
 
+        let translucent = if translucent {
+            self.backdrop.as_mut().is_some_and(|backdrop| {
+                backdrop.show(
+                    self.hwnd,
+                    (cx as f32 - sw / 2.0 + x, top as f32 + y, w, h),
+                    (h / 2.0).min(18.0 * s),
+                    (self.blur_radius as f32 * s).round() as u32,
+                    self.presence.value,
+                )
+            })
+        } else {
+            if let Some(backdrop) = self.backdrop.as_mut() {
+                backdrop.hide();
+            }
+            false
+        };
+
         let pixmap = &mut self.surface.pixmap;
         pixmap.fill(Color::TRANSPARENT);
         let mut paint = Paint {
@@ -272,7 +301,7 @@ impl Projector {
         };
         let r = (h / 2.0).min(18.0 * s);
         if translucent {
-            paint.set_color_rgba8(20, 20, 24, 185);
+            paint.set_color_rgba8(20, 20, 24, 100);
             fill_rounded_rect(pixmap, &paint, x, y, w, h, r);
             paint.set_color_rgba8(255, 255, 255, 34);
             if let Some(border) = rounded_rect_path(

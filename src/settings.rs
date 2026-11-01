@@ -37,10 +37,12 @@ pub struct Settings {
     pub offset_x: i32,
     /// Adapta la frecuencia de cuadros de las animaciones a los Hz del monitor (120 Hz, 240 Hz, etc.).
     pub high_refresh: bool,
-    /// Fondo translúcido con efecto acrílico y borde sutil (si no, negro opaco).
+    /// Fondo desenfocado por el compositor con tinte oscuro (si no, negro opaco).
     pub translucent: bool,
     /// Expandir al pasar el puntero; por defecto se requiere un clic.
     pub expand_on_hover: bool,
+    /// Desviación del desenfoque gaussiano en píxeles lógicos (4 a 40).
+    pub blur_radius: u32,
 }
 
 impl Settings {
@@ -69,6 +71,7 @@ impl Settings {
             high_refresh: read_dword(w!("HighRefresh")).is_some_and(|v| v != 0),
             translucent: read_dword(w!("Translucent")).is_none_or(|v| v != 0),
             expand_on_hover: read_dword(w!("ExpandOnHover")).is_some_and(|v| v != 0),
+            blur_radius: read_dword(w!("BlurRadius")).unwrap_or(16).clamp(4, 40),
         }
     }
 
@@ -86,6 +89,7 @@ impl Settings {
         write_dword(w!("HighRefresh"), self.high_refresh as u32);
         write_dword(w!("Translucent"), self.translucent as u32);
         write_dword(w!("ExpandOnHover"), self.expand_on_hover as u32);
+        write_dword(w!("BlurRadius"), self.blur_radius);
     }
 
     /// Alguna de las dos letras está activada: hay que pedirla.
