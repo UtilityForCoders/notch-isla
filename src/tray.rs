@@ -94,7 +94,7 @@ pub enum Command {
 
 /// Lo que el menú necesita saber para marcar las opciones actuales.
 pub struct MenuState<'a> {
-    /// Texto de la opción de actualizar, si hay una versión nueva; va arriba de todo.
+    /// Texto de la opción de actualizar, si hay una versión nueva.
     pub update: Option<&'a str>,
     pub settings: Settings,
     pub monitors: &'a [Monitor],
@@ -195,7 +195,10 @@ pub fn build_items(state: &MenuState) -> Vec<Item> {
         label: label.to_string(),
         checked,
     };
-    let mut items = Vec::new();
+    let mut items = vec![
+        Item::Label(format!("Notch Isla v{}", env!("CARGO_PKG_VERSION"))),
+        Item::Separator,
+    ];
     if let Some(label) = state.update {
         items.push(action(CMD_UPDATE, label, false));
         items.push(Item::Separator);
