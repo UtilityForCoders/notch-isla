@@ -68,13 +68,13 @@ use windows::Win32::UI::WindowsAndMessaging::{
     BeginDeferWindowPos, CreateWindowExW, DefWindowProcW, DeferWindowPos, DestroyWindow,
     DispatchMessageW, EndDeferWindowPos, GetCursorPos, GetMessageW, KillTimer, LoadCursorW,
     PostMessageW, PostQuitMessage, RegisterClassExW, SetTimer, SetWindowPos, ShowWindow,
-    TranslateMessage, UpdateLayeredWindow, UpdateLayeredWindowIndirect, HWND_TOPMOST, IDC_ARROW,
-    MA_NOACTIVATE, MB_ICONASTERISK, MSG, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE,
-    SWP_NOZORDER, SW_HIDE, SW_SHOWNOACTIVATE, ULW_ALPHA, UPDATELAYEREDWINDOWINFO, WM_APP,
-    WM_CAPTURECHANGED, WM_CONTEXTMENU, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_HOTKEY,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONUP,
-    WM_TIMER, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    WS_POPUP,
+    TranslateMessage, UpdateLayeredWindow, UpdateLayeredWindowIndirect, CS_DBLCLKS, HWND_TOPMOST,
+    IDC_ARROW, MA_NOACTIVATE, MB_ICONASTERISK, MSG, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER,
+    SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOWNOACTIVATE, ULW_ALPHA, UPDATELAYEREDWINDOWINFO,
+    WM_APP, WM_CAPTURECHANGED, WM_CONTEXTMENU, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED,
+    WM_HOTKEY, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE,
+    WM_MOUSEWHEEL, WM_RBUTTONUP, WM_TIMER, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 /// Aviso de "el mouse salió de la ventana" (definido aquí para no cargar todo el módulo Win32_UI_Controls).
@@ -246,6 +246,7 @@ fn main() -> Result<()> {
         let class_name = w!("NotchIslaWindow");
         let wc = WNDCLASSEXW {
             cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+            style: CS_DBLCLKS,
             lpfnWndProc: Some(wndproc),
             hInstance: instance.into(),
             hCursor: LoadCursorW(None, IDC_ARROW)?,
@@ -457,6 +458,8 @@ struct App {
     spring: Spring,
     hovered: bool,
     expanded_by_click: bool,
+    /// Consume la liberación del segundo clic después de centrar la isla.
+    centering_double_click: bool,
     /// Intervalo del temporizador de animación, o `None` si está apagado (reposo).
     timer_ms: Option<u32>,
     last_tick: Instant,
@@ -562,6 +565,7 @@ impl App {
             spring: Spring::new(0.0, EXPAND_SPRING.0, EXPAND_SPRING.1),
             hovered: false,
             expanded_by_click: false,
+            centering_double_click: false,
             timer_ms: None,
             last_tick: Instant::now(),
             last_vsync: None,
@@ -2538,6 +2542,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             WM_MOUSEMOVE
                 | WM_MOUSELEAVE
                 | WM_LBUTTONDOWN
+                | WM_LBUTTONDBLCLK
                 | WM_LBUTTONUP
                 | WM_RBUTTONUP
                 | WM_MOUSEWHEEL
@@ -2581,6 +2586,15 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             });
             LRESULT(0)
         }
+        WM_LBUTTONDBLCLK => {
+            with_app(|app| {
+                app.centering_double_click = true;
+                // La isla puede alejarse del puntero al centrarse; recibe igualmente el UP.
+                unsafe { SetCapture(app.hwnd) };
+                app.center_island();
+            });
+            LRESULT(0)
+        }
         WM_LBUTTONDOWN => {
             let (x, y) = mouse_pos(lparam);
             with_app(|app| {
@@ -2620,6 +2634,12 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             // WM_DESTROY necesita el estado de la app libre.
             let mut pending = None;
             with_app(|app| {
+                if std::mem::take(&mut app.centering_double_click) {
+                    unsafe {
+                        let _ = ReleaseCapture();
+                    }
+                    return;
+                }
                 if let Some(drag) = app.drag_island.take() {
                     unsafe {
                         let _ = ReleaseCapture();
