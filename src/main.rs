@@ -2894,8 +2894,11 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                     Command::BlurRadius(radius) => {
                         settings.blur_radius = radius;
                         settings.translucent = true;
-                        settings.save();
-                        with_app(|app| app.apply_settings(settings.clone()));
+                        with_app(|app| {
+                            app.settings.blur_radius = radius;
+                            app.settings.translucent = true;
+                            app.redraw();
+                        });
                         true
                     }
                     Command::ToggleExpandOnHover => {

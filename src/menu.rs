@@ -41,7 +41,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
     FindWindowExW, FindWindowW, GetAncestor, GetCursorPos, GetForegroundWindow, GetMessageW,
-    GetWindowRect, LoadCursorW, PostMessageW, PostQuitMessage, RegisterClassExW,
+    GetWindowRect, KillTimer, LoadCursorW, PostMessageW, PostQuitMessage, RegisterClassExW,
     SetForegroundWindow, SetTimer, SetWindowsHookExW, ShowWindow, TranslateMessage,
     UnhookWindowsHookEx, UpdateLayeredWindow, GA_ROOTOWNER, IDC_ARROW, KBDLLHOOKSTRUCT,
     MA_NOACTIVATE, MSG, MSLLHOOKSTRUCT, SW_SHOWNOACTIVATE, ULW_ALPHA, WA_INACTIVE, WH_KEYBOARD_LL,
@@ -99,6 +99,7 @@ const MAX_W: f32 = 360.0;
 const FONT: f32 = 13.0;
 const LABEL_FONT: f32 = 12.0;
 const FOCUS_TIMER: usize = 2;
+const SLIDER_TIMER: usize = 3;
 
 /// Hay un menú abierto: otro clic en la bandeja mientras tanto no abre uno encima.
 static OPEN: AtomicBool = AtomicBool::new(false);
@@ -113,6 +114,13 @@ pub enum MenuAction {
     Close,
     /// Mantiene el menú abierto y actualiza las opciones (por ejemplo, alternar casillas de verificación).
     KeepOpen(Vec<Item>),
+    /// Cambia solo el deslizador y una casilla relacionada, conservando los demás layouts.
+    UpdateSlider {
+        id: usize,
+        value: u32,
+        label: String,
+        checked: Option<(usize, bool)>,
+    },
 }
 
 type MenuCallback = (*mut (), unsafe fn(*mut (), usize) -> MenuAction);
@@ -251,6 +259,7 @@ struct State {
     hover: Option<usize>,
     tracking: bool,
     dragging_slider: Option<usize>,
+    pending_slider: Option<f32>,
     scale: f32,
     /// Ancho lógico: fijo, el que necesita el texto más largo (también el de los grupos).
     width: f32,
@@ -269,6 +278,87 @@ struct State {
 }
 
 impl State {
+    fn update_slider_item(
+        &mut self,
+        id: usize,
+        value: u32,
+        label: &str,
+        checked: Option<(usize, bool)>,
+    ) {
+        fn update(
+            entries: &mut [Entry],
+            id: usize,
+            value: u32,
+            checked: Option<(usize, bool)>,
+        ) -> Option<usize> {
+            let mut text_index = None;
+            for entry in entries {
+                match entry {
+                    Entry::Slider {
+                        id: item_id,
+                        value: current,
+                        min,
+                        max,
+                        text,
+                    } if *item_id == id => {
+                        *current = value.clamp(*min, *max);
+                        text_index = Some(*text);
+                    }
+                    Entry::Action {
+                        id,
+                        checked: current,
+                        ..
+                    } => {
+                        if let Some((action, next)) = checked {
+                            if *id == action {
+                                *current = next;
+                            }
+                        }
+                    }
+                    Entry::Group { children, .. } => {
+                        text_index = update(children, id, value, checked).or(text_index);
+                    }
+                    _ => {}
+                }
+            }
+            text_index
+        }
+        if let Some(index) = update(&mut self.entries, id, value, checked) {
+            if let Some(text) = layout(&self.dwrite, &self.font, label) {
+                self.texts[index] = text;
+            }
+        }
+        for row in &mut self.rows {
+            match &mut row.kind {
+                RowKind::Slider {
+                    id: item_id,
+                    value: current,
+                    min,
+                    max,
+                } if *item_id == id => {
+                    *current = value.clamp(*min, *max);
+                }
+                RowKind::Action {
+                    id,
+                    checked: current,
+                } => {
+                    if let Some((action, next)) = checked {
+                        if *id == action {
+                            *current = next;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        let width = text_width(&self.entries, &self.texts, self.scale, false).clamp(MIN_W, MAX_W);
+        if width > self.width {
+            self.width = width;
+            relayout(self);
+        }
+        render(self);
+    }
+
     fn update_items(&mut self, items: Vec<Item>) {
         let mut texts = Vec::new();
         let entries = build(
@@ -390,6 +480,7 @@ fn run(items: Vec<Item>, from_tray: bool) -> Result<Option<usize>> {
                 hover: None,
                 tracking: false,
                 dragging_slider: None,
+                pending_slider: None,
                 scale,
                 width,
                 anchor,
@@ -1034,6 +1125,14 @@ fn dispatch(st: &mut State, id: usize) {
     match action {
         MenuAction::Close => st.done = Some(Some(id)),
         MenuAction::KeepOpen(items) => st.update_items(items),
+        MenuAction::UpdateSlider {
+            id,
+            value,
+            label,
+            checked,
+        } => {
+            st.update_slider_item(id, value, &label, checked);
+        }
     }
 }
 
@@ -1098,12 +1197,29 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             }
             LRESULT(0)
         }
+        WM_TIMER if wparam.0 == SLIDER_TIMER => {
+            unsafe {
+                let _ = KillTimer(Some(hwnd), SLIDER_TIMER);
+            }
+            with_state(|st| {
+                if let Some(x) = st.pending_slider.take() {
+                    update_slider(st, x);
+                }
+            });
+            LRESULT(0)
+        }
         WM_MOUSEMOVE => {
             let x = (lparam.0 & 0xFFFF) as u16 as i16 as f32;
             let y = ((lparam.0 >> 16) & 0xFFFF) as u16 as i16 as f32;
             with_state(|st| {
                 if st.dragging_slider.is_some() {
-                    update_slider(st, x);
+                    // La vista previa consume el movimiento más reciente por cuadro,
+                    // incluso si el mouse envía cientos de eventos por segundo.
+                    if st.pending_slider.replace(x).is_none() {
+                        unsafe {
+                            SetTimer(Some(hwnd), SLIDER_TIMER, 16, None);
+                        }
+                    }
                     return;
                 }
                 if !st.tracking {
@@ -1143,7 +1259,15 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
         }
         WM_CAPTURECHANGED => {
             SLIDER_CAPTURE.store(false, Ordering::SeqCst);
-            with_state(|st| st.dragging_slider = None);
+            unsafe {
+                let _ = KillTimer(Some(hwnd), SLIDER_TIMER);
+            }
+            with_state(|st| {
+                if let Some(x) = st.pending_slider.take() {
+                    update_slider(st, x);
+                }
+                st.dragging_slider = None;
+            });
             LRESULT(0)
         }
         // WM_MOUSELEAVE
@@ -1162,6 +1286,10 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             let y = ((lparam.0 >> 16) & 0xFFFF) as u16 as i16 as f32;
             with_state(|st| {
                 if st.dragging_slider.is_some() {
+                    st.pending_slider = None;
+                    unsafe {
+                        let _ = KillTimer(Some(hwnd), SLIDER_TIMER);
+                    }
                     update_slider(st, x);
                     st.dragging_slider = None;
                     SLIDER_CAPTURE.store(false, Ordering::SeqCst);
@@ -1484,6 +1612,12 @@ mod tests {
                 }
             } else {
                 value = (id - 500) as u32;
+                return MenuAction::UpdateSlider {
+                    id: 500,
+                    value,
+                    label: format!("Intensidad: {value}"),
+                    checked: Some((1, toggles % 2 != 0)),
+                };
             }
             MenuAction::KeepOpen(items(toggles % 2 != 0, value))
         });

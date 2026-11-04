@@ -16,6 +16,7 @@ use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
 use windows::Win32::System::WinRT::Composition::ICompositorDesktopInterop;
 use windows::Win32::System::WinRT::Graphics::Direct2D::{
     IGraphicsEffectD2D1Interop, IGraphicsEffectD2D1Interop_Impl, GRAPHICS_EFFECT_PROPERTY_MAPPING,
+    GRAPHICS_EFFECT_PROPERTY_MAPPING_DIRECT,
 };
 use windows::Win32::System::WinRT::{
     CreateDispatcherQueueController, DispatcherQueueOptions, DQTAT_COM_STA, DQTYPE_THREAD_CURRENT,
@@ -28,7 +29,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::UI::Composition::Desktop::DesktopWindowTarget;
 use windows::UI::Composition::{
-    CompositionEffectSourceParameter, CompositionRoundedRectangleGeometry, Compositor, SpriteVisual,
+    CompositionEffectBrush, CompositionEffectSourceParameter, CompositionRoundedRectangleGeometry,
+    Compositor, SpriteVisual,
 };
 use windows_numerics::{Vector2, Vector3};
 
@@ -133,11 +135,22 @@ impl IGraphicsEffectD2D1Interop_Impl for GaussianBlur_Impl {
     }
     fn GetNamedPropertyMapping(
         &self,
-        _: &PCWSTR,
-        _: *mut u32,
-        _: *mut GRAPHICS_EFFECT_PROPERTY_MAPPING,
+        name: &PCWSTR,
+        index: *mut u32,
+        mapping: *mut GRAPHICS_EFFECT_PROPERTY_MAPPING,
     ) -> Result<()> {
-        Err(E_INVALIDARG.into())
+        if index.is_null()
+            || mapping.is_null()
+            || name.is_null()
+            || unsafe { name.as_wide() != windows::core::w!("BlurAmount").as_wide() }
+        {
+            return Err(E_INVALIDARG.into());
+        }
+        unsafe {
+            *index = 0;
+            *mapping = GRAPHICS_EFFECT_PROPERTY_MAPPING_DIRECT;
+        }
+        Ok(())
     }
     fn GetPropertyCount(&self) -> Result<u32> {
         Ok(3)
@@ -164,7 +177,7 @@ impl IGraphicsEffectD2D1Interop_Impl for GaussianBlur_Impl {
 
 pub struct Backdrop {
     hwnd: HWND,
-    compositor: Compositor,
+    brush: CompositionEffectBrush,
     target: DesktopWindowTarget,
     visual: SpriteVisual,
     geometry: CompositionRoundedRectangleGeometry,
@@ -211,14 +224,28 @@ impl Backdrop {
                 let target = interop.CreateDesktopWindowTarget(hwnd, false)?;
                 let visual = compositor.CreateSpriteVisual()?;
                 let geometry = compositor.CreateRoundedRectangleGeometry()?;
+                let name = HSTRING::from("Backdrop");
+                let effect: IGraphicsEffect = GaussianBlur {
+                    source: CompositionEffectSourceParameter::Create(&name)?.cast()?,
+                    radius: 16.0,
+                    name: RefCell::new(HSTRING::from("Blur")),
+                }
+                .into();
+                let properties: windows_collections::IIterable<HSTRING> =
+                    vec![HSTRING::from("Blur.BlurAmount")].into();
+                let brush = compositor
+                    .CreateEffectFactoryWithProperties(&effect, &properties)?
+                    .CreateBrush()?;
+                brush.SetSourceParameter(&name, &compositor.CreateBackdropBrush()?)?;
+                visual.SetBrush(&brush)?;
                 visual.SetClip(&compositor.CreateGeometricClipWithGeometry(&geometry)?)?;
                 target.SetRoot(&visual)?;
-                Ok((target, visual, geometry))
+                Ok((target, visual, geometry, brush))
             })();
             match setup {
-                Ok((target, visual, geometry)) => Ok(Self {
+                Ok((target, visual, geometry, brush)) => Ok(Self {
                     hwnd,
-                    compositor,
+                    brush,
                     target,
                     visual,
                     geometry,
@@ -261,20 +288,10 @@ impl Backdrop {
         opacity: f32,
     ) -> Result<()> {
         if self.radius != radius {
-            let name = HSTRING::from("Backdrop");
-            let source = CompositionEffectSourceParameter::Create(&name)?;
-            let effect: IGraphicsEffect = GaussianBlur {
-                source: source.cast()?,
-                radius: radius as f32,
-                name: RefCell::new(HSTRING::new()),
-            }
-            .into();
-            let brush = self
-                .compositor
-                .CreateEffectFactory(&effect)?
-                .CreateBrush()?;
-            brush.SetSourceParameter(&name, &self.compositor.CreateBackdropBrush()?)?;
-            self.visual.SetBrush(&brush)?;
+            // Cambia una propiedad del mismo shader; no recompila el efecto al arrastrar.
+            self.brush
+                .Properties()?
+                .InsertScalar(&HSTRING::from("Blur.BlurAmount"), radius as f32)?;
             self.radius = radius;
         }
         let visual = [x, y, w, h, corner, opacity.clamp(0.0, 1.0)];
@@ -283,14 +300,23 @@ impl Backdrop {
                 X: w.max(1.0),
                 Y: h.max(1.0),
             };
-            self.visual.SetSize(size)?;
-            self.visual.SetOffset(Vector3 { X: x, Y: y, Z: 0.0 })?;
-            self.geometry.SetSize(size)?;
-            self.geometry.SetCornerRadius(Vector2 {
-                X: corner,
-                Y: corner,
-            })?;
-            self.visual.SetOpacity(visual[5])?;
+            let previous = self.last_visual;
+            if previous.is_none_or(|p| p[2..4] != visual[2..4]) {
+                self.visual.SetSize(size)?;
+                self.geometry.SetSize(size)?;
+            }
+            if previous.is_none_or(|p| p[..2] != visual[..2]) {
+                self.visual.SetOffset(Vector3 { X: x, Y: y, Z: 0.0 })?;
+            }
+            if previous.is_none_or(|p| p[4] != corner) {
+                self.geometry.SetCornerRadius(Vector2 {
+                    X: corner,
+                    Y: corner,
+                })?;
+            }
+            if previous.is_none_or(|p| p[5] != visual[5]) {
+                self.visual.SetOpacity(visual[5])?;
+            }
             self.last_visual = Some(visual);
         }
         // El efecto de backdrop puede extenderse más allá del clip del visual. Limitar
@@ -315,7 +341,9 @@ impl Backdrop {
                 if clip.is_invalid() {
                     return Err(windows::core::Error::from_thread());
                 }
-                if SetWindowRgn(self.hwnd, Some(clip), self.shown) == 0 {
+                // Composition actualiza el visual; evitar un segundo repintado Win32
+                // al cambiar su recorte conserva la forma sin invalidar toda la ventana.
+                if SetWindowRgn(self.hwnd, Some(clip), false) == 0 {
                     let _ = DeleteObject(clip.into());
                     return Err(windows::core::Error::from_thread());
                 }
@@ -439,6 +467,7 @@ mod tests {
             CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok().unwrap();
         }
         let mut backdrop = Backdrop::new().expect("host backdrop disponible");
+        let brush = backdrop.brush.clone();
         // Fuera de la pantalla: verifica las APIs reales sin tapar el escritorio.
         for radius in [4, 10, 16, 32] {
             backdrop
@@ -451,6 +480,15 @@ mod tests {
                 )
                 .expect("efecto gaussiano y ventana compuesta");
             assert!(unsafe { IsWindowVisible(backdrop.hwnd).as_bool() });
+            assert_eq!(backdrop.brush, brush, "el radio debe reutilizar el pincel");
+            let mut actual = -1.0;
+            backdrop
+                .brush
+                .Properties()
+                .unwrap()
+                .TryGetScalar(&HSTRING::from("Blur.BlurAmount"), &mut actual)
+                .unwrap();
+            assert_eq!(actual, radius as f32);
         }
         backdrop.hide();
         assert!(!unsafe { IsWindowVisible(backdrop.hwnd).as_bool() });
@@ -470,6 +508,11 @@ mod tests {
             DispatchMessageW, PeekMessageW, HWND_TOPMOST, MSG, PM_REMOVE, SW_SHOWNOACTIVATE,
         };
         unsafe {
+            // Como la app: las coordenadas de las muestras y las de Composition
+            // deben ser físicas, también si Windows escala el escritorio.
+            windows::Win32::UI::HiDpi::SetThreadDpiAwarenessContext(
+                windows::Win32::UI::HiDpi::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+            );
             CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok().unwrap();
             let mut backdrop = Backdrop::new().unwrap();
             let instance = GetModuleHandleW(None).unwrap();

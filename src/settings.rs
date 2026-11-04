@@ -92,6 +92,12 @@ impl Settings {
         write_dword(w!("BlurRadius"), self.blur_radius);
     }
 
+    /// Guarda la vista previa del deslizador al cerrar el menú, sin reescribir todo.
+    pub fn save_appearance(&self) {
+        write_dword(w!("Translucent"), self.translucent as u32);
+        write_dword(w!("BlurRadius"), self.blur_radius);
+    }
+
     /// Alguna de las dos letras está activada: hay que pedirla.
     pub fn lyrics(&self) -> bool {
         self.lyrics_island || self.lyrics_projector

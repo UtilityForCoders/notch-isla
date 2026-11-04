@@ -82,6 +82,10 @@ pub struct Projector {
     last_frame: Instant,
     backdrop: Option<crate::backdrop::Backdrop>,
     blur_radius: u32,
+    drawn: Option<([f32; 6], bool)>,
+    position: Option<(i32, i32)>,
+    #[cfg(test)]
+    frames_drawn: u64,
 }
 
 impl Projector {
@@ -148,6 +152,10 @@ impl Projector {
                 last_frame: Instant::now(),
                 backdrop: crate::backdrop::Backdrop::new().ok(),
                 blur_radius: 16,
+                drawn: None,
+                position: None,
+                #[cfg(test)]
+                frames_drawn: 0,
             })
         }
     }
@@ -165,6 +173,7 @@ impl Projector {
         }
         self.presence.reset(0.0);
         self.verse = None;
+        self.drawn = None;
         self.last_frame = Instant::now();
     }
 
@@ -195,6 +204,9 @@ impl Projector {
 
     pub fn moved_by(&mut self, dx: i32) {
         if self.shown {
+            if let Some((x, _)) = self.position.as_mut() {
+                *x += dx;
+            }
             if let Some(backdrop) = self.backdrop.as_mut() {
                 backdrop.moved_by(dx);
             }
@@ -213,6 +225,7 @@ impl Projector {
             self.scale = scale;
             // El verso se vuelve a maquetar con la letra nueva en el siguiente cuadro.
             self.verse = None;
+            self.drawn = None;
         }
     }
 
@@ -248,6 +261,7 @@ impl Projector {
                         self.height.set_target(h);
                     }
                     self.verse = Some(verse);
+                    self.drawn = None;
                     self.since = Instant::now();
                 }
             }
@@ -335,6 +349,33 @@ impl Projector {
             false
         };
 
+        let position = (cx - self.surface.width as i32 / 2, top);
+        let frame = (
+            [w, h, y, fade, sung.unwrap_or(-1.0), self.presence.value],
+            translucent,
+        );
+        if self.drawn == Some(frame) {
+            // Mover una imagen ya dibujada no necesita copiar el DIB ni rasterizar texto.
+            if self.position == Some(position) {
+                return;
+            }
+            if unsafe {
+                windows::Win32::UI::WindowsAndMessaging::SetWindowPos(
+                    self.hwnd,
+                    None,
+                    position.0,
+                    position.1,
+                    0,
+                    0,
+                    SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+                )
+            }
+            .is_ok()
+            {
+                self.position = Some(position);
+                return;
+            }
+        }
         let pixmap = &mut self.surface.pixmap;
         pixmap.fill(Color::TRANSPARENT);
         let mut paint = Paint {
@@ -361,6 +402,7 @@ impl Projector {
         }
         self.surface.copy_to_dib();
 
+        let mut text_drawn = self.verse.is_none();
         if let Some(verse) = &self.verse {
             let full = RECT {
                 left: 0,
@@ -383,6 +425,7 @@ impl Projector {
                         a: unsung_a,
                     };
                     if let Ok(brush) = self.target.CreateSolidColorBrush(&color, None) {
+                        text_drawn = true;
                         // La caja del texto mide `MAX_TEXT_W` y lo centra adentro.
                         let box_w = MAX_TEXT_W * s;
                         let text_x = sw / 2.0 - box_w / 2.0;
@@ -428,7 +471,7 @@ impl Projector {
                             }
                         }
                     }
-                    let _ = self.target.EndDraw(None, None);
+                    text_drawn &= self.target.EndDraw(None, None).is_ok();
                 }
             }
         }
@@ -448,7 +491,7 @@ impl Projector {
             AlphaFormat: AC_SRC_ALPHA as u8,
         };
         unsafe {
-            let _ = UpdateLayeredWindow(
+            let sent = UpdateLayeredWindow(
                 self.hwnd,
                 None,
                 Some(&pos),
@@ -458,7 +501,16 @@ impl Projector {
                 COLORREF(0),
                 Some(&blend),
                 ULW_ALPHA,
-            );
+            )
+            .is_ok();
+            self.drawn = (sent && text_drawn).then_some(frame);
+            if sent {
+                self.position = Some(position);
+                #[cfg(test)]
+                {
+                    self.frames_drawn += 1;
+                }
+            }
         }
     }
 }
@@ -497,4 +549,105 @@ extern "system" fn passthrough_proc(
     lparam: windows::Win32::Foundation::LPARAM,
 ) -> windows::Win32::Foundation::LRESULT {
     unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+    use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
+
+    #[test]
+    #[ignore = "requiere DWM; comprueba el renderizado del proyector fuera de pantalla"]
+    fn reutiliza_cuadros_y_actualiza_texto_posicion_y_estilo() {
+        unsafe {
+            CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok().unwrap();
+        }
+        let mut projector = Projector::new(1.0).unwrap();
+        projector.render(Some("Una letra de prueba"), None, -32000, -32000, true, 16);
+        projector.presence.reset(1.0);
+        projector.since = Instant::now() - Duration::from_secs(1);
+        projector.render(Some("Una letra de prueba"), None, -32000, -32000, true, 16);
+        let frames = projector.frames_drawn;
+        assert!(frames > 0);
+        let started = Instant::now();
+        for _ in 0..200 {
+            projector.render(Some("Una letra de prueba"), None, -32000, -32000, true, 16);
+        }
+        let cached = started.elapsed();
+        assert_eq!(
+            projector.frames_drawn, frames,
+            "un verso estable no se debe rasterizar de nuevo"
+        );
+        projector.render(Some("Una letra de prueba"), None, -31900, -31980, true, 32);
+        assert_eq!(
+            projector.frames_drawn, frames,
+            "mover o cambiar solo el blur conserva el texto"
+        );
+        let mut rect = RECT::default();
+        unsafe {
+            GetWindowRect(projector.hwnd, &mut rect).unwrap();
+        }
+        assert_eq!(rect.left, -31900 - projector.surface.width as i32 / 2);
+        assert_eq!(rect.top, -31980);
+        projector.render(
+            Some("Una letra de prueba"),
+            Some(3.5),
+            -31900,
+            -31980,
+            true,
+            32,
+        );
+        assert!(
+            projector.frames_drawn > frames,
+            "el resaltado debe actualizarse"
+        );
+        let frames = projector.frames_drawn;
+        projector.render(
+            Some("Otra letra distinta"),
+            Some(3.5),
+            -31900,
+            -31980,
+            true,
+            32,
+        );
+        assert!(
+            projector.frames_drawn > frames,
+            "cambiar el verso invalida la imagen"
+        );
+        let frames = projector.frames_drawn;
+        projector.render(
+            Some("Otra letra distinta"),
+            Some(3.5),
+            -31900,
+            -31980,
+            false,
+            32,
+        );
+        assert!(
+            projector.frames_drawn > frames,
+            "desactivar el blur debe repintar el fondo opaco"
+        );
+        projector.hide();
+        projector.render(Some("Una letra de prueba"), None, -32000, -32000, true, 16);
+        projector.presence.reset(1.0);
+        projector.since = Instant::now() - Duration::from_secs(1);
+        projector.render(Some("Una letra de prueba"), None, -32000, -32000, true, 16);
+        let started = Instant::now();
+        for _ in 0..200 {
+            projector.drawn = None;
+            projector.render(Some("Una letra de prueba"), None, -32000, -32000, true, 16);
+        }
+        eprintln!(
+            "PROYECTOR estable: cache={:.3} ms, repintando={:.3} ms por llamada",
+            cached.as_secs_f64() * 5.0,
+            started.elapsed().as_secs_f64() * 5.0
+        );
+        projector.set_scale(1.25);
+        assert!(
+            projector.drawn.is_none(),
+            "un cambio de DPI invalida el cuadro"
+        );
+        projector.hide();
+    }
 }

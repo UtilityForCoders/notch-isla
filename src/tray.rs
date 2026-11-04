@@ -377,20 +377,34 @@ where
     F: FnMut(Command, &mut Settings) -> bool,
 {
     let items = build_items(&state);
-    menu::show_tray(items, move |id| {
+    let mut appearance_changed = false;
+    menu::show_tray(items, |id| {
         let Some(cmd) = id_to_command(id, &state) else {
             return menu::MenuAction::Close;
         };
         let mut settings = state.settings.clone();
+        let blur_changed = matches!(&cmd, Command::BlurRadius(_));
         let keep_open = on_command(cmd, &mut settings);
         if keep_open {
             state.settings = settings;
+            if blur_changed {
+                appearance_changed = true;
+                return menu::MenuAction::UpdateSlider {
+                    id: CMD_BLUR_RADIUS,
+                    value: state.settings.blur_radius,
+                    label: format!("Intensidad: {} %", state.settings.blur_radius * 100 / 40),
+                    checked: Some((CMD_TRANSLUCENT, state.settings.translucent)),
+                };
+            }
             let new_items = build_items(&state);
             menu::MenuAction::KeepOpen(new_items)
         } else {
             menu::MenuAction::Close
         }
     });
+    if appearance_changed {
+        state.settings.save_appearance();
+    }
 }
 
 pub enum IslandMenuChoice {

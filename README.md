@@ -63,7 +63,7 @@ cargo run --example icon
   - **Ocultarse sola tras**: 3, 5, 10 o 30 segundos, o nunca.
   - **Pantalla**: en qué monitor va la isla (si hay más de uno).
   - **Temporizador**: de 5 a 60 minutos; al terminar suena y la isla avisa.
-  - **Desenfoque del fondo**: una barra permite ajustar la intensidad de 0 a 100 % en vivo, para la isla y la letra flotante. Arrástrala o usa las flechas izquierda y derecha con la barra seleccionada. Se puede desactivar para usar negro opaco. Windows compone el fondo en vivo; si el efecto no está disponible, se usa el fondo opaco.
+  - **Desenfoque del fondo**: una barra permite ajustar la intensidad de 0 a 100 % en vivo, para la isla y la letra flotante. Arrástrala o usa las flechas izquierda y derecha con la barra seleccionada. La intensidad se guarda al cerrar el menú. Se puede desactivar para usar negro opaco. Windows compone el fondo en vivo; si el efecto no está disponible, se usa el fondo opaco.
   - **Expandir al pasar el puntero**: permite volver al modo de apertura sin clic; desactivado por defecto para evitar expansiones accidentales.
   - **Avisar al cambiar la salida de audio**, **Ocultar en pantalla completa**, **Iniciar con Windows** y **Salir**.
   - Los ajustes se guardan en `HKEY_CURRENT_USER\Software\NotchIsla`.
@@ -104,6 +104,12 @@ src/
 ├─ update.rs      actualizaciones: último release en GitHub, descarga e instalación (WinHTTP)
 └─ fullscreen.rs  ocultar la isla cuando una app está a pantalla completa
 ```
+
+## Medir rendimiento
+
+Con la isla abierta, ejecuta `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/medir-rendimiento.ps1 -Segundos 20 -IncluirGpu`. Muestra CPU, memoria y muestras de uso GPU de la isla y DWM. Agrega `-IdProceso <PID>` para elegir una copia concreta, por ejemplo la compilada localmente.
+
+Compara el mismo estado con desenfoque activado y desactivado. El uso de DWM incluye todo el escritorio; la suma de motores GPU puede superar el 100 %. Estas muestras no miden FPS ni tiempos de presentación. Sin contadores GPU disponibles, el script sigue midiendo CPU y memoria.
 
 ## Compilación en GitHub Actions
 
