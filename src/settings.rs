@@ -41,6 +41,8 @@ pub struct Settings {
     pub translucent: bool,
     /// Expandir al pasar el puntero; por defecto se requiere un clic.
     pub expand_on_hover: bool,
+    /// Mantiene los controles abiertos aunque el puntero salga de la isla.
+    pub pinned_expanded: bool,
     /// Desviación del desenfoque gaussiano en píxeles lógicos (0 a 40).
     pub blur_radius: u32,
 }
@@ -71,6 +73,7 @@ impl Settings {
             high_refresh: read_dword(w!("HighRefresh")).is_some_and(|v| v != 0),
             translucent: read_dword(w!("Translucent")).is_none_or(|v| v != 0),
             expand_on_hover: read_dword(w!("ExpandOnHover")).is_some_and(|v| v != 0),
+            pinned_expanded: read_dword(w!("PinnedExpanded")).is_some_and(|v| v != 0),
             blur_radius: read_dword(w!("BlurRadius")).unwrap_or(16).min(40),
         }
     }
@@ -89,6 +92,7 @@ impl Settings {
         write_dword(w!("HighRefresh"), self.high_refresh as u32);
         write_dword(w!("Translucent"), self.translucent as u32);
         write_dword(w!("ExpandOnHover"), self.expand_on_hover as u32);
+        write_dword(w!("PinnedExpanded"), self.pinned_expanded as u32);
         write_dword(w!("BlurRadius"), self.blur_radius);
     }
 

@@ -46,6 +46,7 @@ const CMD_CENTER: usize = 14;
 const CMD_HIGH_REFRESH: usize = 15;
 const CMD_TRANSLUCENT: usize = 16;
 const CMD_EXPAND_ON_HOVER: usize = 17;
+const CMD_PIN_EXPANDED: usize = 18;
 /// Las opciones de los submenús van numeradas a partir de estas bases.
 const CMD_HIDE_DELAY: usize = 100;
 const CMD_MONITOR: usize = 200;
@@ -410,6 +411,7 @@ where
 pub enum IslandMenuChoice {
     Output(Option<usize>),
     Center,
+    TogglePinnedExpanded,
 }
 
 /// Menú contextual sobre la isla: opciones de salida de audio y centrar en la pantalla.
@@ -419,8 +421,15 @@ pub fn show_island_menu(
     current: Option<&str>,
     unavailable: Option<&str>,
     is_centered: bool,
+    pinned_expanded: bool,
 ) -> Option<IslandMenuChoice> {
     let mut items = Vec::new();
+    items.push(Item::Action {
+        id: CMD_PIN_EXPANDED,
+        label: "Fijar versión extendida".to_string(),
+        checked: pinned_expanded,
+    });
+    items.push(Item::Separator);
     if let Some(app) = app {
         items.push(Item::Label(format!("Salida de audio de {app}")));
         items.push(Item::Separator);
@@ -448,6 +457,7 @@ pub fn show_island_menu(
         checked: is_centered,
     });
     match menu::show(items)? {
+        CMD_PIN_EXPANDED => Some(IslandMenuChoice::TogglePinnedExpanded),
         CMD_CENTER => Some(IslandMenuChoice::Center),
         CMD_OUTPUT_DEFAULT => Some(IslandMenuChoice::Output(None)),
         id if (CMD_OUTPUT..CMD_OUTPUT + outputs.len()).contains(&id) => {

@@ -883,7 +883,9 @@ impl App {
     fn update_expansion(&mut self) {
         let requested = self.expanded_by_click || self.settings.expand_on_hover;
         let expand = self.visible
-            && (self.notice.is_some() || (requested && (self.hovered || self.lingering)));
+            && (self.notice.is_some()
+                || self.settings.pinned_expanded
+                || (requested && (self.hovered || self.lingering)));
         self.aim_expansion(expand);
     }
 
@@ -1081,7 +1083,7 @@ impl App {
     /// (Re)inicia la cuenta para ocultarse; se cancela mientras el mouse esté encima.
     fn start_idle_countdown(&mut self) {
         let secs = self.settings.hide_delay;
-        if secs == 0 {
+        if secs == 0 || self.settings.pinned_expanded {
             self.stop_idle_countdown();
             return;
         }
@@ -1100,7 +1102,7 @@ impl App {
     fn idle_hide(&mut self) {
         self.stop_idle_countdown();
         // Con un aviso en pantalla espera: la cuenta vuelve a empezar cuando el aviso termina.
-        if self.hovered || !self.visible || self.notice.is_some() {
+        if self.hovered || !self.visible || self.notice.is_some() || self.settings.pinned_expanded {
             return;
         }
         self.idle_hidden = true;
@@ -1298,6 +1300,9 @@ impl App {
             self.cover_hovered = false;
             self.update_hovered = false;
             self.aim_expansion(false);
+        }
+        if want && self.settings.pinned_expanded {
+            self.update_expansion();
         }
         self.start_animation();
     }
@@ -1611,8 +1616,10 @@ impl App {
         }
         self.hovered = hovered;
         // Al salir sigue expandida un momento (`COLLAPSE_TIMER`); al volver se cancela.
-        self.lingering =
-            !hovered && self.visible && (self.expanded_by_click || self.settings.expand_on_hover);
+        self.lingering = !hovered
+            && self.visible
+            && !self.settings.pinned_expanded
+            && (self.expanded_by_click || self.settings.expand_on_hover);
         unsafe {
             if self.lingering {
                 SetTimer(Some(self.hwnd), COLLAPSE_TIMER, COLLAPSE_DELAY_MS, None);
@@ -2440,7 +2447,7 @@ fn finish_install(hwnd: HWND) {
 
 /// Menú contextual sobre la isla: opciones de salida de audio y centrar en la pantalla.
 /// Va fuera de `with_app`: el menú corre su propio bucle de mensajes.
-fn open_island_menu(app_id: Option<&str>, is_centered: bool) {
+fn open_island_menu(app_id: Option<&str>, is_centered: bool, pinned_expanded: bool) {
     let (label, pids, outputs, unavailable) = if let Some(app_id) = app_id {
         let label = audio::app_label(app_id);
         let pids = audio::app_pids(app_id);
@@ -2474,10 +2481,24 @@ fn open_island_menu(app_id: Option<&str>, is_centered: bool) {
         current.as_deref(),
         unavailable,
         is_centered,
+        pinned_expanded,
     ) else {
         return;
     };
     match choice {
+        tray::IslandMenuChoice::TogglePinnedExpanded => {
+            with_app(|app| {
+                app.settings.pinned_expanded = !app.settings.pinned_expanded;
+                app.settings.save();
+                if app.settings.pinned_expanded {
+                    app.reveal();
+                    app.stop_idle_countdown();
+                } else if !app.hovered {
+                    app.start_idle_countdown();
+                }
+                app.update_expansion();
+            });
+        }
         tray::IslandMenuChoice::Center => {
             with_app(|app| app.center_island());
         }
@@ -2667,13 +2688,15 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
         WM_RBUTTONUP => {
             let mut app_id = None;
             let mut is_centered = true;
+            let mut pinned_expanded = false;
             with_app(|app| {
                 if (app.visible || app.edge_strip()) && app.notice.is_none() {
                     app_id = app.media.as_ref().map(|m| m.app_id.clone());
                     is_centered = app.settings.offset_x == 0;
+                    pinned_expanded = app.settings.pinned_expanded;
                 }
             });
-            open_island_menu(app_id.as_deref(), is_centered);
+            open_island_menu(app_id.as_deref(), is_centered, pinned_expanded);
             LRESULT(0)
         }
         WM_ANIM_TICK => {
