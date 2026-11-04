@@ -6,6 +6,9 @@ use windows::Win32::UI::WindowsAndMessaging::{PeekMessageW, PM_REMOVE};
 #[ignore = "ejercita la isla real fuera de pantalla; requiere DWM y escritorio interactivo"]
 fn isla_con_desenfoque_sigue_ocultandose_y_recibiendo_clics() {
     unsafe {
+        windows::Win32::UI::HiDpi::SetThreadDpiAwarenessContext(
+            DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+        );
         CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok().unwrap();
         let instance = GetModuleHandleW(None).unwrap();
         let class = w!("NotchIslaStabilityProbe");
@@ -48,7 +51,12 @@ fn isla_con_desenfoque_sigue_ocultandose_y_recibiendo_clics() {
         };
         app.x_spring.reset(-32000.0);
         app.hz = 240;
-        app.high_refresh_driver = HighRefreshDriver::with_sync(hwnd, || Ok(()));
+        let animation_bench = std::env::var_os("NOTCH_ANIMATION_BENCH").is_some();
+        app.high_refresh_driver = if animation_bench {
+            HighRefreshDriver::new(hwnd)
+        } else {
+            HighRefreshDriver::with_sync(hwnd, || Ok(()))
+        };
         app.media = Some(NowPlaying {
             title: "Prueba local".into(),
             artist: "Sin sesión multimedia real".into(),
@@ -64,11 +72,92 @@ fn isla_con_desenfoque_sigue_ocultandose_y_recibiendo_clics() {
             app_id: String::new(),
             sessions: (0, 1),
         });
+        if animation_bench {
+            let monitor = monitors::find("");
+            app.hz = monitors::refresh_rate(monitor);
+            app.settings.hide_delay = 0;
+            app.settings.lyrics_island = true;
+            app.lyrics_spring.reset(1.0);
+            app.lyrics.insert(
+                lyrics::key("Prueba local", "Sin sesión multimedia real"),
+                (0..12)
+                    .map(|i| lyrics::Verse {
+                        start: i as f32 * 2.0,
+                        text: format!("Letra local para medir la animación del verso {i}"),
+                        words: Vec::new(),
+                    })
+                    .collect(),
+            );
+            let rc = app.monitor_rect();
+            app.pos = POINT {
+                x: rc.left + ((rc.right - rc.left) - app.surface.width as i32) / 2,
+                y: rc.top + 200,
+            };
+            app.x_spring.reset(app.pos.x as f32);
+        }
         APP.with(|cell| *cell.borrow_mut() = Some(app));
         with_app(|app| {
             app.update_visibility();
             app.redraw();
         });
+        if animation_bench {
+            let seconds = std::env::var("NOTCH_STRESS_SECONDS")
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(5)
+                .max(2);
+            let started = Instant::now();
+            let mut next_action = started;
+            let mut expanded = false;
+            let mut frames = Vec::new();
+            let mut costs = Vec::new();
+            while started.elapsed() < Duration::from_secs(seconds) {
+                if Instant::now() >= next_action {
+                    expanded = !expanded;
+                    with_app(|app| app.aim_expansion(expanded));
+                    next_action += Duration::from_millis(400);
+                }
+                let mut msg = MSG::default();
+                if PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+                    let frame = Instant::now();
+                    DispatchMessageW(&msg);
+                    if msg.message == WM_ANIM_TICK {
+                        frames.push(frame);
+                        costs.push(frame.elapsed().as_secs_f64() * 1000.0);
+                    }
+                    ui::promote_timers();
+                } else {
+                    std::thread::sleep(Duration::from_micros(200));
+                }
+            }
+            let mut hz = 0;
+            with_app(|app| {
+                hz = app.hz;
+                assert!(app
+                    .backdrop
+                    .as_ref()
+                    .is_some_and(|backdrop| backdrop.is_shown()));
+                app.set_timer(None);
+                app.tray.remove();
+            });
+            let _ = DestroyWindow(hwnd);
+            APP.with(|cell| cell.borrow_mut().take());
+            let mut gaps = frames
+                .windows(2)
+                .map(|pair| (pair[1] - pair[0]).as_secs_f64() * 1000.0)
+                .collect::<Vec<_>>();
+            costs.sort_by(f64::total_cmp);
+            gaps.sort_by(f64::total_cmp);
+            assert!(!costs.is_empty() && !gaps.is_empty());
+            eprintln!("ISLA con letra y blur: {} cuadros / {seconds} s, objetivo {hz} Hz; intervalo medio={:.3} ms p95={:.3} ms; dibujado medio={:.3} ms p95={:.3} ms max={:.3} ms",
+                frames.len(), gaps.iter().sum::<f64>() / gaps.len() as f64, gaps[gaps.len()*95/100],
+                costs.iter().sum::<f64>() / costs.len() as f64, costs[costs.len()*95/100], costs[costs.len()-1]);
+            assert!(
+                frames.len() as u64 >= seconds * hz as u64 * 80 / 100,
+                "la isla real debe seguir el ritmo del monitor"
+            );
+            return;
+        }
         if std::env::var_os("NOTCH_DRAG_BENCH").is_some() {
             with_app(|app| {
                 app.settings.hide_delay = 0;

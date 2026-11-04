@@ -21,11 +21,13 @@ Objetivo: controlar la música que suena en el PC (Spotify, YouTube, etc.) desde
 ## Ejecutar
 
 ```powershell
-cargo run            # modo debug (abre una consola para ver mensajes)
+cargo run            # desarrollo con renderizado optimizado y consola para mensajes
 cargo run --release  # versión optimizada, sin consola
 ```
 
 El ejecutable final queda en `target\release\notch-isla.exe`.
+
+El perfil de desarrollo conserva símbolos y comprobaciones de debug, con optimización de la app y sus dependencias para que el rasterizado no limite las animaciones. Para comparar la fluidez o medir el consumo final, usa `cargo run --release`.
 
 ### Instalador
 
@@ -110,6 +112,14 @@ src/
 Con la isla abierta, ejecuta `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/medir-rendimiento.ps1 -Segundos 20 -IncluirGpu`. Muestra CPU, memoria y muestras de uso GPU de la isla y DWM. Agrega `-IdProceso <PID>` para elegir una copia concreta, por ejemplo la compilada localmente.
 
 Compara el mismo estado con desenfoque activado y desactivado. El uso de DWM incluye todo el escritorio; la suma de motores GPU puede superar el 100 %. Estas muestras no miden FPS ni tiempos de presentación. Sin contadores GPU disponibles, el script sigue midiendo CPU y memoria.
+
+Para medir la cadencia del renderizado real, la siguiente prueba muestra durante cinco segundos una isla de prueba que se expande y contrae con letra y desenfoque. Usa contenido local y publica el intervalo entre cuadros y el tiempo de dibujo; no mide la presentación final en GPU:
+
+```powershell
+$env:NOTCH_ANIMATION_BENCH = '1'
+cargo test --release stability_tests::isla_con_desenfoque_sigue_ocultandose_y_recibiendo_clics -- --ignored --exact --nocapture --test-threads=1
+Remove-Item Env:\NOTCH_ANIMATION_BENCH
+```
 
 ## Compilación en GitHub Actions
 

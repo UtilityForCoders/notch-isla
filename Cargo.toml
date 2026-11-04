@@ -66,6 +66,14 @@ features = [
     "Win32_UI_WindowsAndMessaging",
 ]
 
+# El rasterizador sin optimizar consume el presupuesto de un cuadro a 144/240 Hz.
+# Mantener símbolos y comprobaciones de debug, pero optimizar las rutas de dibujo.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
 [profile.release]
 opt-level = 3
 lto = true
