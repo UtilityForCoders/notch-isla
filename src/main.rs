@@ -1107,7 +1107,7 @@ impl App {
         self.update_visibility();
     }
 
-    /// El mouse tocó la franja del borde: la isla baja (contraída) y vuelve a contar.
+    /// Restaura la isla desde la franja del borde y vuelve a contar.
     fn reveal(&mut self) {
         if !self.idle_hidden {
             return;
@@ -2536,9 +2536,8 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                     app.drag_island_to();
                     return;
                 }
-                // Oculta: el mouse está en la franja del borde (o sobre la isla mientras sube).
+                // La franja espera un clic: pasar el mouse no muestra la isla contraída.
                 if app.idle_hidden {
-                    app.reveal();
                     return;
                 }
                 if app.dragging.is_some() {
@@ -2616,6 +2615,14 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                     }
                     if app.notice.is_some() {
                         app.end_notice();
+                        return;
+                    }
+                    // Un clic en la franja abre directamente los controles.
+                    if app.idle_hidden {
+                        app.reveal();
+                        app.expanded_by_click = true;
+                        app.set_hovered(true);
+                        app.update_expansion();
                         return;
                     }
                     // El clic que abre los controles no debe activar la carátula o un botón
