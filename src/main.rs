@@ -372,12 +372,14 @@ impl HighRefreshDriver {
             .spawn(move || {
                 let hwnd = HWND(hwnd_raw as *mut core::ffi::c_void);
                 let waiter = frame_wait::FrameWait::new();
+                let mut schedule = frame_wait::FrameSchedule::default();
                 loop {
                     // Duerme hasta que haya una animación que requiera alta tasa de refresco:
                     {
                         let (lock, cvar) = &*thread_active;
                         let mut is_active = lock.lock().unwrap();
                         while !*is_active && thread_running.load(Ordering::Acquire) {
+                            schedule.reset();
                             is_active = cvar.wait(is_active).unwrap();
                         }
                         if !thread_running.load(Ordering::Acquire) {
@@ -386,20 +388,10 @@ impl HighRefreshDriver {
                     }
 
                     // Sincroniza con el refresco de pantalla del DWM (hardware VSync):
-                    let started = Instant::now();
                     let synced = sync().is_ok();
-                    // DwmFlush puede volver inmediatamente (composición, sesión remota,
-                    // cambios de pantalla). Un éxito no garantiza que haya esperado un VSync.
                     let interval =
                         Duration::from_nanos(thread_interval.load(Ordering::Relaxed).max(1));
-                    let elapsed = started.elapsed();
-                    // Si DWM ya esperó el refresco, no añadir otra espera: incluso una
-                    // fracción de ms puede hacernos perder el siguiente VSync a 240 Hz.
-                    if !synced || elapsed < interval / 2 {
-                        if let Some(remaining) = interval.checked_sub(elapsed) {
-                            waiter.wait(remaining);
-                        }
-                    }
+                    waiter.wait(schedule.delay(Instant::now(), interval, synced));
                     if !thread_running.load(Ordering::Acquire) {
                         return;
                     }
@@ -1145,6 +1137,14 @@ impl App {
         }
     }
 
+    fn frame_interval(&self) -> Duration {
+        if self.settings.high_refresh && self.hz > 60 {
+            Duration::from_nanos(1_000_000_000 / self.hz as u64)
+        } else {
+            Duration::from_millis(FRAME_MS as u64)
+        }
+    }
+
     /// Redibuja fuera de la animación; si algo quedó moviéndose, arranca el temporizador.
     /// Si ya está corriendo, `tick` ajusta el intervalo en el siguiente cuadro.
     fn redraw(&mut self) {
@@ -1159,11 +1159,7 @@ impl App {
 
     /// Enciende, cambia de intervalo o apaga el temporizador de animación.
     fn set_timer(&mut self, ms: Option<u32>) {
-        let interval = if self.settings.high_refresh && self.hz > 60 {
-            1_000_000_000 / self.hz as u64
-        } else {
-            FRAME_MS as u64 * 1_000_000
-        };
+        let interval = self.frame_interval().as_nanos() as u64;
         self.high_refresh_driver
             .interval_ns
             .store(interval, Ordering::Relaxed);
@@ -1482,12 +1478,14 @@ impl App {
             }
         }
         // Limita el ritmo de actualización al configurado (60 Hz si está desactivado, 120/240 Hz si está activado).
-        let min_interval = Duration::from_millis(self.frame_ms() as u64);
+        let min_interval = self.frame_interval();
         if let Some(drag) = self.drag_island.as_mut() {
-            if drag.last_drag.elapsed() < min_interval {
+            let now = Instant::now();
+            let deadline = drag.last_drag + min_interval;
+            if now < deadline {
                 return;
             }
-            drag.last_drag = Instant::now();
+            drag.last_drag = frame_wait::next_deadline(deadline, now, min_interval) - min_interval;
         }
         let target_x = start_pos_x + delta;
         self.set_island_x(target_x);
@@ -2654,11 +2652,13 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
         }
         WM_ANIM_TICK => {
             with_app(|app| {
+                // El aviso ya salió de la cola: permitir uno más mientras se dibuja
+                // evita perder el siguiente VSync si este cuadro termina cerca del límite.
+                app.high_refresh_driver.frame_processed();
                 if app.settings.high_refresh {
                     app.tick();
                     app.last_vsync = Some(Instant::now());
                 }
-                app.high_refresh_driver.frame_processed();
             });
             LRESULT(0)
         }
@@ -2675,7 +2675,6 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                     return;
                 }
                 app.tick();
-                app.high_refresh_driver.frame_processed();
             });
             LRESULT(0)
         }
@@ -2966,6 +2965,7 @@ mod tests {
             static DRIVER: RefCell<Option<HighRefreshDriver>> = const { RefCell::new(None) };
             static FRAMES: Cell<u64> = const { Cell::new(0) };
             static TIMERS: Cell<u64> = const { Cell::new(0) };
+            static FRAME_TIMES: RefCell<Vec<Instant>> = const { RefCell::new(Vec::new()) };
         }
         extern "system" fn stress_proc(
             hwnd: HWND,
@@ -2974,10 +2974,11 @@ mod tests {
             lparam: LPARAM,
         ) -> LRESULT {
             if msg == WM_ANIM_TICK {
+                DRIVER.with(|driver| driver.borrow().as_ref().unwrap().frame_processed());
+                FRAME_TIMES.with(|times| times.borrow_mut().push(Instant::now()));
                 FRAMES.set(FRAMES.get() + 1);
                 // Cuadro costoso y DwmFlush que retorna inmediatamente: caso adverso real.
                 std::thread::sleep(Duration::from_millis(3));
-                DRIVER.with(|driver| driver.borrow().as_ref().unwrap().frame_processed());
                 return LRESULT(0);
             }
             if msg == WM_TIMER {
@@ -3048,8 +3049,26 @@ mod tests {
             let _ = DestroyWindow(hwnd);
             let frames = FRAMES.get();
             let timers = TIMERS.get();
+            let mut gaps = FRAME_TIMES.with(|times| {
+                times
+                    .borrow()
+                    .windows(2)
+                    .map(|pair| (pair[1] - pair[0]).as_secs_f64() * 1000.0)
+                    .collect::<Vec<_>>()
+            });
+            gaps.sort_by(f64::total_cmp);
+            if !gaps.is_empty() {
+                eprintln!(
+                    "CADENCIA: media={:.3} ms p50={:.3} ms p95={:.3} ms max={:.3} ms",
+                    gaps.iter().sum::<f64>() / gaps.len() as f64,
+                    gaps[gaps.len() / 2],
+                    gaps[gaps.len() * 95 / 100],
+                    gaps[gaps.len() - 1]
+                );
+            }
             assert!(
-                frames > seconds * 10 && frames <= seconds * (hz as u64 * 110 / 100 + 1),
+                frames >= seconds * hz as u64 * 80 / 100
+                    && frames <= seconds * (hz as u64 * 110 / 100 + 1),
                 "cuadros limitados al ritmo pedido: {frames} en {seconds} s"
             );
             assert!(
