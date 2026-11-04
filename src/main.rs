@@ -524,6 +524,7 @@ struct App {
     countdown: Option<(Instant, u32)>,
     /// Actualización a instalar en cuanto termine el aviso "Instalando".
     installing: Option<update::Update>,
+    preparing_update: bool,
     /// El mouse acaba de salir: sigue expandida hasta que vence `COLLAPSE_TIMER`.
     lingering: bool,
     /// Letras ya consultadas, por canción (`lyrics::key`); vacía = esa canción no tiene.
@@ -597,6 +598,7 @@ impl App {
             audio_device: None,
             countdown: None,
             installing: None,
+            preparing_update: false,
             lingering: false,
             lyrics: HashMap::new(),
             lyrics_pending: HashSet::new(),
@@ -741,6 +743,23 @@ impl App {
         unsafe {
             SetTimer(Some(self.hwnd), INSTALL_TIMER, INSTALL_DELAY_MS, None);
         }
+    }
+
+    fn prepare_update_install(&mut self) {
+        if self.preparing_update || self.installing.is_some() {
+            return;
+        }
+        self.preparing_update = true;
+        self.announce(
+            Notice {
+                icon: NoticeIcon::Installing,
+                color: BLUE,
+            },
+            "Preparando actualización",
+            "Comprobando y descargando la última versión...",
+            NOTICE_UPDATE_MS,
+        );
+        update::prepare_install(self.hwnd);
     }
 
     /// Al abrirse tras una actualización: avisa si quedó instalada la versión nueva o no.
@@ -2384,7 +2403,7 @@ impl Drop for Surface {
 fn apply_update(update: Option<&update::Update>) {
     let Some(update) = update else { return };
     if update.installer.is_some() {
-        with_app(|app| app.begin_install(update.clone()));
+        with_app(|app| app.prepare_update_install());
     } else {
         update.apply();
     }
@@ -2736,11 +2755,49 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             with_app(|app| app.set_lyrics(found));
             LRESULT(0)
         }
+        update::WM_UPDATE_PREPARED => {
+            let result = unsafe { update::take_prepared(lparam) };
+            let mut download = None;
+            with_app(|app| {
+                app.preparing_update = false;
+                match result {
+                    Ok(Some(latest)) => {
+                        app.update = Some(latest.clone());
+                        if latest.installer.is_some() {
+                            app.begin_install(latest);
+                        } else {
+                            app.announce(
+                                Notice {
+                                    icon: NoticeIcon::Failed,
+                                    color: RED,
+                                },
+                                "No se pudo preparar la instalación",
+                                "Se abrió la descarga de la última versión",
+                                NOTICE_UPDATE_MS,
+                            );
+                            download = Some(latest);
+                        }
+                    }
+                    Ok(None) => {
+                        app.update = None;
+                        app.update_checked(false);
+                    }
+                    Err(()) => app.update_checked(true),
+                }
+            });
+            if let Some(latest) = download {
+                latest.apply();
+            }
+            LRESULT(0)
+        }
         update::WM_UPDATE => {
             let found = unsafe { update::take(lparam) };
             // wparam 1 = la pidió "Buscar actualizaciones": se avisa en la isla.
             let manual = wparam.0 == 1;
             with_app(|app| {
+                if app.preparing_update || app.installing.is_some() {
+                    return;
+                }
                 let version = &found.version;
                 if manual {
                     let subtitle = if found.installer.is_some() {
@@ -2776,7 +2833,11 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
         }
         update::WM_UPDATE_CHECKED => {
             let failed = wparam.0 == 1;
-            with_app(|app| app.update_checked(failed));
+            with_app(|app| {
+                if !app.preparing_update && app.installing.is_none() {
+                    app.update_checked(failed);
+                }
+            });
             LRESULT(0)
         }
         // Clic derecho sobre el ícono de la bandeja: menú. El evento real va en la parte baja de lparam.

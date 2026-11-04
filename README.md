@@ -71,6 +71,8 @@ cargo run --example icon
   - Los ajustes se guardan en `HKEY_CURRENT_USER\Software\NotchIsla`.
 - Al minuto de abrirse y luego cada 6 horas, consulta en GitHub si hay una versión nueva (o al momento, con **Buscar actualizaciones** en la bandeja). Si la app está instalada, descarga el instalador en segundo plano, lo verifica (tamaño y SHA-256 publicados por GitHub) y avisa: un clic en el aviso, o en **Instalar la versión X** del menú de la bandeja, actualiza sin ventanas y la isla vuelve a abrirse sola. La isla avisa "Instalando la versión X" antes de cerrarse y, al volver, "Notch Isla se actualizó" o "No se pudo instalar la versión X". Si la instalación falla, un ayudante (una copia temporal de la app) vuelve a abrir la isla igual, así nunca queda cerrada sin aviso. La versión portable solo avisa y abre la página de descarga. Ver [PRIVACY.md](PRIVACY.md).
 
+Al pulsar **Instalar**, la isla vuelve a consultar el último release y prepara su instalador en segundo plano. Si se publicó otra versión después del aviso, instala esa versión más reciente. Si la consulta falla, no ejecuta el instalador anterior; si la descarga falla, abre la página del último release.
+
 ## Cómo está hecha
 
 - **Ventana layered** (`UpdateLayeredWindow`) con transparencia por píxel: los píxeles transparentes dejan pasar los clics a las ventanas de abajo.

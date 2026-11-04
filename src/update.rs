@@ -115,7 +115,16 @@ fn lookup(current: &str) -> std::result::Result<Option<Update>, ()> {
     let json = get(API_HOST, API_PATH, true)
         .and_then(|body| String::from_utf8(body).ok())
         .ok_or(())?;
-    let tag = json_string(&json, "tag_name").ok_or(())?;
+    lookup_release(current, &json, is_installed(), download_installer)
+}
+
+fn lookup_release(
+    current: &str,
+    json: &str,
+    installed: bool,
+    download: impl FnOnce(&str, &str, &str) -> Option<(PathBuf, String)>,
+) -> std::result::Result<Option<Update>, ()> {
+    let tag = json_string(json, "tag_name").ok_or(())?;
     let version = tag.trim_start_matches('v').to_string();
     // La versión se usa en el nombre del archivo y en la dirección: solo números y puntos.
     if !is_plain_version(&version) || tag != format!("v{version}") {
@@ -125,9 +134,7 @@ fn lookup(current: &str) -> std::result::Result<Option<Update>, ()> {
         return Ok(None);
     }
     // La versión portable no descarga nada: solo avisa y abre la página.
-    let downloaded = is_installed()
-        .then(|| download_installer(&json, tag, &version))
-        .flatten();
+    let downloaded = installed.then(|| download(json, tag, &version)).flatten();
     let (installer, digest) = match downloaded {
         Some((path, digest)) => (Some(path), digest),
         None => (None, String::new()),
@@ -152,6 +159,38 @@ fn is_plain_version(v: &str) -> bool {
 /// `wparam` = 0 si ya es la última, 1 si no se pudo consultar. Si la hay, llega `WM_UPDATE`
 /// con `wparam` = 1 (pedida a mano).
 pub const WM_UPDATE_CHECKED: u32 = WM_APP + 8;
+
+/// Resultado de volver a consultar el último release al pulsar Instalar.
+pub const WM_UPDATE_PREPARED: u32 = WM_APP + 10;
+pub type PreparedUpdate = std::result::Result<Option<Update>, ()>;
+
+pub fn prepare_install(hwnd: HWND) {
+    let hwnd = hwnd.0 as usize;
+    std::thread::spawn(move || {
+        // No usar el Update del aviso: puede llevar horas guardado.
+        let result = Box::into_raw(Box::new(lookup(&current_version())));
+        if unsafe {
+            PostMessageW(
+                Some(HWND(hwnd as _)),
+                WM_UPDATE_PREPARED,
+                WPARAM(0),
+                LPARAM(result as isize),
+            )
+        }
+        .is_err()
+        {
+            drop(unsafe { Box::from_raw(result) });
+        }
+    });
+}
+
+/// Recupera el resultado de preparar la instalación.
+///
+/// # Safety
+/// `lparam` debe proceder de `WM_UPDATE_PREPARED` y recuperarse una sola vez.
+pub unsafe fn take_prepared(lparam: LPARAM) -> PreparedUpdate {
+    *unsafe { Box::from_raw(lparam.0 as *mut PreparedUpdate) }
+}
 
 /// "Buscar actualizaciones" de la bandeja: consulta ya, en otro hilo, y avisa el resultado.
 pub fn check_now(hwnd: HWND) {
@@ -585,6 +624,72 @@ fn is_newer(candidate: &str, current: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vuelve_a_consultar_y_descarga_la_version_reciente_sin_pasos_intermedios() {
+        let cached = lookup_release(
+            "0.4.0",
+            r#"{"tag_name":"v0.5.0"}"#,
+            true,
+            |_, _, version| {
+                Some((
+                    PathBuf::from(format!("notch-isla-setup-{version}.exe")),
+                    "anterior".into(),
+                ))
+            },
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(cached.version, "0.5.0");
+        let fresh_json = r#"{"tag_name":"v0.5.2"}"#;
+        let latest = lookup_release("0.4.0", fresh_json, true, |json, tag, version| {
+            assert_eq!(json, fresh_json);
+            assert_eq!(tag, "v0.5.2");
+            assert_eq!(version, "0.5.2");
+            Some((
+                PathBuf::from("notch-isla-setup-0.5.2.exe"),
+                "reciente".into(),
+            ))
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(latest.version, "0.5.2");
+        assert_eq!(
+            latest.installer.unwrap(),
+            PathBuf::from("notch-isla-setup-0.5.2.exe")
+        );
+        assert_eq!(latest.digest, "reciente");
+    }
+
+    #[test]
+    fn no_reutiliza_un_instalador_anterior_si_falla_la_descarga_reciente() {
+        let latest = lookup_release("0.4.0", r#"{"tag_name":"v0.5.2"}"#, true, |_, _, _| None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(latest.version, "0.5.2");
+        assert!(latest.installer.is_none());
+        assert!(latest.digest.is_empty());
+    }
+
+    #[test]
+    fn no_descarga_si_ya_esta_al_dia_o_el_release_es_invalido() {
+        let no_download = |_: &str, _: &str, _: &str| -> Option<(PathBuf, String)> {
+            panic!("no debe descargar este release")
+        };
+        assert!(
+            lookup_release("0.5.2", r#"{"tag_name":"v0.5.2"}"#, true, no_download)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            lookup_release("0.4.0", r#"{"tag_name":"v0.5.2-beta"}"#, true, no_download).is_err()
+        );
+        assert!(lookup_release("0.4.0", "respuesta inválida", true, no_download).is_err());
+        let portable = lookup_release("0.4.0", r#"{"tag_name":"v0.5.2"}"#, false, no_download)
+            .unwrap()
+            .unwrap();
+        assert!(portable.installer.is_none());
+    }
 
     #[test]
     fn solo_versiones_simples() {
