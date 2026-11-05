@@ -472,13 +472,15 @@ pub fn battery_items(
         .filter(|d| !d.receiver_without_link())
     {
         let mut details = vec![
+            Item::Label(device.kind.label().into()),
             Item::Label(device.connection.into()),
             Item::Label(device.status()),
         ];
         if !device.detail.is_empty() {
             details.push(Item::Label(device.detail.clone()));
         }
-        items.push(Item::Group {
+        items.push(Item::IconGroup {
+            icon: island::device_icon(device.kind),
             label: format!(
                 "{} · {}",
                 device.name,

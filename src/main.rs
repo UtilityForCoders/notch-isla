@@ -805,7 +805,7 @@ impl App {
                 }
                 self.show_notice(
                     Notice {
-                        icon: NoticeIcon::Done,
+                        icon: island::device_icon(device.kind),
                         color: GREEN,
                     },
                     "Dispositivo conectado",
@@ -818,7 +818,11 @@ impl App {
         let subtitle = format!("{} · {}", device.name, device.status());
         self.show_notice(
             Notice {
-                icon: NoticeIcon::Battery,
+                icon: if device.kind == battery::DeviceKind::Unknown {
+                    NoticeIcon::Battery
+                } else {
+                    island::device_icon(device.kind)
+                },
                 color: ORANGE,
             },
             "Batería baja",

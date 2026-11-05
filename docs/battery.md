@@ -6,8 +6,18 @@ ajustes. Pasa el puntero, haz clic o usa la flecha derecha para abrir un grupo;
 izquierda o Esc vuelve al nivel anterior. Los detalles de cada dispositivo
 abren otro submenú. Solo una lista que no quepa en pantalla necesita
 desplazamiento con rueda o flechas.
-Cada dispositivo incluye su conexión, nivel y, cuando se informa, estado de carga. La consulta se
-hace al abrir la app, cada 5 segundos con los avisos de conexión activados
+Cada dispositivo activo muestra un ícono de mouse, teclado, audífonos, parlantes
+o mando. Sus detalles incluyen el tipo, la conexión, el nivel y, cuando se
+informa, el estado de carga. Los avisos de conexión y batería baja también
+usan el ícono del periférico cuando se conoce su tipo.
+
+La detección usa la clase de Bluetooth clásico, la apariencia de Bluetooth LE
+y la información de mandos y receptores que expone Windows. Los perfiles de
+mouse conocidos tienen prioridad sobre las interfaces de teclado para macros.
+Si la información es ambigua o falta, la lista y el aviso de conexión muestran
+un ícono genérico, y el aviso de batería baja muestra el de batería.
+
+La consulta se hace al abrir la app, cada 5 segundos con los avisos de conexión activados
 (cada 30 segundos si se desactivan) y al pulsar **Actualizar ahora**. Abrir el
 menú general también pide una actualización. El grupo recibe las nuevas lecturas
 mientras permanece abierto.
@@ -99,6 +109,8 @@ unidad física disponible estaba al 78 %.
 
 - [Microsoft: BluetoothDevice](https://learn.microsoft.com/en-us/uwp/api/windows.devices.bluetooth.bluetoothdevice).
 - [Microsoft: BluetoothLEDevice](https://learn.microsoft.com/en-us/uwp/api/windows.devices.bluetooth.bluetoothledevice).
+- [Bluetooth SIG: tipos de apariencia y clase de dispositivo](https://www.bluetooth.com/wp-content/uploads/Files/Specification/HTML/Assigned_Numbers/out/en/index-en.html).
+- [Microsoft: usos HID](https://learn.microsoft.com/en-us/windows-hardware/drivers/hid/hid-usages).
 - [Microsoft: RawGameController.TryGetBatteryReport](https://learn.microsoft.com/en-us/uwp/api/windows.gaming.input.rawgamecontroller.trygetbatteryreport).
 - [MCHOSE: descripción independiente del protocolo](https://github.com/alexfrih/mchose-linux/blob/main/PROTOCOL.md).
 - [AJAZZ CompX: formato de los informes y batería](https://github.com/Geovane2dd/Ajazzy/blob/main/protocol/hid.h).

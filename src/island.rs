@@ -244,6 +244,10 @@ pub struct LyricsArea {
 /// Ícono de un aviso del sistema.
 #[derive(Clone, Copy, PartialEq)]
 pub enum NoticeIcon {
+    Mouse,
+    Gamepad,
+    Speaker,
+    Device,
     Battery,
     /// Salida de audio (audífonos, parlantes).
     Audio,
@@ -254,6 +258,18 @@ pub enum NoticeIcon {
     Installing,
     Done,
     Failed,
+}
+
+pub fn device_icon(kind: crate::battery::DeviceKind) -> NoticeIcon {
+    use crate::battery::DeviceKind;
+    match kind {
+        DeviceKind::Mouse => NoticeIcon::Mouse,
+        DeviceKind::Keyboard => NoticeIcon::Keyboard,
+        DeviceKind::Headphones => NoticeIcon::Audio,
+        DeviceKind::Speaker => NoticeIcon::Speaker,
+        DeviceKind::Gamepad => NoticeIcon::Gamepad,
+        DeviceKind::Unknown => NoticeIcon::Device,
+    }
 }
 
 /// Aviso que ocupa la isla expandida: ícono a la izquierda y textos (los dibuja DirectWrite).
@@ -800,7 +816,7 @@ fn draw_notice(pixmap: &mut Pixmap, g: &Geometry, n: &Notice, text_w: f32) -> Te
 }
 
 /// Íconos de línea, de unos 20 px lógicos, centrados en (cx, cy).
-fn draw_notice_icon(
+pub(crate) fn draw_notice_icon(
     pixmap: &mut Pixmap,
     paint: &Paint,
     icon: NoticeIcon,
@@ -810,6 +826,86 @@ fn draw_notice_icon(
 ) {
     let line = 1.8 * s;
     match icon {
+        NoticeIcon::Mouse => {
+            if let Some(body) =
+                rounded_rect_path(cx - 7.0 * s, cy - 10.0 * s, 14.0 * s, 21.0 * s, 7.0 * s)
+            {
+                stroke_path(pixmap, paint, &body, line);
+            }
+            let mut pb = PathBuilder::new();
+            pb.move_to(cx - 6.0 * s, cy - 3.0 * s);
+            pb.line_to(cx + 6.0 * s, cy - 3.0 * s);
+            pb.move_to(cx, cy - 7.0 * s);
+            pb.line_to(cx, cy - 4.0 * s);
+            stroke(pixmap, paint, pb, line);
+        }
+        NoticeIcon::Gamepad => {
+            let mut pb = PathBuilder::new();
+            pb.move_to(cx - 5.0 * s, cy - 6.0 * s);
+            pb.line_to(cx + 5.0 * s, cy - 6.0 * s);
+            pb.cubic_to(
+                cx + 10.0 * s,
+                cy - 6.0 * s,
+                cx + 10.0 * s,
+                cy + 2.0 * s,
+                cx + 11.0 * s,
+                cy + 6.0 * s,
+            );
+            pb.cubic_to(
+                cx + 11.0 * s,
+                cy + 11.0 * s,
+                cx + 5.0 * s,
+                cy + 4.0 * s,
+                cx + 3.0 * s,
+                cy + 4.0 * s,
+            );
+            pb.line_to(cx - 3.0 * s, cy + 4.0 * s);
+            pb.cubic_to(
+                cx - 5.0 * s,
+                cy + 4.0 * s,
+                cx - 11.0 * s,
+                cy + 11.0 * s,
+                cx - 11.0 * s,
+                cy + 6.0 * s,
+            );
+            pb.cubic_to(
+                cx - 10.0 * s,
+                cy + 2.0 * s,
+                cx - 10.0 * s,
+                cy - 6.0 * s,
+                cx - 5.0 * s,
+                cy - 6.0 * s,
+            );
+            pb.close();
+            stroke(pixmap, paint, pb, line);
+            let mut pb = PathBuilder::new();
+            pb.move_to(cx - 7.0 * s, cy - 1.0 * s);
+            pb.line_to(cx - 2.0 * s, cy - 1.0 * s);
+            pb.move_to(cx - 4.5 * s, cy - 3.5 * s);
+            pb.line_to(cx - 4.5 * s, cy + 1.5 * s);
+            stroke(pixmap, paint, pb, line);
+            fill_circle(pixmap, paint, cx + 4.0 * s, cy + 0.5 * s, 1.2 * s);
+            fill_circle(pixmap, paint, cx + 7.0 * s, cy - 2.5 * s, 1.2 * s);
+        }
+        NoticeIcon::Speaker => {
+            if let Some(body) =
+                rounded_rect_path(cx - 8.0 * s, cy - 10.0 * s, 16.0 * s, 20.0 * s, 2.5 * s)
+            {
+                stroke_path(pixmap, paint, &body, line);
+            }
+            if let Some(circle) = PathBuilder::from_circle(cx, cy + 3.0 * s, 4.0 * s) {
+                stroke_path(pixmap, paint, &circle, line);
+            }
+            fill_circle(pixmap, paint, cx, cy - 5.0 * s, 1.6 * s);
+        }
+        NoticeIcon::Device => {
+            if let Some(body) =
+                rounded_rect_path(cx - 6.5 * s, cy - 10.0 * s, 13.0 * s, 20.0 * s, 2.5 * s)
+            {
+                stroke_path(pixmap, paint, &body, line);
+            }
+            fill_circle(pixmap, paint, cx, cy + 6.0 * s, 1.2 * s);
+        }
         NoticeIcon::Battery => {
             if let Some(body) =
                 rounded_rect_path(cx - 10.0 * s, cy - 6.0 * s, 18.0 * s, 12.0 * s, 2.0 * s)
@@ -1324,6 +1420,49 @@ pub(crate) fn rounded_rect_path(x: f32, y: f32, w: f32, h: f32, r: f32) -> Optio
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn iconos_de_dispositivo_son_distintos_y_caben_a_distintas_escalas() {
+        use crate::battery::DeviceKind;
+        let kinds = [
+            DeviceKind::Mouse,
+            DeviceKind::Keyboard,
+            DeviceKind::Headphones,
+            DeviceKind::Speaker,
+            DeviceKind::Gamepad,
+            DeviceKind::Unknown,
+        ];
+        for scale in [1.0, 1.25, 2.0] {
+            let size = (32.0_f32 * scale).ceil() as u32;
+            let mut drawings = std::collections::HashSet::new();
+            let mut paint = Paint::default();
+            paint.set_color_rgba8(255, 255, 255, 255);
+            for kind in kinds {
+                let mut image = Pixmap::new(size, size).unwrap();
+                draw_notice_icon(
+                    &mut image,
+                    &paint,
+                    device_icon(kind),
+                    size as f32 / 2.0,
+                    size as f32 / 2.0,
+                    scale,
+                );
+                assert!(image.pixels().iter().any(|p| p.alpha() != 0));
+                for x in 0..size {
+                    assert_eq!(image.pixel(x, 0).unwrap().alpha(), 0);
+                    assert_eq!(image.pixel(x, size - 1).unwrap().alpha(), 0);
+                }
+                for y in 0..size {
+                    assert_eq!(image.pixel(0, y).unwrap().alpha(), 0);
+                    assert_eq!(image.pixel(size - 1, y).unwrap().alpha(), 0);
+                }
+                assert!(
+                    drawings.insert(image.data().to_vec()),
+                    "dos tipos comparten el mismo dibujo"
+                );
+            }
+        }
+    }
     use std::time::Instant;
 
     fn controls() -> Controls {

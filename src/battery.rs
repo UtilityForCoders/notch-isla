@@ -61,12 +61,85 @@ impl Level {
 pub struct Device {
     pub id: String,
     pub name: String,
+    pub kind: DeviceKind,
     pub connection: &'static str,
     pub level: Option<Level>,
     pub charging: bool,
     pub stale: bool,
     /// Un receptor presente no implica que su periférico esté encendido.
     pub detail: String,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DeviceKind {
+    Mouse,
+    Keyboard,
+    Headphones,
+    Speaker,
+    Gamepad,
+    #[default]
+    Unknown,
+}
+
+impl DeviceKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Mouse => "Mouse",
+            Self::Keyboard => "Teclado",
+            Self::Headphones => "Audífonos",
+            Self::Speaker => "Parlantes",
+            Self::Gamepad => "Mando",
+            Self::Unknown => "Dispositivo",
+        }
+    }
+}
+
+// Bluetooth SIG Assigned Numbers: Appearance y Class of Device.
+fn kind_from_appearance(raw: u16) -> DeviceKind {
+    match raw {
+        0x03c1 => DeviceKind::Keyboard,
+        0x03c2 => DeviceKind::Mouse,
+        0x03c3 | 0x03c4 => DeviceKind::Gamepad,
+        0x0940..=0x0944 => DeviceKind::Headphones,
+        0x0841..=0x0845 => DeviceKind::Speaker,
+        _ => DeviceKind::Unknown,
+    }
+}
+
+fn kind_from_class(raw: u32) -> DeviceKind {
+    let major = (raw >> 8) & 0x1f;
+    let minor = (raw >> 2) & 0x3f;
+    match major {
+        4 => match minor {
+            1 | 6 => DeviceKind::Headphones,
+            5 => DeviceKind::Speaker,
+            _ => DeviceKind::Unknown,
+        },
+        5 => match minor & 0x30 {
+            0x10 => DeviceKind::Keyboard,
+            0x20 => DeviceKind::Mouse,
+            0 if matches!(minor & 0x0f, 1 | 2) => DeviceKind::Gamepad,
+            _ => DeviceKind::Unknown, // Un combo teclado/mouse no es un tipo único.
+        },
+        _ => DeviceKind::Unknown,
+    }
+}
+
+fn kind_from_hid_usages(usages: impl Iterator<Item = (u16, u16)>) -> DeviceKind {
+    let mut found = None;
+    for (page, usage) in usages {
+        let kind = match (page, usage) {
+            (1, 2) => DeviceKind::Mouse,
+            (1, 6) => DeviceKind::Keyboard,
+            (1, 4 | 5) => DeviceKind::Gamepad,
+            _ => continue,
+        };
+        if found.is_some_and(|previous| previous != kind) {
+            return DeviceKind::Unknown;
+        }
+        found = Some(kind);
+    }
+    found.unwrap_or_default()
 }
 
 impl Device {
@@ -321,6 +394,11 @@ impl Alerts {
 
 fn preserve_last_readings(current: &mut Snapshot, previous: &Snapshot) {
     for device in &mut current.devices {
+        if device.kind == DeviceKind::Unknown {
+            if let Some(old) = previous.devices.iter().find(|old| old.id == device.id) {
+                device.kind = old.kind;
+            }
+        }
         if device.level.is_none() {
             if let Some(old) = previous
                 .devices
@@ -458,7 +536,7 @@ fn bluetooth(out: &mut Vec<Device>, trace: bool) -> windows::core::Result<()> {
         }
         for info in &devices {
             let id = info.Id()?;
-            let (connected, native_name, address) = if le {
+            let (connected, native_name, address, kind) = if le {
                 BluetoothLEDevice::FromIdAsync(&id)
                     .and_then(finish)
                     .map(|d| {
@@ -466,6 +544,10 @@ fn bluetooth(out: &mut Vec<Device>, trace: bool) -> windows::core::Result<()> {
                             d.ConnectionStatus().ok(),
                             d.Name().ok(),
                             d.BluetoothAddress().ok(),
+                            d.Appearance()
+                                .and_then(|a| a.RawValue())
+                                .map(kind_from_appearance)
+                                .unwrap_or_default(),
                         );
                         let _ = d.Close();
                         result
@@ -479,6 +561,10 @@ fn bluetooth(out: &mut Vec<Device>, trace: bool) -> windows::core::Result<()> {
                             d.ConnectionStatus().ok(),
                             d.Name().ok(),
                             d.BluetoothAddress().ok(),
+                            d.ClassOfDevice()
+                                .and_then(|c| c.RawValue())
+                                .map(kind_from_class)
+                                .unwrap_or_default(),
                         );
                         let _ = d.Close();
                         result
@@ -506,6 +592,9 @@ fn bluetooth(out: &mut Vec<Device>, trace: bool) -> windows::core::Result<()> {
             if !seen.insert(address.clone()) {
                 // Un dispositivo dual puede informar batería solo en su interfaz LE.
                 if let Some(existing) = out.iter_mut().find(|d| d.id == format!("bt:{address}")) {
+                    if existing.kind == DeviceKind::Unknown {
+                        existing.kind = kind;
+                    }
                     if level.is_some() {
                         existing.level = level;
                         existing.detail.clear();
@@ -515,6 +604,7 @@ fn bluetooth(out: &mut Vec<Device>, trace: bool) -> windows::core::Result<()> {
             }
             out.push(Device {
                 id: format!("bt:{address}"),
+                kind,
                 name: native_name
                     .filter(|n| !n.is_empty())
                     .or_else(|| info.Name().ok().filter(|n| !n.is_empty()))
@@ -636,10 +726,12 @@ fn controllers(out: &mut Vec<Device>) -> windows::core::Result<()> {
                 existing.detail.clear();
             }
             existing.charging = status == Some(BatteryStatus::Charging);
+            existing.kind = DeviceKind::Gamepad;
             continue;
         }
         out.push(Device {
             id: format!("gamepad:{id}"),
+            kind: DeviceKind::Gamepad,
             name,
             connection: if controller.IsWireless().unwrap_or(false) {
                 "Inalámbrico"
@@ -842,6 +934,17 @@ fn receivers(out: &mut Vec<Device>, trace: bool) -> hidapi::HidResult<()> {
         out.push(Device {
             id,
             name: name.to_string(),
+            // Estos perfiles implementados pertenecen a familias de mouse.
+            // Sus colecciones de teclado para macros no cambian el tipo físico.
+            kind: if known_ajazz || known_compx || known_mchose {
+                DeviceKind::Mouse
+            } else {
+                kind_from_hid_usages(
+                    api.device_list()
+                        .filter(|d| d.vendor_id() == vendor && d.product_id() == product)
+                        .map(|d| (d.usage_page(), d.usage())),
+                )
+            },
             connection: "USB / 2.4 GHz",
             level: value.map(|v| v.0),
             charging: value.is_some_and(|v| v.1),
@@ -872,8 +975,9 @@ pub fn diagnostics() {
     let snapshot = scan_with_diagnostics(true);
     for device in &snapshot.devices {
         println!(
-            "{} | {} | {} | {}",
+            "{} | {} | {} | {} | {}",
             device.name,
+            device.kind.label(),
             device.connection,
             device.status(),
             device.detail
@@ -903,6 +1007,56 @@ pub fn diagnostics() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bluetooth_appearance_identifies_types_without_guessing_names() {
+        assert_eq!(kind_from_appearance(0x03c1), DeviceKind::Keyboard);
+        assert_eq!(kind_from_appearance(0x03c2), DeviceKind::Mouse);
+        assert_eq!(kind_from_appearance(0x03c4), DeviceKind::Gamepad);
+        for appearance in [0x0941, 0x0942, 0x0943] {
+            assert_eq!(kind_from_appearance(appearance), DeviceKind::Headphones);
+        }
+        assert_eq!(kind_from_appearance(0x0841), DeviceKind::Speaker);
+        assert_eq!(kind_from_appearance(0x0000), DeviceKind::Unknown);
+        assert_eq!(kind_from_appearance(0x03c0), DeviceKind::Unknown);
+        assert_eq!(kind_from_appearance(0x0083), DeviceKind::Unknown); // Laptop, no teclado.
+    }
+
+    #[test]
+    fn bluetooth_class_decodes_keyboard_pointing_bits_and_audio_subclasses() {
+        assert_eq!(kind_from_class(0x0540), DeviceKind::Keyboard);
+        assert_eq!(kind_from_class(0x2580), DeviceKind::Mouse);
+        assert_eq!(kind_from_class(0x0508), DeviceKind::Gamepad);
+        assert_eq!(kind_from_class(0x0404), DeviceKind::Headphones);
+        assert_eq!(kind_from_class(0x0418), DeviceKind::Headphones);
+        assert_eq!(kind_from_class(0x0414), DeviceKind::Speaker);
+        assert_eq!(kind_from_class(0x05c0), DeviceKind::Unknown); // Combo, no asumir solo teclado.
+        assert_eq!(kind_from_class(0x010c), DeviceKind::Unknown);
+    }
+
+    #[test]
+    fn hid_classification_is_conservative_for_composite_receivers() {
+        assert_eq!(
+            kind_from_hid_usages([(1, 2), (0xff01, 1)].into_iter()),
+            DeviceKind::Mouse
+        );
+        assert_eq!(
+            kind_from_hid_usages([(1, 6), (0x0c, 1)].into_iter()),
+            DeviceKind::Keyboard
+        );
+        assert_eq!(
+            kind_from_hid_usages([(1, 5)].into_iter()),
+            DeviceKind::Gamepad
+        );
+        assert_eq!(
+            kind_from_hid_usages([(1, 2), (1, 6)].into_iter()),
+            DeviceKind::Unknown
+        );
+        assert_eq!(
+            kind_from_hid_usages([(0xff01, 1), (0x0c, 1)].into_iter()),
+            DeviceKind::Unknown
+        );
+    }
 
     fn connected_device(id: &str, responds: bool) -> Device {
         let mut d = device(responds.then_some(Level::Percent(78)), false);
@@ -1056,6 +1210,7 @@ mod tests {
         Device {
             id: "mouse".into(),
             name: "Mouse".into(),
+            kind: DeviceKind::Mouse,
             connection: "USB",
             level,
             charging,
@@ -1074,7 +1229,9 @@ mod tests {
             devices: vec![device(None, false)],
             ..Snapshot::default()
         };
+        current.devices[0].kind = DeviceKind::Unknown;
         preserve_last_readings(&mut current, &old);
+        assert_eq!(current.devices[0].kind, DeviceKind::Mouse);
         assert_eq!(current.devices[0].level, Some(Level::Percent(18)));
         assert!(current.devices[0].status().contains("Última lectura"));
         let mut alerts = Alerts::default();
@@ -1125,7 +1282,7 @@ mod tests {
             .iter()
             .filter(|item| {
                 matches!(item,
-            crate::menu::Item::Group { label, .. } if label.starts_with("MCHOSE K7 Ultra"))
+            crate::menu::Item::IconGroup { label, .. } if label.starts_with("MCHOSE K7 Ultra"))
             })
             .count();
         assert_eq!(active_count, 1);
@@ -1140,7 +1297,7 @@ mod tests {
             items
                 .iter()
                 .filter(|item| matches!(item,
-            crate::menu::Item::Group { label, .. } if label.starts_with("MCHOSE K7 Ultra")))
+            crate::menu::Item::IconGroup { label, .. } if label.starts_with("MCHOSE K7 Ultra")))
                 .count(),
             2
         );

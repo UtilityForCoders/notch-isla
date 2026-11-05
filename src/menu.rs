@@ -76,6 +76,11 @@ pub enum Item {
         label: String,
         items: Vec<Item>,
     },
+    IconGroup {
+        label: String,
+        icon: crate::island::NoticeIcon,
+        items: Vec<Item>,
+    },
     /// Deslizador continuo; el comando emitido es `id + value` (ambos límites incluidos).
     Slider {
         id: usize,
@@ -208,6 +213,7 @@ enum Entry {
     Group {
         text: usize,
         children: Vec<Entry>,
+        icon: Option<crate::island::NoticeIcon>,
     },
 }
 
@@ -253,6 +259,7 @@ struct Row {
     kind: RowKind,
     text: Option<usize>,
     child: bool,
+    icon: Option<crate::island::NoticeIcon>,
     y: f32,
     h: f32,
 }
@@ -330,7 +337,9 @@ impl State {
                             }
                         }
                     }
-                    Item::Group { items, .. } => sync(items, id, value, label, checked),
+                    Item::Group { items, .. } | Item::IconGroup { items, .. } => {
+                        sync(items, id, value, label, checked)
+                    }
                     _ => {}
                 }
             }
@@ -500,6 +509,13 @@ fn with_menu(hwnd: HWND, f: impl FnOnce(&mut State)) {
     });
 }
 
+fn group_items(item: &Item) -> Option<&[Item]> {
+    match item {
+        Item::Group { items, .. } | Item::IconGroup { items, .. } => Some(items),
+        _ => None,
+    }
+}
+
 fn panel_rect(st: &State) -> RECT {
     RECT {
         left: st.pos.x,
@@ -549,11 +565,11 @@ fn refresh_submenu(st: &mut State) {
         close_submenu(st);
         return;
     };
-    let Some(Item::Group { items, .. }) = st.items.get(index) else {
+    let Some(items) = st.items.get(index).and_then(group_items) else {
         close_submenu(st);
         return;
     };
-    let items = items.clone();
+    let items = items.to_vec();
     let bounds = panel_rect(st);
     let row_y = st.rows.get(index).map_or(0.0, |r| r.y);
     if let Some(child) = &mut st.child_menu {
@@ -576,10 +592,10 @@ fn open_submenu(st: &mut State, index: usize, keyboard: bool) {
         }
         return;
     }
-    let Some(Item::Group { items, .. }) = st.items.get(index) else {
+    let Some(items) = st.items.get(index).and_then(group_items) else {
         return;
     };
-    let items = items.clone();
+    let items = items.to_vec();
     close_submenu(st);
     let Ok(hwnd) = create_window(Some(st.hwnd), true) else {
         return;
@@ -1054,6 +1070,12 @@ fn build(
             Item::Group { label, items } => Entry::Group {
                 text: add(dwrite, font, &label, texts),
                 children: build(dwrite, font, label_font, items, texts),
+                icon: None,
+            },
+            Item::IconGroup { label, items, icon } => Entry::Group {
+                text: add(dwrite, font, &label, texts),
+                children: build(dwrite, font, label_font, items, texts),
+                icon: Some(icon),
             },
         })
         .collect()
@@ -1085,7 +1107,12 @@ fn text_width(entries: &[Entry], texts: &[Text], scale: f32, child: bool) -> f32
                 texts[*text].w / scale + indent + 2.0 * (PAD + TEXT_X) + RIGHT
             }
             Entry::Separator => 0.0,
-            Entry::Group { text, .. } => texts[*text].w / scale + 2.0 * (PAD + TEXT_X) + RIGHT,
+            Entry::Group { text, icon, .. } => {
+                texts[*text].w / scale
+                    + 2.0 * (PAD + TEXT_X)
+                    + RIGHT
+                    + if icon.is_some() { 24.0 } else { 0.0 }
+            }
         })
         .fold(0.0, f32::max)
 }
@@ -1105,6 +1132,7 @@ fn relayout(st: &mut State) {
             kind,
             text,
             child,
+            icon: None,
             y,
             h,
         });
@@ -1149,6 +1177,11 @@ fn relayout(st: &mut State) {
                 false,
                 &mut rows,
             ),
+        }
+    }
+    for (row, entry) in rows.iter_mut().zip(&st.entries) {
+        if let Entry::Group { icon, .. } = entry {
+            row.icon = *icon;
         }
     }
     let height = y + PAD;
@@ -1231,6 +1264,17 @@ fn render(st: &mut State) {
                         w - 2.0 * PAD * s,
                         rh,
                         ROW_RADIUS * s,
+                    );
+                }
+                if let Some(icon) = row.icon {
+                    paint.set_color_rgba8(235, 235, 240, 235);
+                    crate::island::draw_notice_icon(
+                        pixmap,
+                        &paint,
+                        icon,
+                        (PAD + TEXT_X + 9.0) * s,
+                        cy,
+                        0.8 * s,
                     );
                 }
                 let cx = w - (PAD + RIGHT / 2.0) * s;
@@ -1319,7 +1363,8 @@ fn render(st: &mut State) {
                 let Some(text) = row.text.and_then(|t| st.texts.get(t)) else {
                     continue;
                 };
-                let indent = if row.child { CHILD_INDENT } else { 0.0 };
+                let indent = if row.child { CHILD_INDENT } else { 0.0 }
+                    + if row.icon.is_some() { 24.0 } else { 0.0 };
                 let x = (PAD + TEXT_X + indent) * s;
                 let y = if matches!(row.kind, RowKind::Slider { .. }) {
                     row.y * s + 6.0 * s
@@ -1913,8 +1958,9 @@ mod tests {
         const SNAPSHOT: u32 = WM_APP + 102;
         const KEY: u32 = WM_APP + 103;
         fn nested() -> Item {
-            Item::Group {
+            Item::IconGroup {
                 label: "Detalles del mouse".into(),
+                icon: crate::island::NoticeIcon::Mouse,
                 items: vec![Item::Action {
                     id: 3,
                     label: "Acción anidada".into(),
