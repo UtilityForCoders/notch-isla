@@ -3,19 +3,21 @@
 
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use windows::core::{w, Result};
+use windows::core::{w, Result, PCWSTR};
 use windows::Win32::Foundation::{E_FAIL, HWND};
 use windows::Win32::Graphics::Gdi::{
     CreateBitmap, CreateDIBSection, DeleteObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
     DIB_RGB_COLORS,
 };
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Shell::{
     Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_USER, NIM_ADD, NIM_DELETE,
     NIM_MODIFY, NOTIFYICONDATAW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateIconIndirect, DestroyIcon, GetSystemMetrics, LoadIconW, RegisterWindowMessageW, HICON,
-    ICONINFO, IDI_APPLICATION, SM_CXSMICON, WM_APP,
+    CreateIconIndirect, DestroyIcon, GetSystemMetrics, LoadIconW, LoadImageW,
+    RegisterWindowMessageW, HICON, ICONINFO, IDI_APPLICATION, IMAGE_ICON, LR_DEFAULTCOLOR,
+    SM_CXSMICON, SM_CYSMICON, WM_APP,
 };
 
 use crate::hotkey::{self, Hotkey};
@@ -122,7 +124,8 @@ impl Tray {
                 RegisterWindowMessageW(w!("TaskbarCreated")),
                 Ordering::Relaxed,
             );
-            let icon = make_icon()
+            let icon = load_app_icon()
+                .or_else(|_| make_icon())
                 .or_else(|_| LoadIconW(None, IDI_APPLICATION))
                 .unwrap_or_default();
             let tray = Self { hwnd, icon };
@@ -470,7 +473,24 @@ pub fn show_island_menu(
     }
 }
 
-/// Convierte el dibujo de `island::tray_icon` en un HICON del tamaño que usa la bandeja.
+/// Carga el recurso 1 de app.rc (assets/icon.ico) al tamaño de la bandeja.
+fn load_app_icon() -> Result<HICON> {
+    unsafe {
+        let instance = GetModuleHandleW(None)?;
+        // Sin LR_SHARED: Tray es dueño del HICON y lo libera con DestroyIcon.
+        let icon = LoadImageW(
+            Some(instance.into()),
+            PCWSTR(1usize as *const u16),
+            IMAGE_ICON,
+            GetSystemMetrics(SM_CXSMICON).max(16),
+            GetSystemMetrics(SM_CYSMICON).max(16),
+            LR_DEFAULTCOLOR,
+        )?;
+        Ok(HICON(icon.0))
+    }
+}
+
+/// Dibujo de respaldo si no se puede cargar el ícono incrustado.
 fn make_icon() -> Result<HICON> {
     unsafe {
         let size = GetSystemMetrics(SM_CXSMICON).max(16) as u32;
