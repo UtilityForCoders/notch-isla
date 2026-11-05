@@ -1,0 +1,4 @@
+# El runtime de C++ (vcruntime140.dll y la CRT) va dentro del exe: sin esto, en una PC sin el
+# "Visual C++ Redistributable" instalado la isla no abre y Windows no muestra ningún aviso.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
