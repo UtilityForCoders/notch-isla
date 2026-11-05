@@ -26,6 +26,7 @@ pub struct Settings {
     /// Avisa al cambiar la salida de audio (audífonos, parlantes).
     pub notices: bool,
     pub battery_notices: bool,
+    pub connection_notices: bool,
     /// Letra sincronizada dentro de la isla expandida y en el proyector bajo la isla encogida.
     /// Se activan por separado; apagadas si no se activan (la letra se pide a lrclib.net).
     pub lyrics_island: bool,
@@ -67,6 +68,7 @@ impl Settings {
             hide_fullscreen: read_dword(w!("HideFullscreen")).is_none_or(|v| v != 0),
             notices: read_dword(w!("Notices")).is_none_or(|v| v != 0),
             battery_notices: read_dword(w!("BatteryNotices")).is_none_or(|v| v != 0),
+            connection_notices: read_dword(w!("ConnectionNotices")).is_none_or(|v| v != 0),
             lyrics_island: read_dword(w!("LyricsIsland")).map_or(lyrics, |v| v != 0),
             lyrics_projector: read_dword(w!("LyricsProjector")).map_or(lyrics, |v| v != 0),
             real_bars: read_dword(w!("RealBars")).is_none_or(|v| v != 0),
@@ -86,6 +88,7 @@ impl Settings {
         write_dword(w!("HideFullscreen"), self.hide_fullscreen as u32);
         write_dword(w!("Notices"), self.notices as u32);
         write_dword(w!("BatteryNotices"), self.battery_notices as u32);
+        write_dword(w!("ConnectionNotices"), self.connection_notices as u32);
         write_dword(w!("LyricsIsland"), self.lyrics_island as u32);
         write_dword(w!("LyricsProjector"), self.lyrics_projector as u32);
         write_dword(w!("RealBars"), self.real_bars as u32);

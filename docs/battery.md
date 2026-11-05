@@ -7,7 +7,8 @@ izquierda o Esc vuelve al nivel anterior. Los detalles de cada dispositivo
 abren otro submenú. Solo una lista que no quepa en pantalla necesita
 desplazamiento con rueda o flechas.
 Cada dispositivo incluye su conexión, nivel y, cuando se informa, estado de carga. La consulta se
-hace al abrir la app, cada 30 segundos y al pulsar **Actualizar ahora**. Abrir el
+hace al abrir la app, cada 5 segundos con los avisos de conexión activados
+(cada 30 segundos si se desactivan) y al pulsar **Actualizar ahora**. Abrir el
 menú general también pide una actualización. El grupo recibe las nuevas lecturas
 mientras permanece abierto.
 
@@ -18,6 +19,26 @@ sin atribuirle un porcentaje. No se avisa cargando ni usando lecturas anteriores
 Cada dispositivo avisa una vez por descarga durante la sesión de la app; vuelve
 a habilitarse el aviso tras detectar carga o al alcanzar el 25 %. Los avisos
 esperan a que termine otro aviso y a que se salga de pantalla completa.
+
+**Avisar al conectar un dispositivo**, activado por defecto, muestra en la isla
+**Dispositivo conectado**, con nombre, conexión y batería si hay una lectura
+actual. Funciona con los periféricos detectados por las mismas fuentes del panel:
+Bluetooth, mandos de Windows y receptores compatibles. El primer sondeo de cada
+fuente establece la lista inicial sin anunciar los equipos ya conectados; volver
+a activar la opción tampoco los anuncia de golpe. Los cambios de dispositivos
+de Windows piden una lectura inmediata y el sondeo permite detectar un mouse
+encendido sin retirar su dongle. La detección puede tardar unos 5 segundos más
+el tiempo de respuesta del controlador.
+
+Un receptor sin enlace confirmado, una lectura anterior o una fuente que falla
+no disparan el aviso. Las pérdidas de respuesta con el dongle presente deben
+durar 15 segundos antes de rearmarlo; retirar el USB o perder un enlace Bluetooth
+sí permite detectar una reconexión en el siguiente sondeo. Si un periférico corta
+su enlace al dormir, también puede avisar al despertar después de ese intervalo:
+el protocolo no siempre permite diferenciar suspensión y apagado. Se confirma
+que el periférico responde, no se vigilan movimientos del mouse ni teclas.
+Los avisos esperan a que se cierre el menú o se salga de pantalla completa, sin
+reemplazar otro aviso. La batería baja tiene prioridad sobre la conexión.
 
 Un receptor USB puede seguir presente con el mouse apagado o dormido. Una
 respuesta vacía o inválida significa **sin lectura**, nunca 0 %. Si ya hubo una

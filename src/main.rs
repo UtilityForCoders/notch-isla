@@ -69,13 +69,14 @@ use windows::Win32::UI::WindowsAndMessaging::{
     BeginDeferWindowPos, CreateWindowExW, DefWindowProcW, DeferWindowPos, DestroyWindow,
     DispatchMessageW, EndDeferWindowPos, GetCursorPos, GetMessageW, KillTimer, LoadCursorW,
     PostMessageW, PostQuitMessage, RegisterClassExW, SetTimer, SetWindowPos, ShowWindow,
-    TranslateMessage, UpdateLayeredWindow, UpdateLayeredWindowIndirect, CS_DBLCLKS, HWND_TOPMOST,
-    IDC_ARROW, MA_NOACTIVATE, MB_ICONASTERISK, MSG, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER,
-    SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOWNOACTIVATE, ULW_ALPHA, UPDATELAYEREDWINDOWINFO,
-    WM_APP, WM_CAPTURECHANGED, WM_CONTEXTMENU, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED,
-    WM_HOTKEY, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE,
-    WM_MOUSEWHEEL, WM_RBUTTONUP, WM_TIMER, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    TranslateMessage, UpdateLayeredWindow, UpdateLayeredWindowIndirect, CS_DBLCLKS,
+    DBT_DEVICEARRIVAL, DBT_DEVICEREMOVECOMPLETE, DBT_DEVNODES_CHANGED, HWND_TOPMOST, IDC_ARROW,
+    MA_NOACTIVATE, MB_ICONASTERISK, MSG, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE,
+    SWP_NOZORDER, SW_HIDE, SW_SHOWNOACTIVATE, ULW_ALPHA, UPDATELAYEREDWINDOWINFO, WM_APP,
+    WM_CAPTURECHANGED, WM_CONTEXTMENU, WM_DESTROY, WM_DEVICECHANGE, WM_DISPLAYCHANGE,
+    WM_DPICHANGED, WM_HOTKEY, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE,
+    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONUP, WM_TIMER, WNDCLASSEXW, WS_EX_LAYERED,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 /// Aviso de "el mouse salió de la ventana" (definido aquí para no cargar todo el módulo Win32_UI_Controls).
@@ -294,7 +295,10 @@ fn main() -> Result<()> {
         with_app(|app| {
             app.audio = AudioWatch::new(hwnd).ok();
             app.audio_device = app.audio.as_ref().and_then(AudioWatch::device_name);
-            app.battery = Some(battery::Monitor::start(hwnd));
+            app.battery = Some(battery::Monitor::start(
+                hwnd,
+                app.settings.connection_notices,
+            ));
         });
         // Si se acaba de instalar una actualización desde la isla, se avisa cómo salió.
         if let Some((ok, version)) = update::take_install_result() {
@@ -530,6 +534,8 @@ struct App {
     battery: Option<battery::Monitor>,
     battery_alerts: battery::Alerts,
     battery_pending: std::collections::VecDeque<battery::Device>,
+    connections: battery::Connections,
+    connection_pending: std::collections::VecDeque<battery::Device>,
     tray_menu_open: bool,
     /// Nombre de la salida de audio actual, para avisar solo cuando de verdad cambia.
     audio_device: Option<String>,
@@ -612,6 +618,8 @@ impl App {
             battery: None,
             battery_alerts: battery::Alerts::default(),
             battery_pending: std::collections::VecDeque::new(),
+            connections: battery::Connections::default(),
+            connection_pending: std::collections::VecDeque::new(),
             tray_menu_open: false,
             audio_device: None,
             countdown: None,
@@ -719,7 +727,11 @@ impl App {
             .as_ref()
             .map(battery::Monitor::snapshot)
             .unwrap_or_default();
-        tray::battery_group_items(&snapshot, self.settings.battery_notices)
+        tray::battery_group_items(
+            &snapshot,
+            self.settings.battery_notices,
+            self.settings.connection_notices,
+        )
     }
 
     fn on_battery(&mut self) {
@@ -727,6 +739,21 @@ impl App {
             return;
         };
         let snapshot = monitor.snapshot();
+        self.connection_pending = self
+            .connection_pending
+            .drain(..)
+            .filter_map(|pending| {
+                snapshot
+                    .devices
+                    .iter()
+                    .find(|current| current.id == pending.id && current.active_link())
+                    .cloned()
+            })
+            .collect();
+        self.connection_pending.extend(
+            self.connections
+                .update(&snapshot, self.settings.connection_notices),
+        );
         let mut pending_notices = std::collections::VecDeque::new();
         for pending in self.battery_pending.drain(..) {
             if let Some(current) = snapshot.devices.iter().find(|d| {
@@ -749,15 +776,17 @@ impl App {
             .battery_alerts
             .update(&snapshot.devices, self.settings.battery_notices);
         self.battery_pending.extend(alerts);
-        self.show_next_battery_alert();
+        self.show_next_device_notice();
     }
 
-    fn show_next_battery_alert(&mut self) {
+    fn show_next_device_notice(&mut self) {
         if !self.settings.battery_notices {
             for pending in self.battery_pending.drain(..) {
                 self.battery_alerts.retry_unshown(&pending.id);
             }
-            return;
+        }
+        if !self.settings.connection_notices {
+            self.connection_pending.clear();
         }
         if self.notice.is_some()
             || self.fullscreen
@@ -767,6 +796,23 @@ impl App {
             return;
         }
         let Some(device) = self.battery_pending.pop_front() else {
+            if let Some(device) = self.connection_pending.pop_front() {
+                let mut subtitle = format!("{} · {}", device.name, device.connection);
+                if !device.stale {
+                    if let Some(level) = device.level {
+                        subtitle.push_str(&format!(" · {}", level.label()));
+                    }
+                }
+                self.show_notice(
+                    Notice {
+                        icon: NoticeIcon::Done,
+                        color: GREEN,
+                    },
+                    "Dispositivo conectado",
+                    &subtitle,
+                    4000,
+                );
+            }
             return;
         };
         let subtitle = format!("{} · {}", device.name, device.status());
@@ -2862,6 +2908,19 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             }
             LRESULT(0)
         }
+        WM_DEVICECHANGE
+            if matches!(
+                wparam.0 as u32,
+                DBT_DEVNODES_CHANGED | DBT_DEVICEARRIVAL | DBT_DEVICEREMOVECOMPLETE
+            ) =>
+        {
+            with_app(|app| {
+                if let Some(monitor) = &app.battery {
+                    monitor.refresh();
+                }
+            });
+            LRESULT(1)
+        }
         WM_HOTKEY if hotkey::is_ours(wparam) => {
             with_app(|app| app.toggle_hidden());
             LRESULT(0)
@@ -2885,7 +2944,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
         WM_TIMER if wparam.0 == FULLSCREEN_TIMER => {
             with_app(|app| {
                 app.poll_fullscreen();
-                app.show_next_battery_alert();
+                app.show_next_device_notice();
             });
             LRESULT(0)
         }
@@ -3033,6 +3092,18 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                         });
                         true
                     }
+                    Command::ToggleConnectionNotices => {
+                        settings.connection_notices = !settings.connection_notices;
+                        settings.save();
+                        with_app(|app| {
+                            app.settings.connection_notices = settings.connection_notices;
+                            if let Some(monitor) = &app.battery {
+                                monitor.set_connection_notices(settings.connection_notices);
+                            }
+                            app.on_battery();
+                        });
+                        true
+                    }
                     Command::RefreshBattery => {
                         with_app(|app| {
                             if let Some(monitor) = &app.battery {
@@ -3159,7 +3230,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 });
                 with_app(|app| {
                     app.tray_menu_open = false;
-                    app.show_next_battery_alert();
+                    app.show_next_device_notice();
                 });
             }
             LRESULT(0)

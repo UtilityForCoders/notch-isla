@@ -51,6 +51,7 @@ const CMD_EXPAND_ON_HOVER: usize = 17;
 const CMD_PIN_EXPANDED: usize = 18;
 const CMD_BATTERY_NOTICES: usize = 20;
 const CMD_BATTERY_REFRESH: usize = 21;
+const CMD_CONNECTION_NOTICES: usize = 22;
 /// Las opciones de los submenús van numeradas a partir de estas bases.
 const CMD_HIDE_DELAY: usize = 100;
 const CMD_MONITOR: usize = 200;
@@ -65,6 +66,7 @@ pub const TIMER_MINUTES: [u32; 6] = [5, 10, 15, 25, 45, 60];
 
 pub enum Command {
     ToggleBatteryNotices,
+    ToggleConnectionNotices,
     RefreshBattery,
     ToggleAutostart,
     Update,
@@ -355,6 +357,7 @@ fn id_to_command(id: usize, state: &MenuState) -> Option<Command> {
     let pick = |base: usize, len: usize| (base..base + len).contains(&id).then(|| id - base);
     match id {
         CMD_BATTERY_NOTICES => Some(Command::ToggleBatteryNotices),
+        CMD_CONNECTION_NOTICES => Some(Command::ToggleConnectionNotices),
         CMD_BATTERY_REFRESH => Some(Command::RefreshBattery),
         CMD_AUTOSTART => Some(Command::ToggleAutostart),
         CMD_UPDATE => Some(Command::Update),
@@ -431,10 +434,19 @@ pub enum IslandMenuChoice {
     TogglePinnedExpanded,
 }
 
-pub fn battery_items(snapshot: &crate::battery::Snapshot, notices: bool) -> Vec<Item> {
+pub fn battery_items(
+    snapshot: &crate::battery::Snapshot,
+    notices: bool,
+    connections: bool,
+) -> Vec<Item> {
     let mut items = vec![
         Item::Label("Dispositivos y batería".into()),
         Item::Separator,
+        Item::Action {
+            id: CMD_CONNECTION_NOTICES,
+            label: "Avisar al conectar un dispositivo".into(),
+            checked: connections,
+        },
         Item::Action {
             id: CMD_BATTERY_NOTICES,
             label: "Avisar con batería baja (< 20 %)".into(),
@@ -519,8 +531,12 @@ pub fn battery_items(snapshot: &crate::battery::Snapshot, notices: bool) -> Vec<
 }
 
 /// El encabezado del submenú reemplaza el título del antiguo panel.
-pub fn battery_group_items(snapshot: &crate::battery::Snapshot, notices: bool) -> Vec<Item> {
-    battery_items(snapshot, notices)
+pub fn battery_group_items(
+    snapshot: &crate::battery::Snapshot,
+    notices: bool,
+    connections: bool,
+) -> Vec<Item> {
+    battery_items(snapshot, notices, connections)
         .into_iter()
         .skip(2)
         .collect()

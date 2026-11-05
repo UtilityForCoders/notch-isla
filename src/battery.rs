@@ -1,7 +1,9 @@
-//! Baterías de periféricos. Las consultas se hacen en un hilo separado cada 30 s.
+//! Baterías y conexiones de periféricos. Las consultas se hacen en un hilo separado
+//! cada 5 s con avisos de conexión, o cada 30 s si están desactivados.
 //! Solo se envían consultas de estado a receptores con protocolo identificado.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -24,6 +26,8 @@ use windows_future::{AsyncOperationCompletedHandler, IAsyncOperation};
 pub const WM_BATTERY: u32 = WM_APP + 11;
 pub const LOW_PERCENT: u8 = 20;
 const INTERVAL: Duration = Duration::from_secs(30);
+const CONNECTION_INTERVAL: Duration = Duration::from_secs(5);
+const RECEIVER_DISCONNECT_GRACE: Duration = Duration::from_secs(15);
 const BT_BATTERY: &str = "{104EA319-6EE2-4701-BD47-8DDBF425BBE5} 2";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -66,6 +70,19 @@ pub struct Device {
 }
 
 impl Device {
+    fn source(&self) -> Source {
+        if self.id.starts_with("bt:") {
+            Source::Bluetooth
+        } else if self.id.starts_with("gamepad:") {
+            Source::Controller
+        } else {
+            Source::Receiver
+        }
+    }
+
+    pub fn active_link(&self) -> bool {
+        !self.receiver_without_link()
+    }
     /// El USB sigue conectado aunque el enlace con el periférico no responda.
     /// No constituye una segunda conexión activa ni una identidad física común.
     pub fn receiver_without_link(&self) -> bool {
@@ -93,6 +110,14 @@ pub struct Snapshot {
     pub updated: Option<Instant>,
     pub scanning: bool,
     pub errors: Vec<String>,
+    pub unavailable: HashSet<Source>,
+}
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+pub enum Source {
+    Bluetooth,
+    Controller,
+    Receiver,
 }
 
 enum Request {
@@ -103,19 +128,25 @@ enum Request {
 pub struct Monitor {
     shared: Arc<Mutex<Snapshot>>,
     sender: mpsc::SyncSender<Request>,
+    connection_notices: Arc<AtomicBool>,
 }
 
 impl Monitor {
-    pub fn start(hwnd: HWND) -> Self {
+    pub fn start(hwnd: HWND, connections: bool) -> Self {
         let shared = Arc::new(Mutex::new(Snapshot {
             scanning: true,
             ..Snapshot::default()
         }));
         let (sender, receiver) = mpsc::sync_channel(1);
         let state = shared.clone();
+        let connection_notices = Arc::new(AtomicBool::new(connections));
+        let enabled = connection_notices.clone();
         let hwnd = hwnd.0 as isize;
         std::thread::spawn(move || {
             let initialized = unsafe { RoInitialize(RO_INIT_MULTITHREADED) }.is_ok();
+            // WGI completa su lista inicial de forma asíncrona.
+            let _ = RawGameController::RawGameControllers();
+            std::thread::sleep(Duration::from_millis(500));
             loop {
                 let mut snapshot = scan();
                 let mut previous = state.lock().unwrap_or_else(|e| e.into_inner());
@@ -125,7 +156,12 @@ impl Monitor {
                 unsafe {
                     let _ = PostMessageW(Some(HWND(hwnd as _)), WM_BATTERY, WPARAM(0), LPARAM(0));
                 }
-                match receiver.recv_timeout(INTERVAL) {
+                let interval = if enabled.load(Ordering::Relaxed) {
+                    CONNECTION_INTERVAL
+                } else {
+                    INTERVAL
+                };
+                match receiver.recv_timeout(interval) {
                     Ok(Request::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
                     _ => {}
                 }
@@ -134,7 +170,11 @@ impl Monitor {
                 unsafe { RoUninitialize() };
             }
         });
-        Self { shared, sender }
+        Self {
+            shared,
+            sender,
+            connection_notices,
+        }
     }
 
     pub fn snapshot(&self) -> Snapshot {
@@ -149,6 +189,95 @@ impl Monitor {
         if !state.scanning && self.sender.try_send(Request::Refresh).is_ok() {
             state.scanning = true;
         }
+    }
+
+    pub fn set_connection_notices(&self, enabled: bool) {
+        self.connection_notices.store(enabled, Ordering::Relaxed);
+        self.refresh();
+    }
+}
+
+struct ConnectionState {
+    source: Source,
+    active: bool,
+    missing_since: Option<Instant>,
+}
+
+/// Observa transiciones a un enlace confirmado. El primer sondeo de cada fuente
+/// es la referencia inicial, no una avalancha de avisos al abrir la aplicación.
+#[derive(Default)]
+pub struct Connections {
+    initialized: HashSet<Source>,
+    devices: HashMap<String, ConnectionState>,
+    updated: Option<Instant>,
+    enabled: Option<bool>,
+    suppress_on_enable: HashSet<Source>,
+}
+
+impl Connections {
+    pub fn update(&mut self, snapshot: &Snapshot, enabled: bool) -> Vec<Device> {
+        if self.enabled == Some(false) && enabled {
+            self.suppress_on_enable.extend([
+                Source::Bluetooth,
+                Source::Controller,
+                Source::Receiver,
+            ]);
+        }
+        self.enabled = Some(enabled);
+        let Some(now) = snapshot.updated else {
+            return Vec::new();
+        };
+        if self.updated.is_some_and(|previous| previous >= now) {
+            return Vec::new();
+        }
+        self.updated = Some(now);
+        let mut notices = Vec::new();
+        for source in [Source::Bluetooth, Source::Controller, Source::Receiver] {
+            if snapshot.unavailable.contains(&source) {
+                continue;
+            }
+            let first = self.initialized.insert(source);
+            let suppressed = self.suppress_on_enable.remove(&source);
+            let baseline = first || suppressed;
+            for (id, state) in &mut self.devices {
+                if state.source != source {
+                    continue;
+                }
+                let current = snapshot.devices.iter().find(|d| d.id == *id);
+                if current.is_some_and(Device::active_link) {
+                    continue;
+                }
+                // Un USB retirado o un enlace Bluetooth ausente son desconexiones
+                // observadas. Un receptor presente sin lectura también puede dormir.
+                let confirmed_missing = current.is_none() || source != Source::Receiver;
+                let since = state.missing_since.get_or_insert(now);
+                if confirmed_missing
+                    || now.saturating_duration_since(*since) >= RECEIVER_DISCONNECT_GRACE
+                {
+                    state.active = false;
+                }
+            }
+            for device in snapshot
+                .devices
+                .iter()
+                .filter(|d| d.source() == source && d.active_link())
+            {
+                let state = self
+                    .devices
+                    .entry(device.id.clone())
+                    .or_insert(ConnectionState {
+                        source,
+                        active: false,
+                        missing_since: None,
+                    });
+                if !baseline && !state.active && enabled {
+                    notices.push(device.clone());
+                }
+                state.active = true;
+                state.missing_since = None;
+            }
+        }
+        notices
     }
 }
 
@@ -213,18 +342,21 @@ fn scan_with_diagnostics(trace: bool) -> Snapshot {
     let mut snapshot = Snapshot::default();
     let at = Instant::now();
     if let Err(e) = bluetooth(&mut snapshot.devices, trace) {
+        snapshot.unavailable.insert(Source::Bluetooth);
         snapshot.errors.push(format!("Bluetooth: {e}"));
     }
     if trace {
         println!("Bluetooth: {:.2} s", at.elapsed().as_secs_f32());
     }
     if let Err(e) = controllers(&mut snapshot.devices) {
+        snapshot.unavailable.insert(Source::Controller);
         snapshot.errors.push(format!("Mandos: {e}"));
     }
     if trace {
         println!("Mandos: {:.2} s", at.elapsed().as_secs_f32());
     }
     if let Err(e) = receivers(&mut snapshot.devices, trace) {
+        snapshot.unavailable.insert(Source::Receiver);
         snapshot.errors.push(format!("Receptores USB: {e}"));
     }
     if trace {
@@ -772,6 +904,154 @@ pub fn diagnostics() {
 mod tests {
     use super::*;
 
+    fn connected_device(id: &str, responds: bool) -> Device {
+        let mut d = device(responds.then_some(Level::Percent(78)), false);
+        d.id = id.into();
+        d.connection = if id.starts_with("bt:") {
+            "Bluetooth"
+        } else if id.starts_with("gamepad:") {
+            "USB / receptor"
+        } else {
+            "USB / 2.4 GHz"
+        };
+        d
+    }
+
+    fn connection_snapshot(at: Instant, seconds: u64, devices: Vec<Device>) -> Snapshot {
+        Snapshot {
+            updated: Some(at + Duration::from_secs(seconds)),
+            devices,
+            ..Snapshot::default()
+        }
+    }
+
+    #[test]
+    fn connected_notifications_skip_startup_and_repeated_readings() {
+        let at = Instant::now();
+        let mut tracker = Connections::default();
+        let initial = vec![
+            connected_device("bt:old", true),
+            connected_device("hid:old", true),
+        ];
+        assert!(tracker
+            .update(&connection_snapshot(at, 0, initial.clone()), true)
+            .is_empty());
+        assert!(tracker
+            .update(&connection_snapshot(at, 5, initial.clone()), true)
+            .is_empty());
+        let mut devices = initial;
+        devices.push(connected_device("bt:new", true));
+        let current = connection_snapshot(at, 10, devices.clone());
+        let notices = tracker.update(&current, true);
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].id, "bt:new");
+        assert!(tracker.update(&current, true).is_empty());
+        assert!(tracker
+            .update(&connection_snapshot(at, 15, devices), true)
+            .is_empty());
+    }
+
+    #[test]
+    fn receiver_only_notifies_when_the_peripheral_responds() {
+        let at = Instant::now();
+        let mut tracker = Connections::default();
+        let idle = connected_device("hid:k7", false);
+        assert!(tracker
+            .update(&connection_snapshot(at, 0, vec![idle.clone()]), true)
+            .is_empty());
+        assert!(tracker
+            .update(&connection_snapshot(at, 5, vec![idle.clone()]), true)
+            .is_empty());
+        let active = connected_device("hid:k7", true);
+        assert_eq!(
+            tracker
+                .update(&connection_snapshot(at, 10, vec![active.clone()]), true)
+                .len(),
+            1
+        );
+        assert!(tracker
+            .update(&connection_snapshot(at, 15, vec![active.clone()]), true)
+            .is_empty());
+        let mut cached = idle;
+        cached.level = Some(Level::Percent(78));
+        cached.stale = true;
+        assert!(tracker
+            .update(&connection_snapshot(at, 20, vec![cached.clone()]), true)
+            .is_empty());
+        // Una pérdida breve de lectura no rearma el aviso.
+        assert!(tracker
+            .update(&connection_snapshot(at, 25, vec![active.clone()]), true)
+            .is_empty());
+        tracker.update(&connection_snapshot(at, 30, vec![cached.clone()]), true);
+        tracker.update(&connection_snapshot(at, 45, vec![cached]), true);
+        assert_eq!(
+            tracker
+                .update(&connection_snapshot(at, 50, vec![active]), true)
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn removing_receiver_or_bluetooth_link_rearms_connection_notice() {
+        let at = Instant::now();
+        let mut tracker = Connections::default();
+        let devices = vec![
+            connected_device("hid:k7", true),
+            connected_device("bt:keyboard", false),
+        ];
+        tracker.update(&connection_snapshot(at, 0, devices.clone()), true);
+        tracker.update(&connection_snapshot(at, 5, Vec::new()), true);
+        // Bluetooth confirma el enlace aunque no informe porcentaje.
+        assert_eq!(
+            tracker
+                .update(&connection_snapshot(at, 10, devices), true)
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn failed_sources_do_not_create_disconnect_or_startup_notifications() {
+        let at = Instant::now();
+        let mut tracker = Connections::default();
+        let mut failed = connection_snapshot(at, 0, Vec::new());
+        failed.unavailable.insert(Source::Bluetooth);
+        assert!(tracker.update(&failed, true).is_empty());
+        let bt = connected_device("bt:mouse", true);
+        assert!(tracker
+            .update(&connection_snapshot(at, 5, vec![bt.clone()]), true)
+            .is_empty());
+        failed.updated = Some(at + Duration::from_secs(10));
+        assert!(tracker.update(&failed, true).is_empty());
+        assert!(tracker
+            .update(&connection_snapshot(at, 60, vec![bt]), true)
+            .is_empty());
+    }
+
+    #[test]
+    fn enabling_connections_does_not_announce_already_connected_devices() {
+        let at = Instant::now();
+        let mut tracker = Connections::default();
+        tracker.update(&connection_snapshot(at, 0, Vec::new()), false);
+        let devices = vec![connected_device("bt:mouse", true)];
+        let current = connection_snapshot(at, 5, devices.clone());
+        assert!(tracker.update(&current, false).is_empty());
+        assert!(tracker.update(&current, true).is_empty());
+        let mut devices = devices;
+        devices.push(connected_device("hid:k7", true));
+        assert!(tracker
+            .update(&connection_snapshot(at, 10, devices.clone()), true)
+            .is_empty());
+        devices.push(connected_device("bt:keyboard", false));
+        assert_eq!(
+            tracker
+                .update(&connection_snapshot(at, 15, devices), true)
+                .len(),
+            1
+        );
+    }
+
     fn device(level: Option<Level>, charging: bool) -> Device {
         Device {
             id: "mouse".into(),
@@ -840,7 +1120,7 @@ mod tests {
         preserve_last_readings(&mut current, &previous);
         assert_eq!(current.devices[1].level, Some(Level::Percent(78)));
         assert!(current.devices[1].receiver_without_link());
-        let items = crate::tray::battery_items(&current, true);
+        let items = crate::tray::battery_items(&current, true, true);
         let active_count = items
             .iter()
             .filter(|item| {
@@ -855,7 +1135,7 @@ mod tests {
         // Igual nombre y porcentaje no prueban identidad: dos enlaces activos
         // pueden corresponder a dos unidades y deben conservarse separados.
         current.devices[1].stale = false;
-        let items = crate::tray::battery_items(&current, true);
+        let items = crate::tray::battery_items(&current, true, true);
         assert_eq!(
             items
                 .iter()
