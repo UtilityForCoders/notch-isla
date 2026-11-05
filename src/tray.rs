@@ -274,7 +274,6 @@ pub fn build_items(state: &MenuState) -> Vec<Item> {
                 "Con la isla encogida",
                 settings.lyrics_projector,
             ),
-            Item::Label("Se busca en lrclib.net".to_string()),
         ],
     });
     items.push(action(
