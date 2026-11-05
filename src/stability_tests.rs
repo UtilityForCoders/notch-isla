@@ -53,6 +53,15 @@ fn isla_con_desenfoque_sigue_ocultandose_y_recibiendo_clics() {
         app.x_spring.reset(-32000.0);
         app.hz = 240;
         let animation_bench = std::env::var_os("NOTCH_ANIMATION_BENCH").is_some();
+        let drag_bench = std::env::var_os("NOTCH_DRAG_BENCH").is_some();
+        if !animation_bench && !drag_bench {
+            app.monitor_bounds = RECT {
+                left: -32000,
+                top: -32000,
+                right: -30000,
+                bottom: -30000,
+            };
+        }
         app.high_refresh_driver = if animation_bench {
             HighRefreshDriver::new(hwnd)
         } else {
@@ -159,7 +168,7 @@ fn isla_con_desenfoque_sigue_ocultandose_y_recibiendo_clics() {
             );
             return;
         }
-        if std::env::var_os("NOTCH_DRAG_BENCH").is_some() {
+        if drag_bench {
             with_app(|app| {
                 app.settings.hide_delay = 0;
                 app.stop_idle_countdown();
@@ -216,6 +225,45 @@ fn isla_con_desenfoque_sigue_ocultandose_y_recibiendo_clics() {
             return;
         }
         with_app(|app| {
+            let rc = app.monitor_rect();
+            let anchor = app.x_spring.value;
+            let saved_offset = app.settings.offset_x;
+            let mut window = RECT::default();
+            for (edge, left) in [
+                (rc.left - app.surface.width as i32, true),
+                (rc.right, false),
+            ] {
+                app.spring.reset(0.0);
+                app.set_island_x(edge);
+                let collapsed = app.pos.x;
+                let offset = app.settings.offset_x;
+                app.spring.reset(1.0);
+                app.render();
+                let compact = app.pos.x;
+                assert!(if left {
+                    compact > collapsed
+                } else {
+                    compact < collapsed
+                });
+                app.lyrics_spring.reset(1.0);
+                app.render();
+                assert!(if left {
+                    app.pos.x > compact
+                } else {
+                    app.pos.x < compact
+                });
+                windows::Win32::UI::WindowsAndMessaging::GetWindowRect(hwnd, &mut window).unwrap();
+                assert_eq!(window.left, app.pos.x);
+                app.spring.reset(0.0);
+                app.lyrics_spring.reset(0.0);
+                app.render();
+                assert_eq!(app.pos.x, collapsed);
+                assert_eq!(app.settings.offset_x, offset);
+            }
+            app.settings.offset_x = saved_offset;
+            app.x_spring.reset(anchor);
+            app.render();
+
             app.settings.pinned_expanded = true;
             app.hovered = false;
             app.spring.reset(1.0);

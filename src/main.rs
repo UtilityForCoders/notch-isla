@@ -467,6 +467,7 @@ struct App {
     surface: Surface,
     /// Posición de la ventana en pantalla (píxeles físicos).
     pos: POINT,
+    monitor_bounds: RECT,
     scale: f32,
     spring: Spring,
     hovered: bool,
@@ -506,7 +507,7 @@ struct App {
     shown: bool,
     /// Entrada y salida de la pantalla: 0 = escondida arriba, 1 = en su sitio.
     presence: Spring,
-    /// Resorte para deslizar suavemente la isla de vuelta al centro al pulsar "Centrar en la pantalla".
+    /// Posición horizontal elegida. El ancho de cada cuadro limita dónde se dibuja.
     x_spring: Spring,
     /// Transición suave de anchura: 0 = reproductor compacto, 1 = tarjeta amplia con letra.
     lyrics_spring: Spring,
@@ -576,11 +577,12 @@ struct ActiveNotice {
 
 impl App {
     fn new(hwnd: HWND, monitor: HMONITOR, settings: Settings) -> Result<Self> {
-        let (surface, pos, scale) = layout_for(monitor, settings.offset_x)?;
+        let (surface, pos, scale, monitor_bounds) = layout_for(monitor, settings.offset_x)?;
         Ok(Self {
             hwnd,
             surface,
             pos,
+            monitor_bounds,
             scale,
             spring: Spring::new(0.0, EXPAND_SPRING.0, EXPAND_SPRING.1),
             hovered: false,
@@ -1238,9 +1240,12 @@ impl App {
     fn relayout(&mut self) {
         let monitor = monitors::find(&self.settings.monitor);
         self.hz = monitors::refresh_rate(monitor);
-        if let Ok((surface, pos, scale)) = layout_for(monitor, self.settings.offset_x) {
+        if let Ok((surface, pos, scale, monitor_bounds)) =
+            layout_for(monitor, self.settings.offset_x)
+        {
             self.surface = surface;
             self.pos = pos;
+            self.monitor_bounds = monitor_bounds;
             self.scale = scale;
             self.x_spring.reset(pos.x as f32);
             if let Some(text) = self.text.as_mut() {
@@ -1661,15 +1666,7 @@ impl App {
     }
 
     fn monitor_rect(&self) -> RECT {
-        let monitor = monitors::find(&self.settings.monitor);
-        let mut info = MONITORINFO {
-            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
-            ..Default::default()
-        };
-        unsafe {
-            let _ = GetMonitorInfoW(monitor, &mut info);
-        }
-        info.rcMonitor
+        self.monitor_bounds
     }
 
     /// Inicia el arrastre de la isla a lo largo del borde superior.
@@ -1727,17 +1724,34 @@ impl App {
         self.set_island_x(target_x);
     }
 
-    /// Fija la posición horizontal de la isla, asegurando que quede dentro de la pantalla.
+    fn clamp_island_x(&self, x: i32) -> i32 {
+        let (_, _, visible_width, _, _) = island::backdrop_geometry(
+            self.surface.width as f32,
+            self.surface.height as f32,
+            self.scale,
+            self.spring.value,
+            self.presence.value,
+            self.shape(),
+        );
+        let (min_x, max_x) = island_bounds(
+            &self.monitor_bounds,
+            self.surface.width,
+            visible_width.max(island::edge_strip_width(self.scale)),
+            self.scale,
+        );
+        x.clamp(min_x, max_x)
+    }
+
+    /// Guarda la posición elegida para la forma actual y mueve la ventana y sus capas.
     fn set_island_x(&mut self, target_x: i32) {
         let rc = self.monitor_rect();
-        let (min_x, max_x) = island_bounds(&rc, self.surface.width, self.scale);
-        let clamped_x = target_x.clamp(min_x, max_x);
+        let clamped_x = self.clamp_island_x(target_x);
+        self.x_spring.reset(clamped_x as f32);
+        let center_x = rc.left + ((rc.right - rc.left) - self.surface.width as i32) / 2;
+        self.settings.offset_x = ((clamped_x - center_x) as f32 / self.scale).round() as i32;
         if self.pos.x != clamped_x {
             let dx = clamped_x - self.pos.x;
             self.pos.x = clamped_x;
-            self.x_spring.reset(clamped_x as f32);
-            let center_x = rc.left + ((rc.right - rc.left) - self.surface.width as i32) / 2;
-            self.settings.offset_x = ((clamped_x - center_x) as f32 / self.scale).round() as i32;
             let moved = (|| -> Result<()> {
                 let mut batch = unsafe {
                     let batch = BeginDeferWindowPos(4)?;
@@ -1781,7 +1795,7 @@ impl App {
         let center_x = rc.left + ((rc.right - rc.left) - self.surface.width as i32) / 2;
         self.settings.offset_x = 0;
         self.settings.save();
-        if self.pos.x != center_x {
+        if self.x_spring.target() != center_x as f32 {
             self.x_spring.set_target(center_x as f32);
             self.start_animation();
         }
@@ -1893,21 +1907,6 @@ impl App {
         self.last_tick = now;
 
         let centering = self.x_spring.step(dt);
-        let new_x = self.x_spring.value.round() as i32;
-        if self.pos.x != new_x {
-            self.pos.x = new_x;
-            unsafe {
-                let _ = SetWindowPos(
-                    self.hwnd,
-                    None,
-                    self.pos.x,
-                    self.pos.y,
-                    0,
-                    0,
-                    SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
-                );
-            }
-        }
 
         let expanding = self.spring.step(dt);
         let entering = self.presence.step(dt);
@@ -2075,6 +2074,9 @@ impl App {
             info
         });
         let shape = self.shape();
+        // Al ensancharse cerca del borde entra lo justo. La posición elegida se
+        // conserva para cuando vuelva a encogerse.
+        self.pos.x = self.clamp_island_x(self.x_spring.value.round() as i32);
         // Solo se trabaja la zona donde se dibuja ahora y donde se dibujó antes (para borrarlo):
         // con la isla contraída es una parte mínima de la ventana.
         let (sw, sh) = (self.surface.width, self.surface.height);
@@ -2399,23 +2401,21 @@ fn timer_for(motion: &Motion, moving: bool, frame_ms: u32) -> Option<u32> {
 }
 
 /// Límites mínimo y máximo de `pos.x` para que la isla quepa dentro de la pantalla.
-fn island_bounds(rc: &RECT, width: u32, scale: f32) -> (i32, i32) {
-    let half_w = width as i32 / 2;
-    let margin = (16.0 * scale).round() as i32;
-    let max_island_w = (island::EXPANDED_LYRICS.0 * scale).round() as i32;
-    let half_island = max_island_w / 2 + margin;
-    let min_cx = rc.left + half_island;
-    let max_cx = rc.right - half_island;
-    if min_cx > max_cx {
-        let center_cx = rc.left + (rc.right - rc.left) / 2;
-        (center_cx - half_w, center_cx - half_w)
+fn island_bounds(rc: &RECT, width: u32, visible_width: f32, scale: f32) -> (i32, i32) {
+    let margin = 16.0 * scale;
+    let transparent = (width as f32 - visible_width) / 2.0;
+    let min_x = rc.left + (margin - transparent).ceil() as i32;
+    let max_x = rc.right - (margin + transparent + visible_width).ceil() as i32;
+    if min_x > max_x {
+        let center_x = rc.left + ((rc.right - rc.left) - width as i32) / 2;
+        (center_x, center_x)
     } else {
-        (min_cx - half_w, max_cx - half_w)
+        (min_x, max_x)
     }
 }
 
 /// Calcula escala, superficie de dibujo y posición (arriba al centro, con desplazamiento opcional) para un monitor.
-fn layout_for(monitor: HMONITOR, offset_x: i32) -> Result<(Surface, POINT, f32)> {
+fn layout_for(monitor: HMONITOR, offset_x: i32) -> Result<(Surface, POINT, f32, RECT)> {
     let mut info = MONITORINFO {
         cbSize: std::mem::size_of::<MONITORINFO>() as u32,
         ..Default::default()
@@ -2432,14 +2432,14 @@ fn layout_for(monitor: HMONITOR, offset_x: i32) -> Result<(Surface, POINT, f32)>
     let height = (lh * scale).ceil() as u32;
 
     let rc: RECT = info.rcMonitor;
-    let (min_x, max_x) = island_bounds(&rc, width, scale);
+    let (min_x, max_x) = island_bounds(&rc, width, island::edge_strip_width(scale), scale);
     let center_x = rc.left + ((rc.right - rc.left) - width as i32) / 2;
     let target_x = center_x + (offset_x as f32 * scale).round() as i32;
     let pos = POINT {
         x: target_x.clamp(min_x, max_x),
         y: rc.top,
     };
-    Ok((Surface::new(width, height)?, pos, scale))
+    Ok((Surface::new(width, height)?, pos, scale, rc))
 }
 
 /// Mapa de bits en memoria que Windows usa para pintar la ventana layered.
@@ -3905,28 +3905,33 @@ mod tests {
     }
 
     #[test]
-    fn limites_de_la_isla_en_pantalla() {
+    fn limites_de_la_isla_se_ajustan_al_ancho_visible() {
         let rc = RECT {
-            left: 0,
+            left: -1920,
             top: 0,
-            right: 1920,
+            right: 0,
             bottom: 1080,
         };
-        let (lw, _) = island::window_size();
-        let scale = 1.0;
+        let (lw, lh) = island::window_size();
+        let scale = 1.25;
         let width = (lw * scale).ceil() as u32;
-        let (min_x, max_x) = island_bounds(&rc, width, scale);
-        let center_x = rc.left + ((rc.right - rc.left) - width as i32) / 2;
-
-        // La posición centrada queda dentro de los límites:
-        assert!(center_x >= min_x && center_x <= max_x);
-
-        // Al margen máximo izquierdo y derecho, la isla expandida no se sale de la pantalla:
-        let half_w = width as i32 / 2;
-        let min_cx = min_x + half_w;
-        let max_cx = max_x + half_w;
-        let max_island_w = (island::EXPANDED_LYRICS.0 * scale).round() as i32;
-        assert!(min_cx - max_island_w / 2 >= rc.left);
-        assert!(max_cx + max_island_w / 2 <= rc.right);
+        let mut previous = (i32::MIN, i32::MAX);
+        for (expanded, lyrics) in [(0.0, 1.0), (1.0, 0.0), (1.0, 1.0)] {
+            let (left, _, visible_width, _, _) = island::backdrop_geometry(
+                width as f32,
+                lh * scale,
+                scale,
+                expanded,
+                1.0,
+                (lyrics, 0.0),
+            );
+            let (min_x, max_x) = island_bounds(&rc, width, visible_width, scale);
+            let left_gap = min_x as f32 + left - rc.left as f32;
+            let right_gap = rc.right as f32 - (max_x as f32 + left + visible_width);
+            assert!((20.0..21.0).contains(&left_gap));
+            assert!((20.0..21.0).contains(&right_gap));
+            assert!(min_x > previous.0 && max_x < previous.1);
+            previous = (min_x, max_x);
+        }
     }
 }
