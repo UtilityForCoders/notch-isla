@@ -41,15 +41,16 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
-    FindWindowExW, FindWindowW, GetAncestor, GetCursorPos, GetForegroundWindow, GetMessageW,
-    GetWindowRect, GetWindowThreadProcessId, KillTimer, LoadCursorW, PostMessageW, PostQuitMessage,
-    RegisterClassExW, SetForegroundWindow, SetTimer, SetWindowsHookExW, ShowWindow,
-    TranslateMessage, UnhookWindowsHookEx, UpdateLayeredWindow, GA_ROOTOWNER, IDC_ARROW,
-    KBDLLHOOKSTRUCT, MA_NOACTIVATE, MSG, MSLLHOOKSTRUCT, SW_SHOWNOACTIVATE, ULW_ALPHA, WA_INACTIVE,
-    WH_KEYBOARD_LL, WH_MOUSE_LL, WM_ACTIVATE, WM_CAPTURECHANGED, WM_CLOSE, WM_DESTROY, WM_KEYDOWN,
-    WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEACTIVATE, WM_MOUSEMOVE,
-    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WNDCLASSEXW, WS_EX_LAYERED,
-    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    FindWindowExW, FindWindowW, GetAncestor, GetClassNameW, GetCursorPos, GetForegroundWindow,
+    GetMessageW, GetWindowRect, GetWindowThreadProcessId, IsWindowVisible, KillTimer, LoadCursorW,
+    PostMessageW, PostQuitMessage, RegisterClassExW, SetForegroundWindow, SetTimer,
+    SetWindowsHookExW, ShowWindow, TranslateMessage, UnhookWindowsHookEx, UpdateLayeredWindow,
+    WindowFromPoint, GA_ROOT, GA_ROOTOWNER, IDC_ARROW, KBDLLHOOKSTRUCT, MA_NOACTIVATE, MSG,
+    MSLLHOOKSTRUCT, SW_SHOWNOACTIVATE, ULW_ALPHA, WA_INACTIVE, WH_KEYBOARD_LL, WH_MOUSE_LL,
+    WM_ACTIVATE, WM_CAPTURECHANGED, WM_CLOSE, WM_DESTROY, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_RBUTTONDOWN, WM_RBUTTONUP,
+    WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 use windows_numerics::Vector2;
 
@@ -412,7 +413,8 @@ fn run(items: Vec<Item>, from_tray: bool, listen_to_keyboard: bool) -> Result<Op
         // La barra se oculta al perder el foco. El menú de bandeja recibe mouse/teclado
         // sin activarse: Explorer conserva el foco sin cambiar la preferencia de autoocultar.
         let focus = if from_tray {
-            let Some(taskbar) = taskbar_at(anchor).filter(|taskbar| focus_taskbar(*taskbar)) else {
+            let Some(taskbar) = tray_host_at(anchor).filter(|taskbar| focus_taskbar(*taskbar))
+            else {
                 // Sin Explorer en primer plano, activar el menú ocultaría la barra.
                 return Ok(None);
             };
@@ -576,6 +578,30 @@ fn taskbar_at(anchor: POINT) -> Option<HWND> {
     }
 }
 
+fn tray_host_at(anchor: POINT) -> Option<HWND> {
+    unsafe {
+        // El desplegable de iconos es una ventana independiente de la barra.
+        // Pasar el foco a Shell_TrayWnd lo cierra, aunque siga siendo Explorer.
+        // También conserva ese host al pasar de configuración al panel de batería.
+        for candidate in [GetForegroundWindow(), WindowFromPoint(anchor)] {
+            let root = GetAncestor(candidate, GA_ROOT);
+            let mut class = [0u16; 128];
+            let len = GetClassNameW(root, &mut class) as usize;
+            let class = String::from_utf16_lossy(&class[..len]);
+            if matches!(
+                class.as_str(),
+                "NotifyIconOverflowWindow" | "TopLevelWindowForOverflowXamlIsland"
+            ) && IsWindowVisible(root).as_bool()
+                && MonitorFromWindow(root, MONITOR_DEFAULTTONEAREST)
+                    == MonitorFromPoint(anchor, MONITOR_DEFAULTTONEAREST)
+            {
+                return Some(root);
+            }
+        }
+    }
+    taskbar_at(anchor)
+}
+
 fn foreground_is(window: HWND) -> bool {
     unsafe {
         let foreground = GetForegroundWindow();
@@ -585,6 +611,9 @@ fn foreground_is(window: HWND) -> bool {
 
 fn focus_taskbar(window: HWND) -> bool {
     unsafe {
+        if foreground_is(window) {
+            return true;
+        }
         let _ = SetForegroundWindow(window);
         if foreground_is(window) {
             return true;
@@ -1479,6 +1508,129 @@ mod tests {
                 SendInput(&keys, std::mem::size_of::<INPUT>() as i32);
                 let _ = SetForegroundWindow(window);
             }
+        }
+    }
+
+    #[test]
+    #[ignore = "abre ventanas de prueba que simulan los desplegables de iconos de Windows"]
+    fn bandeja_conserva_el_desplegable_de_iconos_ocultos() {
+        use std::time::{Duration, Instant};
+        use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
+        use windows::Win32::UI::WindowsAndMessaging::SW_HIDE;
+        extern "system" fn overflow_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+            if msg == WM_ACTIVATE && (wp.0 & 0xffff) as u32 == WA_INACTIVE {
+                // Igual que el desplegable: pierde foco y desaparece.
+                unsafe {
+                    let _ = ShowWindow(hwnd, SW_HIDE);
+                }
+            }
+            unsafe { DefWindowProcW(hwnd, msg, wp, lp) }
+        }
+        struct Restore(HWND);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                activate_for_test(self.0);
+            }
+        }
+        let _restore = Restore(unsafe { GetForegroundWindow() });
+        unsafe {
+            CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok().unwrap();
+        }
+        for class in [
+            w!("NotifyIconOverflowWindow"),
+            w!("TopLevelWindowForOverflowXamlIsland"),
+        ] {
+            let mut anchor = POINT::default();
+            let instance = unsafe { GetModuleHandleW(None).unwrap() };
+            unsafe {
+                GetCursorPos(&mut anchor).unwrap();
+                RegisterClassExW(&WNDCLASSEXW {
+                    cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+                    lpfnWndProc: Some(overflow_proc),
+                    hInstance: instance.into(),
+                    lpszClassName: class,
+                    ..Default::default()
+                });
+            }
+            let overflow = unsafe {
+                CreateWindowExW(
+                    WS_EX_TOOLWINDOW,
+                    class,
+                    w!("Prueba de iconos ocultos"),
+                    WS_POPUP,
+                    anchor.x - 100,
+                    anchor.y - 100,
+                    100,
+                    100,
+                    None,
+                    None,
+                    Some(instance.into()),
+                    None,
+                )
+                .unwrap()
+            };
+            struct Window(HWND);
+            impl Drop for Window {
+                fn drop(&mut self) {
+                    unsafe {
+                        let _ = DestroyWindow(self.0);
+                    }
+                }
+            }
+            let _window = Window(overflow);
+            unsafe {
+                let _ = ShowWindow(overflow, SW_SHOWNOACTIVATE);
+            }
+            activate_for_test(overflow);
+            // La preparación del foco puede emitir WA_INACTIVE antes de terminar;
+            // presentar el desplegable después, como hace Explorer al abrirlo.
+            unsafe {
+                let _ = ShowWindow(overflow, SW_SHOWNOACTIVATE);
+            }
+            assert!(
+                foreground_is(overflow),
+                "preparar foco del desplegable de prueba"
+            );
+            assert_eq!(tray_host_at(anchor), Some(overflow));
+            let expected = overflow.0 as isize;
+            let driver = std::thread::spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(3);
+                let menu = loop {
+                    let menu = HWND(MENU_HWND.load(Ordering::SeqCst) as _);
+                    if !menu.is_invalid() && unsafe { IsWindowVisible(menu).as_bool() } {
+                        break menu;
+                    }
+                    assert!(
+                        Instant::now() < deadline,
+                        "el menú debe abrirse desde el desplegable"
+                    );
+                    std::thread::sleep(Duration::from_millis(10));
+                };
+                struct Close(HWND);
+                impl Drop for Close {
+                    fn drop(&mut self) {
+                        unsafe {
+                            let _ = PostMessageW(Some(self.0), WM_CLOSE, WPARAM(0), LPARAM(0));
+                        }
+                    }
+                }
+                let _close = Close(menu);
+                assert_eq!(MENU_FOCUS.load(Ordering::SeqCst), expected);
+                let overflow = HWND(expected as _);
+                std::thread::sleep(Duration::from_millis(150));
+                assert!(foreground_is(overflow));
+                assert!(
+                    unsafe { IsWindowVisible(overflow).as_bool() },
+                    "no debe ocultarse el desplegable"
+                );
+            });
+            run(
+                vec![Item::Label("Menú desde iconos ocultos".into())],
+                true,
+                true,
+            )
+            .unwrap();
+            driver.join().unwrap();
         }
     }
 
