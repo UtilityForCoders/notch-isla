@@ -42,6 +42,7 @@ fn isla_con_desenfoque_sigue_ocultandose_y_recibiendo_clics() {
         settings.real_bars = false;
         settings.lyrics_island = false;
         settings.lyrics_projector = false;
+        settings.pinned_expanded = false;
         settings.hotkey = None;
         let mut app = App::new(hwnd, monitors::find(""), settings).unwrap();
         app.tray.remove();
@@ -52,6 +53,15 @@ fn isla_con_desenfoque_sigue_ocultandose_y_recibiendo_clics() {
         app.x_spring.reset(-32000.0);
         app.hz = 240;
         let animation_bench = std::env::var_os("NOTCH_ANIMATION_BENCH").is_some();
+        let drag_bench = std::env::var_os("NOTCH_DRAG_BENCH").is_some();
+        if !animation_bench && !drag_bench {
+            app.monitor_bounds = RECT {
+                left: -32000,
+                top: -32000,
+                right: -30000,
+                bottom: -30000,
+            };
+        }
         app.high_refresh_driver = if animation_bench {
             HighRefreshDriver::new(hwnd)
         } else {
@@ -158,7 +168,7 @@ fn isla_con_desenfoque_sigue_ocultandose_y_recibiendo_clics() {
             );
             return;
         }
-        if std::env::var_os("NOTCH_DRAG_BENCH").is_some() {
+        if drag_bench {
             with_app(|app| {
                 app.settings.hide_delay = 0;
                 app.stop_idle_countdown();
@@ -214,6 +224,231 @@ fn isla_con_desenfoque_sigue_ocultandose_y_recibiendo_clics() {
             APP.with(|cell| cell.borrow_mut().take());
             return;
         }
+        with_app(|app| {
+            let media = app.media.as_ref().unwrap();
+            let current_song = lyrics::key(&media.title, &media.artist);
+            app.set_lyrics(lyrics::Lyrics {
+                key: current_song.clone(),
+                lines: Vec::new(),
+            });
+            for i in 0..MAX_CACHED_LYRICS {
+                app.set_lyrics(lyrics::Lyrics {
+                    key: format!("Canción {i}"),
+                    lines: Vec::new(),
+                });
+            }
+            assert_eq!(app.lyrics.len(), MAX_CACHED_LYRICS);
+            assert!(app.lyrics.contains_key(&current_song));
+            assert!(!app.lyrics.contains_key("Canción 0"));
+
+            let rc = app.monitor_rect();
+            let anchor = app.x_spring.value;
+            let saved_offset = app.settings.offset_x;
+            let mut window = RECT::default();
+            for (edge, left) in [
+                (rc.left - app.surface.width as i32, true),
+                (rc.right, false),
+            ] {
+                app.spring.reset(0.0);
+                app.set_island_x(edge);
+                let collapsed = app.pos.x;
+                let offset = app.settings.offset_x;
+                app.spring.reset(1.0);
+                app.render();
+                let compact = app.pos.x;
+                assert!(if left {
+                    compact > collapsed
+                } else {
+                    compact < collapsed
+                });
+                app.lyrics_spring.reset(1.0);
+                app.render();
+                assert!(if left {
+                    app.pos.x > compact
+                } else {
+                    app.pos.x < compact
+                });
+                windows::Win32::UI::WindowsAndMessaging::GetWindowRect(hwnd, &mut window).unwrap();
+                assert_eq!(window.left, app.pos.x);
+                app.spring.reset(0.0);
+                app.lyrics_spring.reset(0.0);
+                app.render();
+                assert_eq!(app.pos.x, collapsed);
+                assert_eq!(app.settings.offset_x, offset);
+            }
+            app.settings.offset_x = saved_offset;
+            app.x_spring.reset(anchor);
+            app.render();
+
+            app.settings.pinned_expanded = true;
+            app.hovered = false;
+            app.spring.reset(1.0);
+            app.show_notice(
+                Notice {
+                    icon: NoticeIcon::Mouse,
+                    color: [120, 220, 160],
+                },
+                "Dispositivo conectado",
+                "Mouse de prueba",
+                50,
+            );
+        });
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let mut msg = MSG::default();
+            if PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+                DispatchMessageW(&msg);
+                ui::promote_timers();
+            } else {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            let mut restored = false;
+            with_app(|app| {
+                assert_eq!(app.spring.value, 1.0, "la isla debe seguir extendida");
+                restored = app.notice.is_none()
+                    && app.last_notice.is_none()
+                    && app.notice_spring.value == 0.0;
+            });
+            if restored {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "el aviso debe ceder al reproductor"
+            );
+        }
+        with_app(|app| {
+            let notices = app.settings.notices;
+            let connections = app.settings.connection_notices;
+            app.settings.notices = true;
+            app.settings.connection_notices = true;
+            let headset = battery::Device {
+                id: "bt:prueba".into(),
+                name: "Audífonos de prueba".into(),
+                kind: battery::DeviceKind::Headphones,
+                connection: "Bluetooth",
+                level: Some(battery::Level::Percent(80)),
+                charging: false,
+                stale: false,
+                windows_cached: false,
+                detail: String::new(),
+            };
+            let audio = |app: &mut App| {
+                app.queue_audio_notice("Salida de audio".into(), headset.name.clone(), true);
+            };
+            let connect = |app: &mut App| {
+                app.connection_pending.push_back(headset.clone());
+                app.show_next_notice();
+            };
+            for audio_first in [true, false] {
+                let (first, second) = if audio_first {
+                    (&audio as &dyn Fn(&mut App), &connect as &dyn Fn(&mut App))
+                } else {
+                    (&connect as &dyn Fn(&mut App), &audio as &dyn Fn(&mut App))
+                };
+                first(app);
+                let shown = app.notice_card.as_ref().unwrap().window();
+                second(app);
+                assert_eq!(app.notice_card.as_ref().unwrap().window(), shown);
+                assert_eq!(app.audio_notice_pending.is_some(), !audio_first);
+                assert_eq!(app.connection_pending.len(), usize::from(audio_first));
+                app.clear_notice_card();
+                app.show_next_notice();
+                assert!(app.notice_card.is_some());
+                assert!(app.audio_notice_pending.is_none() && app.connection_pending.is_empty());
+                app.clear_notice_card();
+            }
+            app.settings.notices = notices;
+            app.settings.connection_notices = connections;
+        });
+        for expanded in [true, false] {
+            with_app(|app| {
+                app.settings.pinned_expanded = expanded;
+                app.spring.reset(if expanded { 1.0 } else { 0.0 });
+                app.presence.reset(1.0);
+                app.show_notice_card(
+                    Notice {
+                        icon: if expanded {
+                            NoticeIcon::Mouse
+                        } else {
+                            NoticeIcon::Audio
+                        },
+                        color: if expanded { GREEN } else { BLUE },
+                    },
+                    if expanded {
+                        "Dispositivo conectado"
+                    } else {
+                        "Salida de audio"
+                    },
+                    if expanded {
+                        "MCHOSE K7 Ultra · USB / 2.4 GHz · 78 %"
+                    } else {
+                        "Audífonos inalámbricos"
+                    },
+                    300,
+                );
+                let card = app
+                    .notice_card
+                    .as_mut()
+                    .expect("crear la ventana del aviso");
+                card.set_display(
+                    app.scale,
+                    RECT {
+                        left: -32000,
+                        top: -32000,
+                        right: -30000,
+                        bottom: -30000,
+                    },
+                )
+                .unwrap();
+                app.place_notice_card();
+                let mut rect = RECT::default();
+                windows::Win32::UI::WindowsAndMessaging::GetWindowRect(
+                    app.notice_card.as_ref().unwrap().window(),
+                    &mut rect,
+                )
+                .unwrap();
+                let bottom = app.pos.y
+                    + island::bottom(
+                        app.surface.width as f32,
+                        app.surface.height as f32,
+                        app.scale,
+                        app.spring.value,
+                        app.presence.value,
+                        app.shape(),
+                    )
+                    .ceil() as i32;
+                assert!(rect.top > bottom, "la tarjeta queda debajo de la isla");
+                assert!(app.notice.is_none(), "la tarjeta no ocupa el reproductor");
+            });
+            let deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                let mut msg = MSG::default();
+                if PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+                    DispatchMessageW(&msg);
+                    ui::promote_timers();
+                } else {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                let mut closed = false;
+                with_app(|app| {
+                    assert_eq!(app.spring.value, if expanded { 1.0 } else { 0.0 });
+                    closed = app.notice_card.is_none();
+                });
+                if closed {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "la tarjeta debe cerrarse a tiempo"
+                );
+            }
+        }
+        with_app(|app| {
+            app.settings.pinned_expanded = false;
+            app.start_idle_countdown();
+        });
+
         let seconds = std::env::var("NOTCH_STRESS_SECONDS")
             .ok()
             .and_then(|value| value.parse::<u64>().ok())

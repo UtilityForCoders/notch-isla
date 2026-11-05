@@ -28,6 +28,7 @@ const NOTICE_ICON: (f32, f32, f32) = (9.0, 38.0, 9.0);
 
 /// Separación lógica entre el borde superior de la pantalla y la isla flotante (sin tocar el techo).
 const TOP_GAP: f32 = 8.0;
+pub const EXPANDED_CONTENT_START: f32 = 0.45;
 
 /// Medidas del panel izquierdo de reproducción (píxeles lógicos).
 const COVER_PAD_X: f32 = 18.0;
@@ -244,6 +245,14 @@ pub struct LyricsArea {
 /// Ícono de un aviso del sistema.
 #[derive(Clone, Copy, PartialEq)]
 pub enum NoticeIcon {
+    Mouse,
+    Gamepad,
+    Speaker,
+    Device,
+    Bluetooth,
+    Wireless,
+    Usb,
+    Battery,
     /// Salida de audio (audífonos, parlantes).
     Audio,
     Timer,
@@ -253,6 +262,18 @@ pub enum NoticeIcon {
     Installing,
     Done,
     Failed,
+}
+
+pub fn device_icon(kind: crate::battery::DeviceKind) -> NoticeIcon {
+    use crate::battery::DeviceKind;
+    match kind {
+        DeviceKind::Mouse => NoticeIcon::Mouse,
+        DeviceKind::Keyboard => NoticeIcon::Keyboard,
+        DeviceKind::Headphones => NoticeIcon::Audio,
+        DeviceKind::Speaker => NoticeIcon::Speaker,
+        DeviceKind::Gamepad => NoticeIcon::Gamepad,
+        DeviceKind::Unknown => NoticeIcon::Device,
+    }
 }
 
 /// Aviso que ocupa la isla expandida: ícono a la izquierda y textos (los dibuja DirectWrite).
@@ -361,7 +382,7 @@ fn geometry(
         w,
         h,
         r: (lerp(COLLAPSED.2, EXPANDED_LYRICS.2) * scale).clamp(0.0, (w / 2.0).min(h / 2.0)),
-        alpha: ((p - 0.45) / 0.55).clamp(0.0, 1.0),
+        alpha: ((p - EXPANDED_CONTENT_START) / (1.0 - EXPANDED_CONTENT_START)).clamp(0.0, 1.0),
         scale,
     }
 }
@@ -770,8 +791,52 @@ pub fn draw(
 /// `text_w`: ancho del texto más largo (píxeles físicos), para centrar ícono y texto juntos
 /// en la isla; en vertical van al centro (los avisos no tienen barra de progreso debajo).
 fn draw_notice(pixmap: &mut Pixmap, g: &Geometry, n: &Notice, text_w: f32) -> TextArea {
+    draw_notice_content(pixmap, g, n, text_w, 1.0)
+}
+
+/// Tarjeta independiente con el mismo contenido del aviso, en una fila más baja.
+pub fn draw_notice_card(
+    pixmap: &mut Pixmap,
+    scale: f32,
+    notice: &Notice,
+    text_w: f32,
+) -> LayoutAreas {
+    let g = Geometry {
+        x0: 0.0,
+        y0: 0.0,
+        w: pixmap.width() as f32,
+        h: pixmap.height() as f32,
+        r: 16.0 * scale,
+        alpha: 1.0,
+        scale,
+    };
+    let mut paint = Paint {
+        anti_alias: true,
+        ..Default::default()
+    };
+    paint.set_color_rgba8(20, 20, 24, 250);
+    fill_rounded_rect(pixmap, &paint, g.x0, g.y0, g.w, g.h, g.r);
+    if let Some(path) = rounded_rect_path(0.5, 0.5, g.w - 1.0, g.h - 1.0, g.r) {
+        paint.set_color_rgba8(255, 255, 255, 36);
+        stroke_path(pixmap, &paint, &path, 1.0);
+    }
+    LayoutAreas {
+        text: draw_notice_content(pixmap, &g, notice, text_w, 0.8),
+        time: None,
+        lyrics: None,
+        seek: None,
+    }
+}
+
+fn draw_notice_content(
+    pixmap: &mut Pixmap,
+    g: &Geometry,
+    n: &Notice,
+    text_w: f32,
+    icon_scale: f32,
+) -> TextArea {
     let s = g.scale;
-    let size = NOTICE_ICON.1 * s;
+    let size = NOTICE_ICON.1 * s * icon_scale;
     let gap = 10.0 * s;
     let margin = NOTICE_ICON.0 * s;
     // Lo que cabe del texto entre los márgenes; si no cabe entero, se desplaza (marquee).
@@ -785,9 +850,24 @@ fn draw_notice(pixmap: &mut Pixmap, g: &Geometry, n: &Notice, text_w: f32) -> Te
         ..Default::default()
     };
     paint.set_color_rgba8(r, gr, b, (g.alpha * 46.0) as u8);
-    fill_rounded_rect(pixmap, &paint, x, y, size, size, NOTICE_ICON.2 * s);
+    fill_rounded_rect(
+        pixmap,
+        &paint,
+        x,
+        y,
+        size,
+        size,
+        NOTICE_ICON.2 * s * icon_scale,
+    );
     paint.set_color_rgba8(r, gr, b, (g.alpha * 255.0) as u8);
-    draw_notice_icon(pixmap, &paint, n.icon, x + size / 2.0, y + size / 2.0, s);
+    draw_notice_icon(
+        pixmap,
+        &paint,
+        n.icon,
+        x + size / 2.0,
+        y + size / 2.0,
+        s * icon_scale,
+    );
     TextArea {
         x: x + size + gap,
         // Un píxel de más: el ancho medido tiene decimales y el recorte no debe comerse la
@@ -799,7 +879,7 @@ fn draw_notice(pixmap: &mut Pixmap, g: &Geometry, n: &Notice, text_w: f32) -> Te
 }
 
 /// Íconos de línea, de unos 20 px lógicos, centrados en (cx, cy).
-fn draw_notice_icon(
+pub(crate) fn draw_notice_icon(
     pixmap: &mut Pixmap,
     paint: &Paint,
     icon: NoticeIcon,
@@ -809,6 +889,146 @@ fn draw_notice_icon(
 ) {
     let line = 1.8 * s;
     match icon {
+        NoticeIcon::Bluetooth => {
+            let mut pb = PathBuilder::new();
+            pb.move_to(cx - 5.0 * s, cy - 5.0 * s);
+            pb.line_to(cx + 5.0 * s, cy + 5.0 * s);
+            pb.line_to(cx, cy + 10.0 * s);
+            pb.line_to(cx, cy - 10.0 * s);
+            pb.line_to(cx + 5.0 * s, cy - 5.0 * s);
+            pb.line_to(cx - 5.0 * s, cy + 5.0 * s);
+            stroke(pixmap, paint, pb, line);
+        }
+        NoticeIcon::Wireless => {
+            let mut pb = PathBuilder::new();
+            for (radius, y) in [(9.0, -3.5), (6.0, 0.0), (3.0, 3.5)] {
+                pb.move_to(cx - radius * s, cy + y * s);
+                pb.quad_to(cx, cy + (y - radius) * s, cx + radius * s, cy + y * s);
+            }
+            stroke(pixmap, paint, pb, line);
+            fill_circle(pixmap, paint, cx, cy + 7.0 * s, 1.3 * s);
+        }
+        NoticeIcon::Usb => {
+            let mut pb = PathBuilder::new();
+            pb.move_to(cx, cy + 8.5 * s);
+            pb.line_to(cx, cy - 8.0 * s);
+            pb.move_to(cx - 2.8 * s, cy - 5.5 * s);
+            pb.line_to(cx, cy - 8.5 * s);
+            pb.line_to(cx + 2.8 * s, cy - 5.5 * s);
+            pb.move_to(cx, cy + 4.5 * s);
+            pb.line_to(cx - 5.0 * s, cy + s);
+            pb.line_to(cx - 5.0 * s, cy - 2.0 * s);
+            pb.move_to(cx, cy + s);
+            pb.line_to(cx + 5.0 * s, cy - 2.5 * s);
+            pb.line_to(cx + 5.0 * s, cy - 5.0 * s);
+            stroke(pixmap, paint, pb, line);
+            fill_circle(pixmap, paint, cx, cy + 8.0 * s, 1.8 * s);
+        }
+        NoticeIcon::Mouse => {
+            if let Some(body) =
+                rounded_rect_path(cx - 7.0 * s, cy - 10.0 * s, 14.0 * s, 21.0 * s, 7.0 * s)
+            {
+                stroke_path(pixmap, paint, &body, line);
+            }
+            let mut pb = PathBuilder::new();
+            pb.move_to(cx - 6.0 * s, cy - 3.0 * s);
+            pb.line_to(cx + 6.0 * s, cy - 3.0 * s);
+            pb.move_to(cx, cy - 7.0 * s);
+            pb.line_to(cx, cy - 4.0 * s);
+            stroke(pixmap, paint, pb, line);
+        }
+        NoticeIcon::Gamepad => {
+            let mut pb = PathBuilder::new();
+            pb.move_to(cx - 5.0 * s, cy - 6.0 * s);
+            pb.line_to(cx + 5.0 * s, cy - 6.0 * s);
+            pb.cubic_to(
+                cx + 10.0 * s,
+                cy - 6.0 * s,
+                cx + 10.0 * s,
+                cy + 2.0 * s,
+                cx + 11.0 * s,
+                cy + 6.0 * s,
+            );
+            pb.cubic_to(
+                cx + 11.0 * s,
+                cy + 11.0 * s,
+                cx + 5.0 * s,
+                cy + 4.0 * s,
+                cx + 3.0 * s,
+                cy + 4.0 * s,
+            );
+            pb.line_to(cx - 3.0 * s, cy + 4.0 * s);
+            pb.cubic_to(
+                cx - 5.0 * s,
+                cy + 4.0 * s,
+                cx - 11.0 * s,
+                cy + 11.0 * s,
+                cx - 11.0 * s,
+                cy + 6.0 * s,
+            );
+            pb.cubic_to(
+                cx - 10.0 * s,
+                cy + 2.0 * s,
+                cx - 10.0 * s,
+                cy - 6.0 * s,
+                cx - 5.0 * s,
+                cy - 6.0 * s,
+            );
+            pb.close();
+            stroke(pixmap, paint, pb, line);
+            let mut pb = PathBuilder::new();
+            pb.move_to(cx - 7.0 * s, cy - 1.0 * s);
+            pb.line_to(cx - 2.0 * s, cy - 1.0 * s);
+            pb.move_to(cx - 4.5 * s, cy - 3.5 * s);
+            pb.line_to(cx - 4.5 * s, cy + 1.5 * s);
+            stroke(pixmap, paint, pb, line);
+            fill_circle(pixmap, paint, cx + 4.0 * s, cy + 0.5 * s, 1.2 * s);
+            fill_circle(pixmap, paint, cx + 7.0 * s, cy - 2.5 * s, 1.2 * s);
+        }
+        NoticeIcon::Speaker => {
+            if let Some(body) =
+                rounded_rect_path(cx - 8.0 * s, cy - 10.0 * s, 16.0 * s, 20.0 * s, 2.5 * s)
+            {
+                stroke_path(pixmap, paint, &body, line);
+            }
+            if let Some(circle) = PathBuilder::from_circle(cx, cy + 3.0 * s, 4.0 * s) {
+                stroke_path(pixmap, paint, &circle, line);
+            }
+            fill_circle(pixmap, paint, cx, cy - 5.0 * s, 1.6 * s);
+        }
+        NoticeIcon::Device => {
+            if let Some(body) =
+                rounded_rect_path(cx - 6.5 * s, cy - 10.0 * s, 13.0 * s, 20.0 * s, 2.5 * s)
+            {
+                stroke_path(pixmap, paint, &body, line);
+            }
+            fill_circle(pixmap, paint, cx, cy + 6.0 * s, 1.2 * s);
+        }
+        NoticeIcon::Battery => {
+            if let Some(body) =
+                rounded_rect_path(cx - 10.0 * s, cy - 6.0 * s, 18.0 * s, 12.0 * s, 2.0 * s)
+            {
+                stroke_path(pixmap, paint, &body, line);
+            }
+            fill_rounded_rect(
+                pixmap,
+                paint,
+                cx + 9.0 * s,
+                cy - 2.5 * s,
+                2.0 * s,
+                5.0 * s,
+                s,
+            );
+            fill_rounded_rect(
+                pixmap,
+                paint,
+                cx - 7.0 * s,
+                cy - 3.0 * s,
+                3.0 * s,
+                6.0 * s,
+                s,
+            );
+        }
         NoticeIcon::Audio => {
             let mut pb = PathBuilder::new();
             pb.move_to(cx - 8.0 * s, cy + 3.0 * s);
@@ -1298,6 +1518,49 @@ pub(crate) fn rounded_rect_path(x: f32, y: f32, w: f32, h: f32, r: f32) -> Optio
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn iconos_de_dispositivo_son_distintos_y_caben_a_distintas_escalas() {
+        use crate::battery::DeviceKind;
+        let kinds = [
+            DeviceKind::Mouse,
+            DeviceKind::Keyboard,
+            DeviceKind::Headphones,
+            DeviceKind::Speaker,
+            DeviceKind::Gamepad,
+            DeviceKind::Unknown,
+        ];
+        for scale in [1.0, 1.25, 2.0] {
+            let size = (32.0_f32 * scale).ceil() as u32;
+            let mut drawings = std::collections::HashSet::new();
+            let mut paint = Paint::default();
+            paint.set_color_rgba8(255, 255, 255, 255);
+            for kind in kinds {
+                let mut image = Pixmap::new(size, size).unwrap();
+                draw_notice_icon(
+                    &mut image,
+                    &paint,
+                    device_icon(kind),
+                    size as f32 / 2.0,
+                    size as f32 / 2.0,
+                    scale,
+                );
+                assert!(image.pixels().iter().any(|p| p.alpha() != 0));
+                for x in 0..size {
+                    assert_eq!(image.pixel(x, 0).unwrap().alpha(), 0);
+                    assert_eq!(image.pixel(x, size - 1).unwrap().alpha(), 0);
+                }
+                for y in 0..size {
+                    assert_eq!(image.pixel(0, y).unwrap().alpha(), 0);
+                    assert_eq!(image.pixel(size - 1, y).unwrap().alpha(), 0);
+                }
+                assert!(
+                    drawings.insert(image.data().to_vec()),
+                    "dos tipos comparten el mismo dibujo"
+                );
+            }
+        }
+    }
     use std::time::Instant;
 
     fn controls() -> Controls {

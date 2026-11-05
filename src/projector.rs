@@ -213,6 +213,17 @@ impl Projector {
         }
     }
 
+    pub fn bottom(&self) -> Option<i32> {
+        let (_, top) = self.position.filter(|_| self.shown)?;
+        let drop = DROP * self.scale;
+        let y = drop * self.presence.value.clamp(0.0, 1.0);
+        let h = self
+            .height
+            .value
+            .clamp(1.0, self.surface.height as f32 - drop);
+        Some(top + (y + h).ceil() as i32)
+    }
+
     /// Cambió el DPI: letra y ventana se rehacen a la nueva escala.
     pub fn set_scale(&mut self, scale: f32) {
         if scale == self.scale {

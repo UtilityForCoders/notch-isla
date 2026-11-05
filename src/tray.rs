@@ -3,19 +3,21 @@
 
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use windows::core::{w, Result};
+use windows::core::{w, Result, PCWSTR};
 use windows::Win32::Foundation::{E_FAIL, HWND};
 use windows::Win32::Graphics::Gdi::{
     CreateBitmap, CreateDIBSection, DeleteObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
     DIB_RGB_COLORS,
 };
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Shell::{
     Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_USER, NIM_ADD, NIM_DELETE,
     NIM_MODIFY, NOTIFYICONDATAW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateIconIndirect, DestroyIcon, GetSystemMetrics, LoadIconW, RegisterWindowMessageW, HICON,
-    ICONINFO, IDI_APPLICATION, SM_CXSMICON, WM_APP,
+    CreateIconIndirect, DestroyIcon, GetSystemMetrics, LoadIconW, LoadImageW,
+    RegisterWindowMessageW, HICON, ICONINFO, IDI_APPLICATION, IMAGE_ICON, LR_DEFAULTCOLOR,
+    SM_CXSMICON, SM_CYSMICON, WM_APP,
 };
 
 use crate::hotkey::{self, Hotkey};
@@ -47,6 +49,9 @@ const CMD_HIGH_REFRESH: usize = 15;
 const CMD_TRANSLUCENT: usize = 16;
 const CMD_EXPAND_ON_HOVER: usize = 17;
 const CMD_PIN_EXPANDED: usize = 18;
+const CMD_BATTERY_NOTICES: usize = 20;
+const CMD_BATTERY_REFRESH: usize = 21;
+const CMD_CONNECTION_NOTICES: usize = 22;
 /// Las opciones de los submenús van numeradas a partir de estas bases.
 const CMD_HIDE_DELAY: usize = 100;
 const CMD_MONITOR: usize = 200;
@@ -60,6 +65,9 @@ const CMD_BLUR_RADIUS: usize = 500;
 pub const TIMER_MINUTES: [u32; 6] = [5, 10, 15, 25, 45, 60];
 
 pub enum Command {
+    ToggleBatteryNotices,
+    ToggleConnectionNotices,
+    RefreshBattery,
     ToggleAutostart,
     Update,
     Exit,
@@ -122,7 +130,8 @@ impl Tray {
                 RegisterWindowMessageW(w!("TaskbarCreated")),
                 Ordering::Relaxed,
             );
-            let icon = make_icon()
+            let icon = load_app_icon()
+                .or_else(|_| make_icon())
                 .or_else(|_| LoadIconW(None, IDI_APPLICATION))
                 .unwrap_or_default();
             let tray = Self { hwnd, icon };
@@ -251,6 +260,12 @@ pub fn build_items(state: &MenuState) -> Vec<Item> {
     });
 
     items.push(Item::Separator);
+    let mut devices = Vec::new();
+    crate::with_app(|app| devices = app.battery_group_items());
+    items.push(Item::Group {
+        label: "Dispositivos y batería".into(),
+        items: devices,
+    });
     // La letra se pide a internet: se dice a quién, para que cada uno decida activarla.
     items.push(Item::Group {
         label: "Mostrar letra de la canción".to_string(),
@@ -261,7 +276,6 @@ pub fn build_items(state: &MenuState) -> Vec<Item> {
                 "Con la isla encogida",
                 settings.lyrics_projector,
             ),
-            Item::Label("Se busca en lrclib.net".to_string()),
         ],
     });
     items.push(action(
@@ -342,6 +356,9 @@ pub fn build_items(state: &MenuState) -> Vec<Item> {
 fn id_to_command(id: usize, state: &MenuState) -> Option<Command> {
     let pick = |base: usize, len: usize| (base..base + len).contains(&id).then(|| id - base);
     match id {
+        CMD_BATTERY_NOTICES => Some(Command::ToggleBatteryNotices),
+        CMD_CONNECTION_NOTICES => Some(Command::ToggleConnectionNotices),
+        CMD_BATTERY_REFRESH => Some(Command::RefreshBattery),
         CMD_AUTOSTART => Some(Command::ToggleAutostart),
         CMD_UPDATE => Some(Command::Update),
         CMD_EXIT => Some(Command::Exit),
@@ -417,6 +434,116 @@ pub enum IslandMenuChoice {
     TogglePinnedExpanded,
 }
 
+pub fn battery_items(
+    snapshot: &crate::battery::Snapshot,
+    notices: bool,
+    connections: bool,
+) -> Vec<Item> {
+    let mut items = vec![
+        Item::Label("Dispositivos y batería".into()),
+        Item::Separator,
+        Item::Action {
+            id: CMD_CONNECTION_NOTICES,
+            label: "Avisar al conectar un dispositivo".into(),
+            checked: connections,
+        },
+        Item::Action {
+            id: CMD_BATTERY_NOTICES,
+            label: "Avisar con batería baja (< 20 %)".into(),
+            checked: notices,
+        },
+        Item::Action {
+            id: CMD_BATTERY_REFRESH,
+            label: if snapshot.scanning {
+                "Consultando dispositivos…".into()
+            } else {
+                "Actualizar ahora".into()
+            },
+            checked: false,
+        },
+        Item::Separator,
+    ];
+    if snapshot.updated.is_some()
+        && !snapshot
+            .devices
+            .iter()
+            .any(|d| !snapshot.show_inactive_receiver(d))
+    {
+        items.push(Item::Label("Sin periféricos activos detectados".into()));
+    }
+    for device in snapshot
+        .devices
+        .iter()
+        .filter(|d| !snapshot.show_inactive_receiver(d))
+    {
+        let mut status = device
+            .level
+            .map_or_else(|| "Sin lectura".into(), |level| level.label());
+        if device.windows_cached {
+            status.push_str(" (caché de Windows)");
+        } else if snapshot.show_previous_reading(device) {
+            status.push_str(" (anterior)");
+        } else if device.charging {
+            status.push_str(" · Cargando");
+        }
+        items.push(Item::DeviceStatus {
+            name: device.name.clone(),
+            status,
+            icon: island::device_icon(device.kind),
+            connection: match device.connection {
+                "Bluetooth" => island::NoticeIcon::Bluetooth,
+                "USB / 2.4 GHz" | "Inalámbrico" => island::NoticeIcon::Wireless,
+                "USB / receptor" | "USB" => island::NoticeIcon::Usb,
+                _ => island::NoticeIcon::Device,
+            },
+        });
+    }
+    let inactive: Vec<_> = snapshot
+        .devices
+        .iter()
+        .filter(|d| snapshot.show_inactive_receiver(d))
+        .collect();
+    if !inactive.is_empty() {
+        let mut details = vec![Item::Label("USB conectado; enlace no confirmado".into())];
+        for device in &inactive {
+            details.push(Item::Label(device.name.clone()));
+            if let Some(level) = device.level {
+                details.push(Item::Label(format!(
+                    "Última lectura por receptor: {}",
+                    level.label()
+                )));
+            }
+            if !device.detail.is_empty() {
+                details.push(Item::Label(device.detail.clone()));
+            }
+        }
+        details.push(Item::Label("Estas lecturas no generan avisos".into()));
+        items.push(Item::Group {
+            label: format!("Receptores sin enlace confirmado ({})", inactive.len()),
+            items: details,
+        });
+    }
+    if !snapshot.errors.is_empty() {
+        items.push(Item::Group {
+            label: "No se pudo consultar alguna fuente".into(),
+            items: snapshot.errors.iter().cloned().map(Item::Label).collect(),
+        });
+    }
+    items
+}
+
+/// El encabezado del submenú reemplaza el título del antiguo panel.
+pub fn battery_group_items(
+    snapshot: &crate::battery::Snapshot,
+    notices: bool,
+    connections: bool,
+) -> Vec<Item> {
+    battery_items(snapshot, notices, connections)
+        .into_iter()
+        .skip(2)
+        .collect()
+}
+
 /// Menú contextual sobre la isla: opciones de salida de audio y centrar en la pantalla.
 pub fn show_island_menu(
     app: Option<&str>,
@@ -470,7 +597,25 @@ pub fn show_island_menu(
     }
 }
 
-/// Convierte el dibujo de `island::tray_icon` en un HICON del tamaño que usa la bandeja.
+/// Carga el recurso 1 de app.rc (assets/icon.ico) al tamaño de la bandeja.
+#[allow(clippy::manual_dangling_ptr)]
+fn load_app_icon() -> Result<HICON> {
+    unsafe {
+        let instance = GetModuleHandleW(None)?;
+        // Sin LR_SHARED: Tray es dueño del HICON y lo libera con DestroyIcon.
+        let icon = LoadImageW(
+            Some(instance.into()),
+            PCWSTR(1usize as *const u16),
+            IMAGE_ICON,
+            GetSystemMetrics(SM_CXSMICON).max(16),
+            GetSystemMetrics(SM_CYSMICON).max(16),
+            LR_DEFAULTCOLOR,
+        )?;
+        Ok(HICON(icon.0))
+    }
+}
+
+/// Dibujo de respaldo si no se puede cargar el ícono incrustado.
 fn make_icon() -> Result<HICON> {
     unsafe {
         let size = GetSystemMetrics(SM_CXSMICON).max(16) as u32;

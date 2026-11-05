@@ -16,6 +16,7 @@ Para funcionar, la app usa información que ya está en tu PC, solo en memoria y
 - **Ícono de la app que reproduce** (Spotify, Chrome...): se obtiene de Windows o del archivo `.exe` del programa en ejecución.
 - **Volumen**: el de la app que suena o el general, solo se lee y se cambia cuando giras la rueda del mouse sobre la isla.
 - **Salidas de audio**: sus nombres, para el aviso de cambio de salida y para el menú de salida por app.
+- **Batería de periféricos**: nombres, identificadores locales, nivel y estado de carga que Windows o los receptores compatibles comunican. Las lecturas y el historial de avisos se mantienen solo en memoria. Se consulta el servicio de batería Bluetooth LE cuando es necesario; no se emparejan dispositivos ni se envía esta información a internet.
 - **Sonido de la app que suena** (si está activado **Barras con el sonido real**, que viene activado): mientras se ven las barras de la isla, se lee lo que suena por los parlantes (no el micrófono) solo para calcular la altura de las barras. Se procesa en memoria y se descarta al instante: no se graba, no se guarda y no se envía.
 
 Lo que la app escribe en tu PC:
@@ -42,6 +43,7 @@ To work, the app uses information already on your PC, only in memory and only wh
 - **The icon of the app that is playing** (Spotify, Chrome...): obtained from Windows or from the running program's `.exe` file.
 - **Volume**: that of the playing app or the overall volume, read and changed only when you turn the mouse wheel over the island.
 - **Audio outputs**: their names, for the output-change notice and the per-app output menu.
+- **Peripheral batteries**: names, local identifiers, battery levels and charging state reported by Windows or supported receivers. Readings and notification history stay in memory. The Bluetooth LE battery service is queried when needed; the app does not pair devices or send this information to the internet.
 - **Sound of the playing app** (if **Barras con el sonido real** (bars with real sound) is on, which is the default): while the island's bars are visible, what plays through the speakers (not the microphone) is read only to compute the bar heights. It is processed in memory and discarded immediately: it is not recorded, stored, or sent.
 
 What the app writes to your PC:
