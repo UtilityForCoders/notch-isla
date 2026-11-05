@@ -10,7 +10,6 @@
 
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
-use std::time::Instant;
 
 use tiny_skia::{Color, Paint, PathBuilder};
 use windows::core::{w, Result};
@@ -30,23 +29,26 @@ use windows::Win32::Graphics::DirectWrite::{
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Gdi::{
-    GetMonitorInfoW, MonitorFromPoint, AC_SRC_ALPHA, AC_SRC_OVER, BLENDFUNCTION, MONITORINFO,
-    MONITOR_DEFAULTTONEAREST,
+    GetMonitorInfoW, MonitorFromPoint, MonitorFromWindow, AC_SRC_ALPHA, AC_SRC_OVER, BLENDFUNCTION,
+    MONITORINFO, MONITOR_DEFAULTTONEAREST,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VK_DOWN, VK_ESCAPE, VK_LEFT, VK_RETURN, VK_RIGHT,
-    VK_SPACE, VK_UP,
+    ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VK_DOWN, VK_ESCAPE,
+    VK_LEFT, VK_RETURN, VK_RIGHT, VK_SPACE, VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetCursorPos,
-    GetMessageW, GetWindowRect, KillTimer, LoadCursorW, PostMessageW, PostQuitMessage,
-    RegisterClassExW, SetForegroundWindow, SetTimer, SetWindowsHookExW, ShowWindow,
-    TranslateMessage, UnhookWindowsHookEx, UpdateLayeredWindow, IDC_ARROW, MSG, MSLLHOOKSTRUCT,
-    SW_SHOWNOACTIVATE, ULW_ALPHA, WA_INACTIVE, WH_MOUSE_LL, WM_ACTIVATE, WM_CLOSE, WM_KEYDOWN,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_RBUTTONDOWN, WM_RBUTTONUP,
-    WM_TIMER, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
+    FindWindowExW, FindWindowW, GetAncestor, GetCursorPos, GetForegroundWindow, GetMessageW,
+    GetWindowRect, KillTimer, LoadCursorW, PostMessageW, PostQuitMessage, RegisterClassExW,
+    SetForegroundWindow, SetTimer, SetWindowsHookExW, ShowWindow, TranslateMessage,
+    UnhookWindowsHookEx, UpdateLayeredWindow, GA_ROOTOWNER, IDC_ARROW, KBDLLHOOKSTRUCT,
+    MA_NOACTIVATE, MSG, MSLLHOOKSTRUCT, SW_SHOWNOACTIVATE, ULW_ALPHA, WA_INACTIVE, WH_KEYBOARD_LL,
+    WH_MOUSE_LL, WM_ACTIVATE, WM_CAPTURECHANGED, WM_CLOSE, WM_DESTROY, WM_KEYDOWN, WM_KEYUP,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_RBUTTONDOWN,
+    WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WNDCLASSEXW, WS_EX_LAYERED,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 use windows_numerics::Vector2;
 
@@ -70,12 +72,21 @@ pub enum Item {
         label: String,
         items: Vec<Item>,
     },
+    /// Deslizador continuo; el comando emitido es `id + value` (ambos límites incluidos).
+    Slider {
+        id: usize,
+        label: String,
+        value: u32,
+        min: u32,
+        max: u32,
+    },
 }
 
 // Medidas en píxeles lógicos.
 const PAD: f32 = 6.0;
 const ROW_H: f32 = 30.0;
 const LABEL_H: f32 = 26.0;
+const SLIDER_H: f32 = 56.0;
 const SEPARATOR_H: f32 = 9.0;
 const TEXT_X: f32 = 12.0;
 const CHILD_INDENT: f32 = 14.0;
@@ -87,15 +98,15 @@ const MIN_W: f32 = 190.0;
 const MAX_W: f32 = 360.0;
 const FONT: f32 = 13.0;
 const LABEL_FONT: f32 = 12.0;
-/// Entrada: aparece desvaneciéndose en este tiempo.
-const FADE_SECS: f32 = 0.12;
-const FADE_TIMER: usize = 1;
-const FRAME_MS: u32 = 15;
+const FOCUS_TIMER: usize = 2;
+const SLIDER_TIMER: usize = 3;
 
 /// Hay un menú abierto: otro clic en la bandeja mientras tanto no abre uno encima.
 static OPEN: AtomicBool = AtomicBool::new(false);
 /// Ventana del menú abierto, para el gancho de mouse.
 static MENU_HWND: AtomicIsize = AtomicIsize::new(0);
+static MENU_FOCUS: AtomicIsize = AtomicIsize::new(0);
+static SLIDER_CAPTURE: AtomicBool = AtomicBool::new(false);
 
 /// Acción que debe tomar el menú tras pulsar una opción.
 pub enum MenuAction {
@@ -103,6 +114,13 @@ pub enum MenuAction {
     Close,
     /// Mantiene el menú abierto y actualiza las opciones (por ejemplo, alternar casillas de verificación).
     KeepOpen(Vec<Item>),
+    /// Cambia solo el deslizador y una casilla relacionada, conservando los demás layouts.
+    UpdateSlider {
+        id: usize,
+        value: u32,
+        label: String,
+        checked: Option<(usize, bool)>,
+    },
 }
 
 type MenuCallback = (*mut (), unsafe fn(*mut (), usize) -> MenuAction);
@@ -127,6 +145,21 @@ pub fn show_interactive<F>(items: Vec<Item>, mut on_action: F)
 where
     F: FnMut(usize) -> MenuAction,
 {
+    show_with_handler(items, &mut on_action, false);
+}
+
+/// El menú usa un dueño propio y estable, independiente de la isla y de Explorer.
+pub fn show_tray<F>(items: Vec<Item>, mut on_action: F)
+where
+    F: FnMut(usize) -> MenuAction,
+{
+    show_with_handler(items, &mut on_action, true);
+}
+
+fn show_with_handler<F>(items: Vec<Item>, mut on_action: F, from_tray: bool)
+where
+    F: FnMut(usize) -> MenuAction,
+{
     if OPEN.swap(true, Ordering::SeqCst) {
         return;
     }
@@ -143,11 +176,18 @@ where
         }
     }
     let _guard = Reset;
-    let _ = run(items);
+    let _ = run(items, from_tray);
 }
 
 /// Opción ya maquetada.
 enum Entry {
+    Slider {
+        id: usize,
+        text: usize,
+        value: u32,
+        min: u32,
+        max: u32,
+    },
     Action {
         id: usize,
         text: usize,
@@ -172,6 +212,12 @@ struct Text {
 
 #[derive(Clone, Copy)]
 enum RowKind {
+    Slider {
+        id: usize,
+        value: u32,
+        min: u32,
+        max: u32,
+    },
     Action {
         id: usize,
         checked: bool,
@@ -187,7 +233,10 @@ enum RowKind {
 
 impl RowKind {
     fn selectable(self) -> bool {
-        matches!(self, RowKind::Action { .. } | RowKind::Group { .. })
+        matches!(
+            self,
+            RowKind::Action { .. } | RowKind::Group { .. } | RowKind::Slider { .. }
+        )
     }
 }
 
@@ -209,6 +258,8 @@ struct State {
     rows: Vec<Row>,
     hover: Option<usize>,
     tracking: bool,
+    dragging_slider: Option<usize>,
+    pending_slider: Option<f32>,
     scale: f32,
     /// Ancho lógico: fijo, el que necesita el texto más largo (también el de los grupos).
     width: f32,
@@ -219,7 +270,6 @@ struct State {
     surface: Surface,
     pos: POINT,
     target: ID2D1DCRenderTarget,
-    opened: Instant,
     /// `Some` al terminar: la opción elegida o `None` si se cerró.
     done: Option<Option<usize>>,
     dwrite: IDWriteFactory,
@@ -228,6 +278,87 @@ struct State {
 }
 
 impl State {
+    fn update_slider_item(
+        &mut self,
+        id: usize,
+        value: u32,
+        label: &str,
+        checked: Option<(usize, bool)>,
+    ) {
+        fn update(
+            entries: &mut [Entry],
+            id: usize,
+            value: u32,
+            checked: Option<(usize, bool)>,
+        ) -> Option<usize> {
+            let mut text_index = None;
+            for entry in entries {
+                match entry {
+                    Entry::Slider {
+                        id: item_id,
+                        value: current,
+                        min,
+                        max,
+                        text,
+                    } if *item_id == id => {
+                        *current = value.clamp(*min, *max);
+                        text_index = Some(*text);
+                    }
+                    Entry::Action {
+                        id,
+                        checked: current,
+                        ..
+                    } => {
+                        if let Some((action, next)) = checked {
+                            if *id == action {
+                                *current = next;
+                            }
+                        }
+                    }
+                    Entry::Group { children, .. } => {
+                        text_index = update(children, id, value, checked).or(text_index);
+                    }
+                    _ => {}
+                }
+            }
+            text_index
+        }
+        if let Some(index) = update(&mut self.entries, id, value, checked) {
+            if let Some(text) = layout(&self.dwrite, &self.font, label) {
+                self.texts[index] = text;
+            }
+        }
+        for row in &mut self.rows {
+            match &mut row.kind {
+                RowKind::Slider {
+                    id: item_id,
+                    value: current,
+                    min,
+                    max,
+                } if *item_id == id => {
+                    *current = value.clamp(*min, *max);
+                }
+                RowKind::Action {
+                    id,
+                    checked: current,
+                } => {
+                    if let Some((action, next)) = checked {
+                        if *id == action {
+                            *current = next;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        let width = text_width(&self.entries, &self.texts, self.scale, false).clamp(MIN_W, MAX_W);
+        if width > self.width {
+            self.width = width;
+            relayout(self);
+        }
+        render(self);
+    }
+
     fn update_items(&mut self, items: Vec<Item>) {
         let mut texts = Vec::new();
         let entries = build(
@@ -254,19 +385,34 @@ thread_local! {
 }
 
 fn with_state(f: impl FnOnce(&mut State)) {
-    STATE.with(|cell| {
+    let ran = STATE.with(|cell| {
         if let Ok(mut guard) = cell.try_borrow_mut() {
             if let Some(state) = guard.as_mut() {
                 f(state);
+                return true;
             }
         }
+        false
     });
+    if ran {
+        crate::ui::flush();
+    }
 }
 
-fn run(items: Vec<Item>) -> Result<Option<usize>> {
+fn run(items: Vec<Item>, from_tray: bool) -> Result<Option<usize>> {
     unsafe {
         let mut anchor = POINT::default();
         GetCursorPos(&mut anchor)?;
+        // La barra se oculta al perder el foco. El menú de bandeja recibe mouse/teclado
+        // sin activarse: Explorer conserva el foco sin cambiar la preferencia de autoocultar.
+        let focus = if from_tray {
+            taskbar_at(anchor).filter(|taskbar| {
+                let _ = SetForegroundWindow(*taskbar);
+                foreground_is(*taskbar)
+            })
+        } else {
+            None
+        };
         let monitor = MonitorFromPoint(anchor, MONITOR_DEFAULTTONEAREST);
         let mut info = MONITORINFO {
             cbSize: std::mem::size_of::<MONITORINFO>() as u32,
@@ -298,7 +444,31 @@ fn run(items: Vec<Item>) -> Result<Option<usize>> {
         })?;
         target.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
 
-        let hwnd = create_window()?;
+        // Un dueño oculto propio mantiene el menú vivo aunque la isla se oculte,
+        // y evita prestar ventanas de Explorer que pertenecen a otro hilo/proceso.
+        struct Host(HWND);
+        impl Drop for Host {
+            fn drop(&mut self) {
+                unsafe {
+                    let _ = DestroyWindow(self.0);
+                }
+            }
+        }
+        let host = Host(CreateWindowExW(
+            WS_EX_TOOLWINDOW,
+            w!("STATIC"),
+            w!("NotchIslaMenuHost"),
+            WS_POPUP,
+            0,
+            0,
+            0,
+            0,
+            None,
+            None,
+            Some(GetModuleHandleW(None)?.into()),
+            None,
+        )?);
+        let hwnd = create_window(Some(host.0), focus.is_some())?;
         let open = vec![false; entries.len()];
         STATE.with(|cell| {
             *cell.borrow_mut() = Some(State {
@@ -309,6 +479,8 @@ fn run(items: Vec<Item>) -> Result<Option<usize>> {
                 rows: Vec::new(),
                 hover: None,
                 tracking: false,
+                dragging_slider: None,
+                pending_slider: None,
                 scale,
                 width,
                 anchor,
@@ -318,7 +490,6 @@ fn run(items: Vec<Item>) -> Result<Option<usize>> {
                 surface: Surface::new(1, 1).expect("superficie mínima"),
                 pos: POINT::default(),
                 target,
-                opened: Instant::now(),
                 done: None,
                 dwrite,
                 font,
@@ -331,10 +502,16 @@ fn run(items: Vec<Item>) -> Result<Option<usize>> {
         });
         MENU_HWND.store(hwnd.0 as isize, Ordering::SeqCst);
         let hook = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook), None, 0).ok();
+        let keyboard = focus
+            .and_then(|_| SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook), None, 0).ok());
+        if keyboard.is_some() {
+            MENU_FOCUS.store(focus.unwrap().0 as isize, Ordering::SeqCst);
+            SetTimer(Some(hwnd), FOCUS_TIMER, 100, None);
+        }
         let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-        // Al frente para recibir el teclado y saber si otra ventana pasa adelante.
-        let _ = SetForegroundWindow(hwnd);
-        SetTimer(Some(hwnd), FADE_TIMER, FRAME_MS, None);
+        if keyboard.is_none() {
+            let _ = SetForegroundWindow(hwnd);
+        }
 
         // Bucle propio hasta que el menú termine; la isla sigue recibiendo sus mensajes.
         let mut msg = MSG::default();
@@ -354,11 +531,17 @@ fn run(items: Vec<Item>) -> Result<Option<usize>> {
             }
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
+            crate::ui::promote_timers();
         }
 
         if let Some(hook) = hook {
             let _ = UnhookWindowsHookEx(hook);
         }
+        if let Some(keyboard) = keyboard {
+            let _ = UnhookWindowsHookEx(keyboard);
+        }
+        MENU_FOCUS.store(0, Ordering::SeqCst);
+        SLIDER_CAPTURE.store(false, Ordering::SeqCst);
         MENU_HWND.store(0, Ordering::SeqCst);
         let state = STATE.with(|c| c.borrow_mut().take());
         let _ = DestroyWindow(hwnd);
@@ -366,7 +549,66 @@ fn run(items: Vec<Item>) -> Result<Option<usize>> {
     }
 }
 
-fn create_window() -> Result<HWND> {
+fn taskbar_at(anchor: POINT) -> Option<HWND> {
+    unsafe {
+        let monitor = MonitorFromPoint(anchor, MONITOR_DEFAULTTONEAREST);
+        let primary = FindWindowW(w!("Shell_TrayWnd"), None).ok()?;
+        if MonitorFromWindow(primary, MONITOR_DEFAULTTONEAREST) == monitor {
+            return Some(primary);
+        }
+        let mut previous = None;
+        while let Ok(window) = FindWindowExW(None, previous, w!("Shell_SecondaryTrayWnd"), None) {
+            if MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST) == monitor {
+                return Some(window);
+            }
+            previous = Some(window);
+        }
+        Some(primary)
+    }
+}
+
+fn foreground_is(window: HWND) -> bool {
+    unsafe {
+        let foreground = GetForegroundWindow();
+        foreground == window || GetAncestor(foreground, GA_ROOTOWNER) == window
+    }
+}
+
+unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    let focus = HWND(MENU_FOCUS.load(Ordering::SeqCst) as _);
+    let hwnd = HWND(MENU_HWND.load(Ordering::SeqCst) as _);
+    if code >= 0 && !focus.is_invalid() && !hwnd.is_invalid() {
+        let event = wparam.0 as u32;
+        let key = unsafe { &*(lparam.0 as *const KBDLLHOOKSTRUCT) }.vkCode as u16;
+        let navigation = [
+            VK_UP.0,
+            VK_DOWN.0,
+            VK_LEFT.0,
+            VK_RIGHT.0,
+            VK_RETURN.0,
+            VK_SPACE.0,
+            VK_ESCAPE.0,
+        ]
+        .contains(&key);
+        if foreground_is(focus) && navigation {
+            if matches!(event, WM_KEYDOWN | WM_SYSKEYDOWN) {
+                unsafe {
+                    let _ = PostMessageW(Some(hwnd), WM_KEYDOWN, WPARAM(key as usize), LPARAM(0));
+                }
+            }
+            if matches!(event, WM_KEYDOWN | WM_SYSKEYDOWN | WM_KEYUP | WM_SYSKEYUP) {
+                return LRESULT(1);
+            }
+        } else if matches!(event, WM_KEYDOWN | WM_SYSKEYDOWN) {
+            unsafe {
+                let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+            }
+        }
+    }
+    unsafe { CallNextHookEx(None, code, wparam, lparam) }
+}
+
+fn create_window(owner: Option<HWND>, passive: bool) -> Result<HWND> {
     static REGISTERED: AtomicBool = AtomicBool::new(false);
     unsafe {
         let instance = GetModuleHandleW(None)?;
@@ -383,7 +625,14 @@ fn create_window() -> Result<HWND> {
             RegisterClassExW(&wc);
         }
         CreateWindowExW(
-            WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+            WS_EX_LAYERED
+                | WS_EX_TOPMOST
+                | WS_EX_TOOLWINDOW
+                | if passive {
+                    WS_EX_NOACTIVATE
+                } else {
+                    Default::default()
+                },
             class,
             w!("Menú de Notch Isla"),
             WS_POPUP,
@@ -391,7 +640,7 @@ fn create_window() -> Result<HWND> {
             0,
             1,
             1,
-            None,
+            owner,
             None,
             Some(instance.into()),
             None,
@@ -418,6 +667,19 @@ fn build(
     let mut out = Vec::new();
     for item in items {
         out.push(match item {
+            Item::Slider {
+                id,
+                label,
+                value,
+                min,
+                max,
+            } => Entry::Slider {
+                id,
+                text: add(&label, font),
+                value,
+                min,
+                max,
+            },
             Item::Action { id, label, checked } => Entry::Action {
                 id,
                 text: add(&label, font),
@@ -432,6 +694,19 @@ fn build(
                 let mut children = Vec::new();
                 for child in items {
                     children.push(match child {
+                        Item::Slider {
+                            id,
+                            label,
+                            value,
+                            min,
+                            max,
+                        } => Entry::Slider {
+                            id,
+                            text: add(&label, font),
+                            value,
+                            min,
+                            max,
+                        },
                         Item::Action { id, label, checked } => Entry::Action {
                             id,
                             text: add(&label, font),
@@ -473,7 +748,7 @@ fn text_width(entries: &[Entry], texts: &[Text], scale: f32, child: bool) -> f32
     entries
         .iter()
         .map(|e| match e {
-            Entry::Action { text, .. } | Entry::Label { text } => {
+            Entry::Action { text, .. } | Entry::Label { text } | Entry::Slider { text, .. } => {
                 texts[*text].w / scale + indent + 2.0 * (PAD + TEXT_X) + RIGHT
             }
             Entry::Separator => 0.0,
@@ -493,6 +768,7 @@ fn relayout(st: &mut State) {
         let h = match kind {
             RowKind::Separator => SEPARATOR_H,
             RowKind::Label => LABEL_H,
+            RowKind::Slider { .. } => SLIDER_H,
             _ => ROW_H,
         };
         rows.push(Row {
@@ -506,6 +782,23 @@ fn relayout(st: &mut State) {
     };
     for (index, e) in st.entries.iter().enumerate() {
         match e {
+            Entry::Slider {
+                id,
+                text,
+                value,
+                min,
+                max,
+            } => push(
+                RowKind::Slider {
+                    id: *id,
+                    value: *value,
+                    min: *min,
+                    max: *max,
+                },
+                Some(*text),
+                false,
+                &mut rows,
+            ),
             Entry::Action { id, text, checked } => push(
                 RowKind::Action {
                     id: *id,
@@ -528,6 +821,23 @@ fn relayout(st: &mut State) {
                 if open {
                     for c in children {
                         match c {
+                            Entry::Slider {
+                                id,
+                                text,
+                                value,
+                                min,
+                                max,
+                            } => push(
+                                RowKind::Slider {
+                                    id: *id,
+                                    value: *value,
+                                    min: *min,
+                                    max: *max,
+                                },
+                                Some(*text),
+                                true,
+                                &mut rows,
+                            ),
                             Entry::Action { id, text, checked } => push(
                                 RowKind::Action {
                                     id: *id,
@@ -618,6 +928,48 @@ fn render(st: &mut State) {
                     );
                 }
                 let cx = w - (PAD + RIGHT / 2.0) * s;
+                if let RowKind::Slider {
+                    value, min, max, ..
+                } = kind
+                {
+                    let (left, right) = slider_track(st.width, row.child);
+                    let left = left * s;
+                    let right = right * s;
+                    let cy = y0 + rh - 14.0 * s;
+                    let fraction =
+                        value.saturating_sub(min) as f32 / max.saturating_sub(min).max(1) as f32;
+                    let thumb = left + (right - left) * fraction.clamp(0.0, 1.0);
+                    paint.set_color_rgba8(255, 255, 255, 50);
+                    fill_rounded_rect(
+                        pixmap,
+                        &paint,
+                        left,
+                        cy - 2.0 * s,
+                        right - left,
+                        4.0 * s,
+                        2.0 * s,
+                    );
+                    paint.set_color_rgba8(10, 132, 255, 255);
+                    fill_rounded_rect(
+                        pixmap,
+                        &paint,
+                        left,
+                        cy - 2.0 * s,
+                        thumb - left,
+                        4.0 * s,
+                        2.0 * s,
+                    );
+                    paint.set_color_rgba8(255, 255, 255, 255);
+                    fill_rounded_rect(
+                        pixmap,
+                        &paint,
+                        thumb - 5.0 * s,
+                        cy - 5.0 * s,
+                        10.0 * s,
+                        10.0 * s,
+                        5.0 * s,
+                    );
+                }
                 let mut pb = PathBuilder::new();
                 match kind {
                     RowKind::Action { checked: true, .. } => {
@@ -662,7 +1014,11 @@ fn render(st: &mut State) {
                 };
                 let indent = if row.child { CHILD_INDENT } else { 0.0 };
                 let x = (PAD + TEXT_X + indent) * s;
-                let y = row.y * s + (row.h * s - text.h) / 2.0;
+                let y = if matches!(row.kind, RowKind::Slider { .. }) {
+                    row.y * s + 6.0 * s
+                } else {
+                    row.y * s + (row.h * s - text.h) / 2.0
+                };
                 let gray = matches!(row.kind, RowKind::Label);
                 let c = if gray { 0.6 } else { 1.0 };
                 let color = D2D1_COLOR_F {
@@ -692,11 +1048,10 @@ fn render(st: &mut State) {
             let _ = st.target.EndDraw(None, None);
         }
 
-        let t = st.opened.elapsed().as_secs_f32() / FADE_SECS;
         let blend = BLENDFUNCTION {
             BlendOp: AC_SRC_OVER as u8,
             BlendFlags: 0,
-            SourceConstantAlpha: (t.clamp(0.0, 1.0) * 255.0) as u8,
+            SourceConstantAlpha: 255,
             AlphaFormat: AC_SRC_ALPHA as u8,
         };
         let size = SIZE {
@@ -726,25 +1081,66 @@ fn row_at(st: &State, y: f32) -> Option<usize> {
         .filter(|&i| st.rows[i].kind.selectable())
 }
 
+fn slider_track(width: f32, child: bool) -> (f32, f32) {
+    (
+        PAD + TEXT_X + if child { CHILD_INDENT } else { 0.0 },
+        width - PAD - TEXT_X,
+    )
+}
+
+fn slider_value(x: f32, left: f32, right: f32, min: u32, max: u32) -> u32 {
+    let fraction = ((x - left) / (right - left).max(1.0)).clamp(0.0, 1.0);
+    min + (fraction * max.saturating_sub(min) as f32).round() as u32
+}
+
+fn update_slider(st: &mut State, x: f32) {
+    let Some(id) = st.dragging_slider else { return };
+    let Some(row) = st
+        .rows
+        .iter()
+        .find(|row| matches!(row.kind, RowKind::Slider { id: slider_id, .. } if slider_id == id))
+    else {
+        return;
+    };
+    if let RowKind::Slider {
+        value, min, max, ..
+    } = row.kind
+    {
+        let (left, right) = slider_track(st.width, row.child);
+        let next = slider_value(x / st.scale, left, right, min, max);
+        if next != value {
+            dispatch(st, id + next as usize);
+        }
+    }
+}
+
+fn dispatch(st: &mut State, id: usize) {
+    let action = HANDLER.with(|cell| {
+        if let Some((ptr, invoke)) = cell.get() {
+            unsafe { invoke(ptr, id) }
+        } else {
+            MenuAction::Close
+        }
+    });
+    match action {
+        MenuAction::Close => st.done = Some(Some(id)),
+        MenuAction::KeepOpen(items) => st.update_items(items),
+        MenuAction::UpdateSlider {
+            id,
+            value,
+            label,
+            checked,
+        } => {
+            st.update_slider_item(id, value, &label, checked);
+        }
+    }
+}
+
 /// Elige la fila `i`: una opción termina el menú o lo mantiene abierto según `MenuAction`; un grupo se despliega o se pliega.
 fn activate(st: &mut State, i: usize) {
     match st.rows.get(i).map(|r| r.kind) {
         Some(RowKind::Action { id, .. }) => {
-            let action = HANDLER.with(|cell| {
-                if let Some((ptr, invoke)) = cell.get() {
-                    unsafe { invoke(ptr, id) }
-                } else {
-                    MenuAction::Close
-                }
-            });
-            match action {
-                MenuAction::Close => {
-                    st.done = Some(Some(id));
-                }
-                MenuAction::KeepOpen(items) => {
-                    st.update_items(items);
-                }
-            }
+            dispatch(st, id);
         }
         Some(RowKind::Group { index, .. }) => {
             st.open[index] = !st.open[index];
@@ -773,10 +1169,59 @@ fn step(st: &mut State, dir: i32) {
 }
 
 extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    let deferrable = matches!(
+        msg,
+        WM_MOUSEMOVE
+            | 0x02A3
+            | WM_LBUTTONDOWN
+            | WM_LBUTTONUP
+            | WM_RBUTTONUP
+            | WM_KEYDOWN
+            | WM_CAPTURECHANGED
+            | WM_ACTIVATE
+            | WM_CLOSE
+            | WM_TIMER
+    );
+    if deferrable && STATE.with(|state| state.try_borrow_mut().is_err()) {
+        crate::ui::defer(wndproc, hwnd, msg, wparam, lparam);
+        return LRESULT(0);
+    }
     match msg {
+        WM_MOUSEACTIVATE if MENU_FOCUS.load(Ordering::SeqCst) != 0 => {
+            LRESULT(MA_NOACTIVATE as isize)
+        }
+        WM_TIMER if wparam.0 == FOCUS_TIMER => {
+            let focus = HWND(MENU_FOCUS.load(Ordering::SeqCst) as _);
+            if !focus.is_invalid() && !foreground_is(focus) {
+                with_state(|st| st.done = Some(None));
+            }
+            LRESULT(0)
+        }
+        WM_TIMER if wparam.0 == SLIDER_TIMER => {
+            unsafe {
+                let _ = KillTimer(Some(hwnd), SLIDER_TIMER);
+            }
+            with_state(|st| {
+                if let Some(x) = st.pending_slider.take() {
+                    update_slider(st, x);
+                }
+            });
+            LRESULT(0)
+        }
         WM_MOUSEMOVE => {
+            let x = (lparam.0 & 0xFFFF) as u16 as i16 as f32;
             let y = ((lparam.0 >> 16) & 0xFFFF) as u16 as i16 as f32;
             with_state(|st| {
+                if st.dragging_slider.is_some() {
+                    // La vista previa consume el movimiento más reciente por cuadro,
+                    // incluso si el mouse envía cientos de eventos por segundo.
+                    if st.pending_slider.replace(x).is_none() {
+                        unsafe {
+                            SetTimer(Some(hwnd), SLIDER_TIMER, 16, None);
+                        }
+                    }
+                    return;
+                }
                 if !st.tracking {
                     let mut tme = TRACKMOUSEEVENT {
                         cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
@@ -797,6 +1242,34 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             });
             LRESULT(0)
         }
+        WM_LBUTTONDOWN => {
+            let x = (lparam.0 & 0xFFFF) as u16 as i16 as f32;
+            let y = ((lparam.0 >> 16) & 0xFFFF) as u16 as i16 as f32;
+            with_state(|st| {
+                if let Some(RowKind::Slider { id, .. }) = row_at(st, y).map(|i| st.rows[i].kind) {
+                    st.dragging_slider = Some(id);
+                    SLIDER_CAPTURE.store(MENU_FOCUS.load(Ordering::SeqCst) != 0, Ordering::SeqCst);
+                    unsafe {
+                        SetCapture(hwnd);
+                    }
+                    update_slider(st, x);
+                }
+            });
+            LRESULT(0)
+        }
+        WM_CAPTURECHANGED => {
+            SLIDER_CAPTURE.store(false, Ordering::SeqCst);
+            unsafe {
+                let _ = KillTimer(Some(hwnd), SLIDER_TIMER);
+            }
+            with_state(|st| {
+                if let Some(x) = st.pending_slider.take() {
+                    update_slider(st, x);
+                }
+                st.dragging_slider = None;
+            });
+            LRESULT(0)
+        }
         // WM_MOUSELEAVE
         0x02A3 => {
             with_state(|st| {
@@ -809,8 +1282,22 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             LRESULT(0)
         }
         WM_LBUTTONUP | WM_RBUTTONUP => {
+            let x = (lparam.0 & 0xFFFF) as u16 as i16 as f32;
             let y = ((lparam.0 >> 16) & 0xFFFF) as u16 as i16 as f32;
             with_state(|st| {
+                if st.dragging_slider.is_some() {
+                    st.pending_slider = None;
+                    unsafe {
+                        let _ = KillTimer(Some(hwnd), SLIDER_TIMER);
+                    }
+                    update_slider(st, x);
+                    st.dragging_slider = None;
+                    SLIDER_CAPTURE.store(false, Ordering::SeqCst);
+                    unsafe {
+                        let _ = ReleaseCapture();
+                    }
+                    return;
+                }
                 if let Some(i) = row_at(st, y) {
                     activate(st, i);
                 }
@@ -830,6 +1317,23 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 }
                 // Derecha despliega el grupo seleccionado; izquierda lo pliega.
                 k if k == VK_RIGHT.0 || k == VK_LEFT.0 => {
+                    if let Some(RowKind::Slider {
+                        id,
+                        value,
+                        min,
+                        max,
+                    }) = st.hover.and_then(|i| st.rows.get(i)).map(|r| r.kind)
+                    {
+                        let next = if k == VK_RIGHT.0 {
+                            value.saturating_add(1).min(max)
+                        } else {
+                            value.saturating_sub(1).max(min)
+                        };
+                        if next != value {
+                            dispatch(st, id + next as usize);
+                        }
+                        return;
+                    }
                     if let Some(RowKind::Group { open, .. }) =
                         st.hover.and_then(|i| st.rows.get(i)).map(|r| r.kind)
                     {
@@ -844,24 +1348,15 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             });
             LRESULT(0)
         }
-        WM_TIMER if wparam.0 == FADE_TIMER => {
-            with_state(|st| {
-                render(st);
-                if st.opened.elapsed().as_secs_f32() >= FADE_SECS {
-                    unsafe {
-                        let _ = KillTimer(Some(hwnd), FADE_TIMER);
-                    }
-                }
-            });
-            LRESULT(0)
-        }
         // Otra ventana pasó al frente (Alt+Tab, clic en otra app): se cierra.
         WM_ACTIVATE if (wparam.0 & 0xFFFF) as u32 == WA_INACTIVE => {
-            with_state(|st| st.done = Some(None));
+            if MENU_FOCUS.load(Ordering::SeqCst) == 0 {
+                with_state(|st| st.done = Some(None));
+            }
             LRESULT(0)
         }
         // Lo manda el gancho de mouse al hacer clic fuera.
-        WM_CLOSE => {
+        WM_CLOSE | WM_DESTROY => {
             with_state(|st| st.done = Some(None));
             LRESULT(0)
         }
@@ -877,6 +1372,29 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
         WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN
     );
     let menu = MENU_HWND.load(Ordering::SeqCst);
+    if code >= 0
+        && menu != 0
+        && SLIDER_CAPTURE.load(Ordering::SeqCst)
+        && matches!(wparam.0 as u32, WM_MOUSEMOVE | WM_LBUTTONUP)
+    {
+        let hwnd = HWND(menu as _);
+        let info = unsafe { &*(lparam.0 as *const MSLLHOOKSTRUCT) };
+        let mut rect = RECT::default();
+        unsafe {
+            if GetWindowRect(hwnd, &mut rect).is_ok() {
+                let x = (info.pt.x - rect.left) as i16 as u16 as usize;
+                let y = (info.pt.y - rect.top) as i16 as u16 as usize;
+                let down = usize::from(wparam.0 as u32 == WM_MOUSEMOVE);
+                let _ = PostMessageW(
+                    Some(hwnd),
+                    wparam.0 as u32,
+                    WPARAM(down),
+                    LPARAM((x | (y << 16)) as isize),
+                );
+                return LRESULT(1);
+            }
+        }
+    }
     if code >= 0 && down && menu != 0 {
         let hwnd = HWND(menu as _);
         let info = unsafe { &*(lparam.0 as *const MSLLHOOKSTRUCT) };
@@ -893,4 +1411,218 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
         }
     }
     unsafe { CallNextHookEx(None, code, wparam, lparam) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deslizador_respeta_limites_y_coordenadas_fuera_de_la_barra() {
+        assert_eq!(slider_value(-100.0, 30.0, 230.0, 0, 40), 0);
+        assert_eq!(slider_value(130.0, 30.0, 230.0, 0, 40), 20);
+        assert_eq!(slider_value(500.0, 30.0, 230.0, 0, 40), 40);
+        // La misma posición física debe elegir el mismo valor a cualquier escala DPI.
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            assert_eq!(
+                slider_value((130.0 * scale) / scale, 30.0, 230.0, 0, 40),
+                20
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "abre un menú de prueba para verificar clics y arrastre en la misma ventana"]
+    fn cambiar_opciones_y_arrastrar_no_recrea_el_menu() {
+        use std::time::{Duration, Instant};
+        use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
+        use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
+        use windows::Win32::UI::HiDpi::GetDpiForWindow;
+        use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
+        use windows::Win32::UI::WindowsAndMessaging::{IsWindowVisible, SendMessageW};
+        fn activate_for_test(window: HWND) {
+            if foreground_is(window) {
+                return;
+            }
+            unsafe {
+                let current = GetCurrentThreadId();
+                let foreground = GetWindowThreadProcessId(GetForegroundWindow(), None);
+                // El test no nace de un clic real en la bandeja; prepara ese mismo foco.
+                let attached =
+                    foreground != current && AttachThreadInput(current, foreground, true).as_bool();
+                let _ = SetForegroundWindow(window);
+                if attached {
+                    let _ = AttachThreadInput(current, foreground, false);
+                }
+                if !foreground_is(window) {
+                    use windows::Win32::UI::Input::KeyboardAndMouse::{
+                        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
+                        VK_MENU,
+                    };
+                    let keys = [Default::default(), KEYEVENTF_KEYUP].map(|flags| INPUT {
+                        r#type: INPUT_KEYBOARD,
+                        Anonymous: INPUT_0 {
+                            ki: KEYBDINPUT {
+                                wVk: VK_MENU,
+                                dwFlags: flags,
+                                ..Default::default()
+                            },
+                        },
+                    });
+                    SendInput(&keys, std::mem::size_of::<INPUT>() as i32);
+                    let _ = SetForegroundWindow(window);
+                }
+            }
+        }
+        struct Restore(HWND);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                activate_for_test(self.0);
+            }
+        }
+        let _restore = Restore(unsafe { GetForegroundWindow() });
+        unsafe {
+            CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok().unwrap();
+            let mut anchor = POINT::default();
+            GetCursorPos(&mut anchor).unwrap();
+            activate_for_test(taskbar_at(anchor).expect("barra de tareas"));
+        }
+        let driver = std::thread::spawn(|| {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            let hwnd = loop {
+                let hwnd = HWND(MENU_HWND.load(Ordering::SeqCst) as _);
+                if !hwnd.is_invalid() && unsafe { IsWindowVisible(hwnd).as_bool() } {
+                    break hwnd;
+                }
+                assert!(Instant::now() < deadline, "el menú debe abrirse");
+                std::thread::sleep(Duration::from_millis(10));
+            };
+            struct Close(HWND);
+            impl Drop for Close {
+                fn drop(&mut self) {
+                    unsafe {
+                        let _ = PostMessageW(Some(self.0), WM_CLOSE, WPARAM(0), LPARAM(0));
+                    }
+                }
+            }
+            let _close = Close(hwnd);
+            let shell = HWND(MENU_FOCUS.load(Ordering::SeqCst) as _);
+            assert!(
+                !shell.is_invalid(),
+                "el menú de bandeja debe conservar el foco en Explorer"
+            );
+            assert!(foreground_is(shell));
+            assert_eq!(
+                unsafe { SendMessageW(hwnd, WM_MOUSEACTIVATE, None, None) }.0,
+                MA_NOACTIVATE as isize
+            );
+            let s = unsafe { GetDpiForWindow(hwnd) } as f32 / 96.0;
+            let point =
+                |x: f32, y: f32| LPARAM(((x * s) as u32 | (((y * s) as u32) << 16)) as isize);
+            std::thread::sleep(Duration::from_millis(150));
+            for _ in 0..2 {
+                unsafe {
+                    SendMessageW(
+                        hwnd,
+                        WM_LBUTTONUP,
+                        Some(WPARAM(0)),
+                        Some(point(40.0, PAD + ROW_H / 2.0)),
+                    );
+                }
+                assert_eq!(MENU_HWND.load(Ordering::SeqCst), hwnd.0 as isize);
+            }
+            let y = PAD + ROW_H + SLIDER_H / 2.0;
+            unsafe {
+                SendMessageW(hwnd, WM_LBUTTONDOWN, Some(WPARAM(1)), Some(point(60.0, y)));
+                let mut rect = RECT::default();
+                GetWindowRect(hwnd, &mut rect).unwrap();
+                let info = MSLLHOOKSTRUCT {
+                    pt: POINT {
+                        x: rect.right + 100,
+                        y: rect.top + (y * s) as i32,
+                    },
+                    ..Default::default()
+                };
+                let info = LPARAM((&info as *const MSLLHOOKSTRUCT) as isize);
+                assert_eq!(mouse_hook(0, WPARAM(WM_MOUSEMOVE as usize), info).0, 1);
+                assert_eq!(mouse_hook(0, WPARAM(WM_LBUTTONUP as usize), info).0, 1);
+                // Navegación por teclado encaminada al menú sin activar su ventana.
+                for key in [VK_DOWN, VK_RETURN] {
+                    let info = KBDLLHOOKSTRUCT {
+                        vkCode: key.0 as u32,
+                        ..Default::default()
+                    };
+                    assert_eq!(
+                        keyboard_hook(
+                            0,
+                            WPARAM(WM_KEYDOWN as usize),
+                            LPARAM((&info as *const KBDLLHOOKSTRUCT) as isize)
+                        )
+                        .0,
+                        1
+                    );
+                }
+            }
+            std::thread::sleep(Duration::from_secs(3));
+            if foreground_is(shell) {
+                assert_eq!(MENU_HWND.load(Ordering::SeqCst), hwnd.0 as isize);
+            } else {
+                assert_eq!(
+                    MENU_HWND.load(Ordering::SeqCst),
+                    0,
+                    "cerrar al pasar a otra aplicación"
+                );
+            }
+        });
+        let mut toggles = 0;
+        let mut value = 16;
+        let items = |checked, value| {
+            vec![
+                Item::Action {
+                    id: 1,
+                    label: "Prueba".into(),
+                    checked,
+                },
+                Item::Slider {
+                    id: 500,
+                    label: format!("Intensidad: {value}"),
+                    value,
+                    min: 0,
+                    max: 40,
+                },
+            ]
+        };
+        show_tray(items(false, value), |id| {
+            if id == 1 {
+                toggles += 1;
+                if toggles == 1 {
+                    // Windows puede despachar otro clic dentro de una llamada COM del
+                    // callback. Debe esperar a que se libere State, no desaparecer.
+                    let hwnd = HWND(MENU_HWND.load(Ordering::SeqCst) as _);
+                    let s = unsafe { GetDpiForWindow(hwnd) } as f32 / 96.0;
+                    let y = ((PAD + ROW_H / 2.0) * s) as u32;
+                    unsafe {
+                        SendMessageW(
+                            hwnd,
+                            WM_LBUTTONUP,
+                            Some(WPARAM(0)),
+                            Some(LPARAM(((y << 16) | (40.0 * s) as u32) as isize)),
+                        );
+                    }
+                }
+            } else {
+                value = (id - 500) as u32;
+                return MenuAction::UpdateSlider {
+                    id: 500,
+                    value,
+                    label: format!("Intensidad: {value}"),
+                    checked: Some((1, toggles % 2 != 0)),
+                };
+            }
+            MenuAction::KeepOpen(items(toggles % 2 != 0, value))
+        });
+        driver.join().unwrap();
+        assert_eq!(toggles, 4);
+        assert_eq!(value, 40);
+    }
 }

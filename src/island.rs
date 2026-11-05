@@ -366,6 +366,19 @@ fn geometry(
     }
 }
 
+/// Contorno exacto para recortar el fondo compuesto, sin incluir controles ni márgenes.
+pub fn backdrop_geometry(
+    max_w: f32,
+    max_h: f32,
+    scale: f32,
+    p: f32,
+    presence: f32,
+    shape: (f32, f32),
+) -> (f32, f32, f32, f32, f32) {
+    let g = geometry(max_w, max_h, scale, p, presence, shape);
+    (g.x0, g.y0, g.w, g.h, g.r)
+}
+
 /// Tamaño lógico de la isla expandida (ancho, alto) para `shape` = (`lyrics_p`, `notice_p`).
 fn expanded_size((lyrics_p, notice_p): (f32, f32)) -> (f32, f32) {
     let lyrics_p = lyrics_p.clamp(-0.1, 1.15);
@@ -554,10 +567,9 @@ pub fn draw(
         ..Default::default()
     };
 
-    // Cuadro flotante: rectángulo negro u oscuro translúcido con efecto acrílico y borde sutil
+    // Tinte sobre el fondo desenfocado del compositor; opaco si no está disponible.
     if translucent {
-        // Fondo translúcido ahumado (estilo Fluent / Acrylic oscuro de Windows 11)
-        paint.set_color_rgba8(20, 20, 24, 185);
+        paint.set_color_rgba8(20, 20, 24, 100);
         fill_rounded_rect(pixmap, &paint, g.x0, g.y0, g.w, g.h, g.r);
         // Borde translúcido sutil que define los bordes sobre cualquier fondo
         paint.set_color_rgba8(255, 255, 255, 34);

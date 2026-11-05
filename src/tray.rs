@@ -45,6 +45,8 @@ const CMD_LYRICS_PROJECTOR: usize = 13;
 const CMD_CENTER: usize = 14;
 const CMD_HIGH_REFRESH: usize = 15;
 const CMD_TRANSLUCENT: usize = 16;
+const CMD_EXPAND_ON_HOVER: usize = 17;
+const CMD_PIN_EXPANDED: usize = 18;
 /// Las opciones de los submenús van numeradas a partir de estas bases.
 const CMD_HIDE_DELAY: usize = 100;
 const CMD_MONITOR: usize = 200;
@@ -52,6 +54,7 @@ const CMD_TIMER: usize = 300;
 /// Menú de salida de audio de la isla.
 const CMD_OUTPUT_DEFAULT: usize = 400;
 const CMD_OUTPUT: usize = 401;
+const CMD_BLUR_RADIUS: usize = 500;
 
 /// Duraciones del temporizador en minutos.
 pub const TIMER_MINUTES: [u32; 6] = [5, 10, 15, 25, 45, 60];
@@ -83,13 +86,15 @@ pub enum Command {
     Center,
     /// Alternar adaptación de animaciones a los Hz del monitor.
     ToggleHighRefresh,
-    /// Alternar fondo translúcido estilo acrílico.
+    /// Alternar desenfoque real del fondo.
     ToggleTranslucent,
+    ToggleExpandOnHover,
+    BlurRadius(u32),
 }
 
 /// Lo que el menú necesita saber para marcar las opciones actuales.
 pub struct MenuState<'a> {
-    /// Texto de la opción de actualizar, si hay una versión nueva; va arriba de todo.
+    /// Texto de la opción de actualizar, si hay una versión nueva.
     pub update: Option<&'a str>,
     pub settings: Settings,
     pub monitors: &'a [Monitor],
@@ -190,7 +195,10 @@ pub fn build_items(state: &MenuState) -> Vec<Item> {
         label: label.to_string(),
         checked,
     };
-    let mut items = Vec::new();
+    let mut items = vec![
+        Item::Label(format!("Notch Isla v{}", env!("CARGO_PKG_VERSION"))),
+        Item::Separator,
+    ];
     if let Some(label) = state.update {
         items.push(action(CMD_UPDATE, label, false));
         items.push(Item::Separator);
@@ -276,15 +284,31 @@ pub fn build_items(state: &MenuState) -> Vec<Item> {
         "Adaptar animaciones a los Hz de la pantalla",
         settings.high_refresh,
     ));
-    items.push(action(
+    let mut blur = vec![action(
         CMD_TRANSLUCENT,
-        "Fondo translúcido",
+        "Activar desenfoque",
         settings.translucent,
-    ));
+    )];
+    blur.push(Item::Slider {
+        id: CMD_BLUR_RADIUS,
+        label: format!("Intensidad: {} %", settings.blur_radius * 100 / 40),
+        value: settings.blur_radius,
+        min: 0,
+        max: 40,
+    });
+    items.push(Item::Group {
+        label: "Desenfoque del fondo".to_string(),
+        items: blur,
+    });
     items.push(action(
         CMD_CENTER,
         "Centrar en la pantalla",
         settings.offset_x == 0,
+    ));
+    items.push(action(
+        CMD_EXPAND_ON_HOVER,
+        "Expandir al pasar el puntero",
+        settings.expand_on_hover,
     ));
     items.push(action(
         CMD_AUTOSTART,
@@ -331,11 +355,14 @@ fn id_to_command(id: usize, state: &MenuState) -> Option<Command> {
         CMD_CENTER => Some(Command::Center),
         CMD_HIGH_REFRESH => Some(Command::ToggleHighRefresh),
         CMD_TRANSLUCENT => Some(Command::ToggleTranslucent),
+        CMD_EXPAND_ON_HOVER => Some(Command::ToggleExpandOnHover),
         CMD_HOTKEY_CHANGE => Some(Command::ChangeHotkey),
         CMD_HOTKEY_DEFAULT => Some(Command::SetHotkey(Some(hotkey::DEFAULT))),
         CMD_HOTKEY_OFF => Some(Command::SetHotkey(None)),
         _ => {
-            if let Some(i) = pick(CMD_HIDE_DELAY, HIDE_DELAYS.len()) {
+            if let Some(i) = pick(CMD_BLUR_RADIUS, 41) {
+                Some(Command::BlurRadius(i as u32))
+            } else if let Some(i) = pick(CMD_HIDE_DELAY, HIDE_DELAYS.len()) {
                 Some(Command::HideDelay(HIDE_DELAYS[i]))
             } else if let Some(i) = pick(CMD_MONITOR, state.monitors.len()) {
                 Some(Command::Monitor(i))
@@ -354,25 +381,40 @@ where
     F: FnMut(Command, &mut Settings) -> bool,
 {
     let items = build_items(&state);
-    menu::show_interactive(items, move |id| {
+    let mut appearance_changed = false;
+    menu::show_tray(items, |id| {
         let Some(cmd) = id_to_command(id, &state) else {
             return menu::MenuAction::Close;
         };
         let mut settings = state.settings.clone();
+        let blur_changed = matches!(&cmd, Command::BlurRadius(_));
         let keep_open = on_command(cmd, &mut settings);
         if keep_open {
             state.settings = settings;
+            if blur_changed {
+                appearance_changed = true;
+                return menu::MenuAction::UpdateSlider {
+                    id: CMD_BLUR_RADIUS,
+                    value: state.settings.blur_radius,
+                    label: format!("Intensidad: {} %", state.settings.blur_radius * 100 / 40),
+                    checked: Some((CMD_TRANSLUCENT, state.settings.translucent)),
+                };
+            }
             let new_items = build_items(&state);
             menu::MenuAction::KeepOpen(new_items)
         } else {
             menu::MenuAction::Close
         }
     });
+    if appearance_changed {
+        state.settings.save_appearance();
+    }
 }
 
 pub enum IslandMenuChoice {
     Output(Option<usize>),
     Center,
+    TogglePinnedExpanded,
 }
 
 /// Menú contextual sobre la isla: opciones de salida de audio y centrar en la pantalla.
@@ -382,8 +424,15 @@ pub fn show_island_menu(
     current: Option<&str>,
     unavailable: Option<&str>,
     is_centered: bool,
+    pinned_expanded: bool,
 ) -> Option<IslandMenuChoice> {
     let mut items = Vec::new();
+    items.push(Item::Action {
+        id: CMD_PIN_EXPANDED,
+        label: "Fijar versión extendida".to_string(),
+        checked: pinned_expanded,
+    });
+    items.push(Item::Separator);
     if let Some(app) = app {
         items.push(Item::Label(format!("Salida de audio de {app}")));
         items.push(Item::Separator);
@@ -411,6 +460,7 @@ pub fn show_island_menu(
         checked: is_centered,
     });
     match menu::show(items)? {
+        CMD_PIN_EXPANDED => Some(IslandMenuChoice::TogglePinnedExpanded),
         CMD_CENTER => Some(IslandMenuChoice::Center),
         CMD_OUTPUT_DEFAULT => Some(IslandMenuChoice::Output(None)),
         id if (CMD_OUTPUT..CMD_OUTPUT + outputs.len()).contains(&id) => {

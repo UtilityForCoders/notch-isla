@@ -7,7 +7,7 @@ Objetivo: controlar la música que suena en el PC (Spotify, YouTube, etc.) desde
 
 | Paso | Qué hace | Estado |
 |---|---|---|
-| 1 | Píldora negra arriba al centro que se expande con rebote al pasar el mouse | Hecho |
+| 1 | Píldora arriba al centro que se expande con rebote al hacer clic | Hecho |
 | 2 | Leer la canción que suena (título, artista, carátula) vía SMTC | Hecho |
 | 3 | Controles: play/pausa, siguiente, anterior | Hecho |
 | 4 | Ícono en la bandeja, inicio con Windows, una sola instancia, ocultar en pantalla completa y sin música | Hecho |
@@ -21,11 +21,13 @@ Objetivo: controlar la música que suena en el PC (Spotify, YouTube, etc.) desde
 ## Ejecutar
 
 ```powershell
-cargo run            # modo debug (abre una consola para ver mensajes)
+cargo run            # desarrollo con renderizado optimizado y consola para mensajes
 cargo run --release  # versión optimizada, sin consola
 ```
 
 El ejecutable final queda en `target\release\notch-isla.exe`.
+
+El perfil de desarrollo conserva símbolos y comprobaciones de debug, con optimización de la app y sus dependencias para que el rasterizado no limite las animaciones. Para comparar la fluidez o medir el consumo final, usa `cargo run --release`.
 
 ### Instalador
 
@@ -51,7 +53,7 @@ cargo run --example icon
 - La isla aparece cuando alguna app reproduce música y se oculta si no hay nada o si una app está a pantalla completa.
 - Si no la usas, a los 3 s (se cambia en la bandeja) sube y se oculta para no tapar lo que hay debajo (pestañas del navegador, etc.). Queda una línea fina en el borde superior, con el avance de la canción en el color de la carátula; lleva el mouse a esa línea para traer la isla de vuelta. **Ctrl + Alt + N** la oculta o la trae en cualquier momento; el atajo se cambia o se desactiva en la bandeja (**Cambiar atajo...** espera la combinación que presiones: Ctrl, Alt o Win más una tecla).
 - Es una píldora flotante arriba al centro. Contraída muestra una mini carátula y barras de audio (con el color de la carátula) que siguen el sonido real de la app que suena: graves, medios y agudos. Se puede volver a la animación simple con **Barras con el sonido real** en la bandeja.
-- Pasa el mouse sobre la píldora para expandirla: en una sola fila, carátula, título, artista y los botones anterior / play-pausa / siguiente.
+- Haz clic sobre la píldora para expandirla: en una sola fila, carátula, título, artista y los botones anterior / play-pausa / siguiente. Ese primer clic solo abre los controles. Al retirar el puntero se encoge tras una breve espera. Si prefieres la apertura automática, activa **Expandir al pasar el puntero** en la bandeja.
 - En la esquina de la carátula, el ícono de la app que suena (Spotify, Chrome...). Si hay varias apps con música, unos puntos bajo la carátula lo indican y un clic en ella pasa a la siguiente.
 - Debajo, una barra de progreso con el color de la carátula; haz clic en ella para saltar a ese punto de la canción (si la app informa el tiempo).
 - Gira la rueda del mouse sobre la isla para subir o bajar el volumen de la app que suena (como en el Mezclador de volumen de Windows); con **Ctrl** apretado cambia el volumen general. La barra muestra el nivel un momento. Si no se encuentra el sonido de la app, la rueda cambia el volumen general. En los navegadores el volumen es el de todo el navegador, no el de una pestaña.
@@ -59,13 +61,17 @@ cargo run --example icon
 - **Letra sincronizada** (opcional): en la bandeja, **Mostrar letra de la canción** tiene dos opciones que se activan por separado. **Con la isla expandida** muestra la letra dentro de la isla como un carrusel que sube un verso cada vez que empieza el siguiente (también se activa con el botón de letra de la isla). **Con la isla encogida** muestra el verso que se canta en un "proyector" bajo la isla: una píldora negra que se ajusta al largo de cada verso, que aparece desvaneciéndose y que sigue a la isla (también cuando se oculta en el borde). Los clics la atraviesan, así que no tapa nada. La letra se pide a [LRCLIB](https://lrclib.net) una vez por canción (se envían título, artista, álbum y duración; ver [PRIVACY.md](PRIVACY.md)). Funciona con las apps que informan el avance de la canción, como Spotify.
 - Si el título o el artista no caben, se desplazan de un lado al otro.
 - **Salida de audio**: al cambiar a otra salida (audífonos, parlantes), la isla baja un momento con su nombre, aunque no haya música. Un clic cierra el aviso.
-- Clic derecho en el ícono de la bandeja:
+- Clic derecho en el ícono de la bandeja: abre el menú con el diseño de la isla y navegación por teclado. Permanece abierto al cambiar ajustes; se cierra con Esc o al hacer clic fuera.
   - **Ocultarse sola tras**: 3, 5, 10 o 30 segundos, o nunca.
   - **Pantalla**: en qué monitor va la isla (si hay más de uno).
   - **Temporizador**: de 5 a 60 minutos; al terminar suena y la isla avisa.
+  - **Desenfoque del fondo**: una barra permite ajustar la intensidad de 0 a 100 % en vivo, para la isla y la letra flotante. Arrástrala o usa las flechas izquierda y derecha con la barra seleccionada. La intensidad se guarda al cerrar el menú. Se puede desactivar para usar negro opaco. Windows compone el fondo en vivo; si el efecto no está disponible, se usa el fondo opaco.
+  - **Expandir al pasar el puntero**: permite volver al modo de apertura sin clic; desactivado por defecto para evitar expansiones accidentales.
   - **Avisar al cambiar la salida de audio**, **Ocultar en pantalla completa**, **Iniciar con Windows** y **Salir**.
   - Los ajustes se guardan en `HKEY_CURRENT_USER\Software\NotchIsla`.
 - Al minuto de abrirse y luego cada 6 horas, consulta en GitHub si hay una versión nueva (o al momento, con **Buscar actualizaciones** en la bandeja). Si la app está instalada, descarga el instalador en segundo plano, lo verifica (tamaño y SHA-256 publicados por GitHub) y avisa: un clic en el aviso, o en **Instalar la versión X** del menú de la bandeja, actualiza sin ventanas y la isla vuelve a abrirse sola. La isla avisa "Instalando la versión X" antes de cerrarse y, al volver, "Notch Isla se actualizó" o "No se pudo instalar la versión X". Si la instalación falla, un ayudante (una copia temporal de la app) vuelve a abrir la isla igual, así nunca queda cerrada sin aviso. La versión portable solo avisa y abre la página de descarga. Ver [PRIVACY.md](PRIVACY.md).
+
+Al pulsar **Instalar**, la isla vuelve a consultar el último release y prepara su instalador en segundo plano. Si se publicó otra versión después del aviso, instala esa versión más reciente. Si la consulta falla, no ejecuta el instalador anterior; si la descarga falla, abre la página del último release.
 
 ## Cómo está hecha
 
@@ -101,6 +107,20 @@ src/
 ├─ projector.rs   proyector de la letra bajo la isla (ventana que no recibe clics)
 ├─ update.rs      actualizaciones: último release en GitHub, descarga e instalación (WinHTTP)
 └─ fullscreen.rs  ocultar la isla cuando una app está a pantalla completa
+```
+
+## Medir rendimiento
+
+Con la isla abierta, ejecuta `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/medir-rendimiento.ps1 -Segundos 20 -IncluirGpu`. Muestra CPU, memoria y muestras de uso GPU de la isla y DWM. Agrega `-IdProceso <PID>` para elegir una copia concreta, por ejemplo la compilada localmente.
+
+Compara el mismo estado con desenfoque activado y desactivado. El uso de DWM incluye todo el escritorio; la suma de motores GPU puede superar el 100 %. Estas muestras no miden FPS ni tiempos de presentación. Sin contadores GPU disponibles, el script sigue midiendo CPU y memoria.
+
+Para medir la cadencia del renderizado real, la siguiente prueba muestra durante cinco segundos una isla de prueba que se expande y contrae con letra y desenfoque. Usa contenido local y publica el intervalo entre cuadros y el tiempo de dibujo; no mide la presentación final en GPU:
+
+```powershell
+$env:NOTCH_ANIMATION_BENCH = '1'
+cargo test --release stability_tests::isla_con_desenfoque_sigue_ocultandose_y_recibiendo_clics -- --ignored --exact --nocapture --test-threads=1
+Remove-Item Env:\NOTCH_ANIMATION_BENCH
 ```
 
 ## Compilación en GitHub Actions

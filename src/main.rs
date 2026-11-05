@@ -4,6 +4,8 @@
 mod appicon;
 mod audio;
 mod autostart;
+mod backdrop;
+mod frame_wait;
 mod fullscreen;
 mod hotkey;
 mod island;
@@ -15,15 +17,18 @@ mod projector;
 mod routing;
 mod settings;
 mod spring;
+#[cfg(test)]
+mod stability_tests;
 mod system;
 mod text;
 mod tray;
+mod ui;
 mod update;
 mod visualizer;
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -60,15 +65,16 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::Shell::NIN_BALLOONUSERCLICK;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetCursorPos, GetMessageW,
-    KillTimer, LoadCursorW, PostMessageW, PostQuitMessage, RegisterClassExW, SetTimer,
-    SetWindowPos, ShowWindow, TranslateMessage, UpdateLayeredWindow, UpdateLayeredWindowIndirect,
-    HWND_TOPMOST, IDC_ARROW, MA_NOACTIVATE, MB_ICONASTERISK, MSG, SWP_NOACTIVATE, SWP_NOMOVE,
-    SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOWNOACTIVATE, ULW_ALPHA,
-    UPDATELAYEREDWINDOWINFO, WM_APP, WM_CAPTURECHANGED, WM_CONTEXTMENU, WM_DESTROY,
-    WM_DISPLAYCHANGE, WM_DPICHANGED, WM_HOTKEY, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE,
-    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONUP, WM_TIMER, WNDCLASSEXW, WS_EX_LAYERED,
-    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    BeginDeferWindowPos, CreateWindowExW, DefWindowProcW, DeferWindowPos, DestroyWindow,
+    DispatchMessageW, EndDeferWindowPos, GetCursorPos, GetMessageW, KillTimer, LoadCursorW,
+    PostMessageW, PostQuitMessage, RegisterClassExW, SetTimer, SetWindowPos, ShowWindow,
+    TranslateMessage, UpdateLayeredWindow, UpdateLayeredWindowIndirect, CS_DBLCLKS, HWND_TOPMOST,
+    IDC_ARROW, MA_NOACTIVATE, MB_ICONASTERISK, MSG, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER,
+    SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOWNOACTIVATE, ULW_ALPHA, UPDATELAYEREDWINDOWINFO,
+    WM_APP, WM_CAPTURECHANGED, WM_CONTEXTMENU, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED,
+    WM_HOTKEY, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE,
+    WM_MOUSEWHEEL, WM_RBUTTONUP, WM_TIMER, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 /// Aviso de "el mouse salió de la ventana" (definido aquí para no cargar todo el módulo Win32_UI_Controls).
@@ -240,6 +246,7 @@ fn main() -> Result<()> {
         let class_name = w!("NotchIslaWindow");
         let wc = WNDCLASSEXW {
             cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+            style: CS_DBLCLKS,
             lpfnWndProc: Some(wndproc),
             hInstance: instance.into(),
             hCursor: LoadCursorW(None, IDC_ARROW)?,
@@ -296,6 +303,7 @@ fn main() -> Result<()> {
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
+            ui::promote_timers();
         }
 
         APP.with(|cell| cell.borrow_mut().take());
@@ -309,7 +317,7 @@ thread_local! {
 
 /// Ejecuta `f` con el estado de la app si está disponible (evita pánicos por reentrada).
 fn with_app(f: impl FnOnce(&mut App)) -> bool {
-    APP.with(|cell| match cell.try_borrow_mut() {
+    let ran = APP.with(|cell| match cell.try_borrow_mut() {
         Ok(mut guard) => match guard.as_mut() {
             Some(app) => {
                 f(app);
@@ -318,7 +326,11 @@ fn with_app(f: impl FnOnce(&mut App)) -> bool {
             None => false,
         },
         Err(_) => false,
-    })
+    });
+    if ran {
+        ui::flush();
+    }
+    ran
 }
 
 /// Estado del arrastre horizontal de la isla por la parte superior.
@@ -336,56 +348,80 @@ struct DragIsland {
 struct HighRefreshDriver {
     active: Arc<(Mutex<bool>, Condvar)>,
     pending: Arc<AtomicBool>,
+    interval_ns: Arc<AtomicU64>,
+    running: Arc<AtomicBool>,
 }
 
 impl HighRefreshDriver {
     fn new(hwnd: HWND) -> Self {
+        Self::with_sync(hwnd, || unsafe { monitors::DwmFlush().ok() })
+    }
+
+    fn with_sync(hwnd: HWND, sync: fn() -> Result<()>) -> Self {
         let active = Arc::new((Mutex::new(false), Condvar::new()));
         let pending = Arc::new(AtomicBool::new(false));
         let thread_active = Arc::clone(&active);
         let thread_pending = Arc::clone(&pending);
+        let interval_ns = Arc::new(AtomicU64::new(FRAME_MS as u64 * 1_000_000));
+        let thread_interval = Arc::clone(&interval_ns);
+        let running = Arc::new(AtomicBool::new(true));
+        let thread_running = Arc::clone(&running);
         let hwnd_raw = hwnd.0 as isize;
 
         std::thread::Builder::new()
             .name("notch-vsync".into())
             .spawn(move || {
                 let hwnd = HWND(hwnd_raw as *mut core::ffi::c_void);
+                let waiter = frame_wait::FrameWait::new();
+                let mut schedule = frame_wait::FrameSchedule::default();
                 loop {
                     // Duerme hasta que haya una animación que requiera alta tasa de refresco:
                     {
                         let (lock, cvar) = &*thread_active;
                         let mut is_active = lock.lock().unwrap();
-                        while !*is_active {
+                        while !*is_active && thread_running.load(Ordering::Acquire) {
+                            schedule.reset();
                             is_active = cvar.wait(is_active).unwrap();
+                        }
+                        if !thread_running.load(Ordering::Acquire) {
+                            return;
                         }
                     }
 
                     // Sincroniza con el refresco de pantalla del DWM (hardware VSync):
-                    unsafe {
-                        let res = monitors::DwmFlush();
-                        if res.is_err() {
-                            // Si DWM se suspende o falla (ej. juego en pantalla completa exclusiva),
-                            // dormimos brevemente para no saturar el hilo ni quemar CPU.
-                            std::thread::sleep(std::time::Duration::from_millis(15));
-                        }
+                    let synced = sync().is_ok();
+                    let interval =
+                        Duration::from_nanos(thread_interval.load(Ordering::Relaxed).max(1));
+                    waiter.wait(schedule.delay(Instant::now(), interval, synced));
+                    if !thread_running.load(Ordering::Acquire) {
+                        return;
                     }
 
                     let is_active = *thread_active.0.lock().unwrap();
                     if is_active && !thread_pending.swap(true, Ordering::SeqCst) {
                         unsafe {
-                            let _ = PostMessageW(
+                            if PostMessageW(
                                 Some(hwnd),
                                 WM_ANIM_TICK,
                                 windows::Win32::Foundation::WPARAM(0),
                                 windows::Win32::Foundation::LPARAM(0),
-                            );
+                            )
+                            .is_err()
+                            {
+                                return;
+                            }
                         }
                     }
                 }
             })
             .expect("iniciar hilo vsync");
 
-        Self { active, pending }
+        Self {
+            active,
+            pending,
+            interval_ns,
+            running,
+        }
     }
 
     fn set_active(&self, active: bool) {
@@ -404,6 +440,15 @@ impl HighRefreshDriver {
     }
 }
 
+impl Drop for HighRefreshDriver {
+    fn drop(&mut self) {
+        let mut active = self.active.0.lock().unwrap();
+        self.running.store(false, Ordering::Release);
+        *active = false;
+        self.active.1.notify_one();
+    }
+}
+
 struct App {
     hwnd: HWND,
     surface: Surface,
@@ -412,9 +457,13 @@ struct App {
     scale: f32,
     spring: Spring,
     hovered: bool,
+    expanded_by_click: bool,
+    /// Consume la liberación del segundo clic después de centrar la isla.
+    centering_double_click: bool,
     /// Intervalo del temporizador de animación, o `None` si está apagado (reposo).
     timer_ms: Option<u32>,
     last_tick: Instant,
+    last_vsync: Option<Instant>,
     /// Reloj de las barras de audio.
     started: Instant,
     /// Si DirectWrite fallara, la isla sigue funcionando sin texto.
@@ -478,6 +527,7 @@ struct App {
     countdown: Option<(Instant, u32)>,
     /// Actualización a instalar en cuanto termine el aviso "Instalando".
     installing: Option<update::Update>,
+    preparing_update: bool,
     /// El mouse acaba de salir: sigue expandida hasta que vence `COLLAPSE_TIMER`.
     lingering: bool,
     /// Letras ya consultadas, por canción (`lyrics::key`); vacía = esa canción no tiene.
@@ -489,6 +539,7 @@ struct App {
     /// Proyector de la letra bajo la isla. Se crea la primera vez que hay un verso que mostrar
     /// (con la letra apagada no ocupa memoria); si no se pudiera crear, la isla sigue igual.
     projector: Option<Projector>,
+    backdrop: Option<backdrop::Backdrop>,
     /// Escucha el audio de la app que suena para las barras reales.
     visualizer: Visualizer,
     /// Frecuencia de refresco de la pantalla actual en Hz (60, 120, 240, etc.).
@@ -513,8 +564,11 @@ impl App {
             scale,
             spring: Spring::new(0.0, EXPAND_SPRING.0, EXPAND_SPRING.1),
             hovered: false,
+            expanded_by_click: false,
+            centering_double_click: false,
             timer_ms: None,
             last_tick: Instant::now(),
+            last_vsync: None,
             started: Instant::now(),
             text: TextRenderer::new(scale).ok(),
             media: None,
@@ -548,11 +602,13 @@ impl App {
             audio_device: None,
             countdown: None,
             installing: None,
+            preparing_update: false,
             lingering: false,
             lyrics: HashMap::new(),
             lyrics_pending: HashSet::new(),
             lyric_slide: None,
             projector: None,
+            backdrop: backdrop::Backdrop::new().ok(),
             visualizer: Visualizer::default(),
             hz: monitors::refresh_rate(monitor),
             high_refresh_driver: HighRefreshDriver::new(hwnd),
@@ -693,6 +749,23 @@ impl App {
         }
     }
 
+    fn prepare_update_install(&mut self) {
+        if self.preparing_update || self.installing.is_some() {
+            return;
+        }
+        self.preparing_update = true;
+        self.announce(
+            Notice {
+                icon: NoticeIcon::Installing,
+                color: BLUE,
+            },
+            "Preparando actualización",
+            "Comprobando y descargando la última versión...",
+            NOTICE_UPDATE_MS,
+        );
+        update::prepare_install(self.hwnd);
+    }
+
     /// Al abrirse tras una actualización: avisa si quedó instalada la versión nueva o no.
     fn install_result(&mut self, ok: bool, version: &str) {
         if ok {
@@ -810,9 +883,13 @@ impl App {
         }
     }
 
-    /// Expandida mientras el mouse está encima o hay un aviso.
+    /// El puntero solo expande si se eligió ese modo; un clic abre los controles.
     fn update_expansion(&mut self) {
-        let expand = self.visible && (self.hovered || self.lingering || self.notice.is_some());
+        let requested = self.expanded_by_click || self.settings.expand_on_hover;
+        let expand = self.visible
+            && (self.notice.is_some()
+                || self.settings.pinned_expanded
+                || (requested && (self.hovered || self.lingering)));
         self.aim_expansion(expand);
     }
 
@@ -1010,7 +1087,7 @@ impl App {
     /// (Re)inicia la cuenta para ocultarse; se cancela mientras el mouse esté encima.
     fn start_idle_countdown(&mut self) {
         let secs = self.settings.hide_delay;
-        if secs == 0 {
+        if secs == 0 || self.settings.pinned_expanded {
             self.stop_idle_countdown();
             return;
         }
@@ -1029,14 +1106,14 @@ impl App {
     fn idle_hide(&mut self) {
         self.stop_idle_countdown();
         // Con un aviso en pantalla espera: la cuenta vuelve a empezar cuando el aviso termina.
-        if self.hovered || !self.visible || self.notice.is_some() {
+        if self.hovered || !self.visible || self.notice.is_some() || self.settings.pinned_expanded {
             return;
         }
         self.idle_hidden = true;
         self.update_visibility();
     }
 
-    /// El mouse tocó la franja del borde: la isla baja (contraída) y vuelve a contar.
+    /// Restaura la isla desde la franja del borde y vuelve a contar.
     fn reveal(&mut self) {
         if !self.idle_hidden {
             return;
@@ -1085,6 +1162,14 @@ impl App {
         }
     }
 
+    fn frame_interval(&self) -> Duration {
+        if self.settings.high_refresh && self.hz > 60 {
+            Duration::from_nanos(1_000_000_000 / self.hz as u64)
+        } else {
+            Duration::from_millis(FRAME_MS as u64)
+        }
+    }
+
     /// Redibuja fuera de la animación; si algo quedó moviéndose, arranca el temporizador.
     /// Si ya está corriendo, `tick` ajusta el intervalo en el siguiente cuadro.
     fn redraw(&mut self) {
@@ -1099,6 +1184,10 @@ impl App {
 
     /// Enciende, cambia de intervalo o apaga el temporizador de animación.
     fn set_timer(&mut self, ms: Option<u32>) {
+        let interval = self.frame_interval().as_nanos() as u64;
+        self.high_refresh_driver
+            .interval_ns
+            .store(interval, Ordering::Relaxed);
         if self.timer_ms == ms {
             return;
         }
@@ -1141,6 +1230,12 @@ impl App {
         if self.hidden_by_fullscreen() {
             // En pantalla completa (juego, video, presentación), la isla no debe aparecer
             // y si estaba visible se oculta de inmediato sin animaciones lentas que se traben.
+            if let Some(backdrop) = self.backdrop.as_mut() {
+                backdrop.hide();
+            }
+            if let Some(projector) = self.projector.as_mut() {
+                projector.hide();
+            }
             if self.shown {
                 unsafe {
                     let _ = ShowWindow(self.hwnd, SW_HIDE);
@@ -1148,6 +1243,7 @@ impl App {
                 self.shown = false;
             }
             self.visible = false;
+            self.expanded_by_click = false;
             self.presence.reset(0.0);
             self.high_refresh_driver.set_active(false);
             self.stop_idle_countdown();
@@ -1199,6 +1295,7 @@ impl App {
         } else {
             self.stop_idle_countdown();
             // Sale hacia arriba y a la vez se contrae; la ventana se oculta al terminar (en `tick`).
+            self.expanded_by_click = false;
             self.presence.set_target(0.0);
             self.hovered = false;
             self.lingering = false;
@@ -1207,6 +1304,9 @@ impl App {
             self.cover_hovered = false;
             self.update_hovered = false;
             self.aim_expansion(false);
+        }
+        if want && self.settings.pinned_expanded {
+            self.update_expansion();
         }
         self.start_animation();
     }
@@ -1406,12 +1506,14 @@ impl App {
             }
         }
         // Limita el ritmo de actualización al configurado (60 Hz si está desactivado, 120/240 Hz si está activado).
-        let min_interval = Duration::from_millis(self.frame_ms() as u64);
+        let min_interval = self.frame_interval();
         if let Some(drag) = self.drag_island.as_mut() {
-            if drag.last_drag.elapsed() < min_interval {
+            let now = Instant::now();
+            let deadline = drag.last_drag + min_interval;
+            if now < deadline {
                 return;
             }
-            drag.last_drag = Instant::now();
+            drag.last_drag = frame_wait::next_deadline(deadline, now, min_interval) - min_interval;
         }
         let target_x = start_pos_x + delta;
         self.set_island_x(target_x);
@@ -1423,22 +1525,44 @@ impl App {
         let (min_x, max_x) = island_bounds(&rc, self.surface.width, self.scale);
         let clamped_x = target_x.clamp(min_x, max_x);
         if self.pos.x != clamped_x {
+            let dx = clamped_x - self.pos.x;
             self.pos.x = clamped_x;
             self.x_spring.reset(clamped_x as f32);
             let center_x = rc.left + ((rc.right - rc.left) - self.surface.width as i32) / 2;
             self.settings.offset_x = ((clamped_x - center_x) as f32 / self.scale).round() as i32;
-            unsafe {
-                let _ = SetWindowPos(
-                    self.hwnd,
-                    None,
-                    self.pos.x,
-                    self.pos.y,
-                    0,
-                    0,
-                    SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
-                );
+            let moved = (|| -> Result<()> {
+                let mut batch = unsafe {
+                    let batch = BeginDeferWindowPos(4)?;
+                    DeferWindowPos(
+                        batch,
+                        self.hwnd,
+                        None,
+                        self.pos.x,
+                        self.pos.y,
+                        0,
+                        0,
+                        SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+                    )?
+                };
+                if let Some(backdrop) = self.backdrop.as_ref() {
+                    batch = backdrop.defer_move(batch, dx)?;
+                }
+                if let Some(projector) = self.projector.as_ref() {
+                    batch = projector.defer_move(batch, dx)?;
+                }
+                unsafe { EndDeferWindowPos(batch) }
+            })();
+            if moved.is_ok() {
+                if let Some(backdrop) = self.backdrop.as_mut() {
+                    backdrop.moved_by(dx);
+                }
+                if let Some(projector) = self.projector.as_mut() {
+                    projector.moved_by(dx);
+                }
+            } else {
+                // UpdateLayeredWindow vuelve a sincronizar la posición si el lote no se acepta.
+                self.redraw();
             }
-            self.redraw();
         }
     }
 
@@ -1496,7 +1620,10 @@ impl App {
         }
         self.hovered = hovered;
         // Al salir sigue expandida un momento (`COLLAPSE_TIMER`); al volver se cancela.
-        self.lingering = !hovered && self.visible;
+        self.lingering = !hovered
+            && self.visible
+            && !self.settings.pinned_expanded
+            && (self.expanded_by_click || self.settings.expand_on_hover);
         unsafe {
             if self.lingering {
                 SetTimer(Some(self.hwnd), COLLAPSE_TIMER, COLLAPSE_DELAY_MS, None);
@@ -1529,6 +1656,7 @@ impl App {
             let _ = KillTimer(Some(self.hwnd), COLLAPSE_TIMER);
         }
         self.lingering = false;
+        self.expanded_by_click = false;
         self.update_expansion();
     }
 
@@ -1538,6 +1666,9 @@ impl App {
 
     fn tick(&mut self) {
         if self.hidden_by_fullscreen() {
+            if let Some(projector) = self.projector.as_mut() {
+                projector.hide();
+            }
             if self.shown {
                 unsafe {
                     let _ = ShowWindow(self.hwnd, SW_HIDE);
@@ -1760,6 +1891,33 @@ impl App {
             None => self.surface.full(),
         };
         self.surface.clear(dirty);
+        let blur_active = if self.settings.translucent
+            && !self.hidden_by_fullscreen()
+            && self.presence.value > 0.01
+        {
+            let (x, y, w, h, r) = island::backdrop_geometry(
+                sw as f32,
+                sh as f32,
+                self.scale,
+                self.spring.value,
+                self.presence.value,
+                shape,
+            );
+            self.backdrop.as_mut().is_some_and(|backdrop| {
+                backdrop.show(
+                    self.hwnd,
+                    (self.pos.x, self.pos.y, sw, sh),
+                    (x, y, w, h, r),
+                    (self.settings.blur_radius as f32 * self.scale).round() as u32,
+                    self.presence.value,
+                )
+            })
+        } else {
+            if let Some(backdrop) = self.backdrop.as_mut() {
+                backdrop.hide();
+            }
+            false
+        };
         let areas = island::draw(
             &mut self.surface.pixmap,
             self.scale,
@@ -1775,7 +1933,7 @@ impl App {
             self.started.elapsed().as_secs_f32(),
             time_info,
             lyrics_info,
-            self.settings.translucent,
+            blur_active,
         );
         let lyrics_area = areas.as_ref().and_then(|a| a.lyrics.as_ref());
         let lyric_sliding = lyrics_area.is_some_and(|l| l.shift != 0.0);
@@ -1806,7 +1964,10 @@ impl App {
         let mut lyric_ms = None;
         let mut project_sung = None;
         let mut project_painting = false;
-        let should_project = self.spring.value < 0.4 && self.settings.lyrics_projector && playing;
+        let should_project = !self.hidden_by_fullscreen()
+            && self.spring.value < 0.4
+            && self.settings.lyrics_projector
+            && playing;
         let frame_ms = self.frame_ms();
         let lyric = if should_project {
             self.media.as_ref().and_then(|m| {
@@ -1843,6 +2004,7 @@ impl App {
         if lyric.is_some() && self.projector.is_none() {
             self.projector = Projector::new(self.scale).ok();
         }
+        let hide_projector = self.hidden_by_fullscreen();
         if let Some(projector) = self.projector.as_mut() {
             let island_bottom = island::bottom(
                 self.surface.width as f32,
@@ -1856,7 +2018,18 @@ impl App {
             let bottom = island_bottom.max(4.0 * self.scale);
             let cx = self.pos.x + self.surface.width as i32 / 2;
             let top = self.pos.y + (bottom - 2.0 * self.scale) as i32;
-            projecting = projector.render(lyric, project_sung, cx, top, self.settings.translucent);
+            if hide_projector {
+                projector.hide();
+            } else {
+                projecting = projector.render(
+                    lyric,
+                    project_sung,
+                    cx,
+                    top,
+                    self.settings.translucent,
+                    self.settings.blur_radius,
+                );
+            }
         }
 
         let mut scroll_ms = None;
@@ -1959,6 +2132,9 @@ impl App {
                     ULW_ALPHA,
                 );
             }
+        }
+        if let Some(backdrop) = self.backdrop.as_mut() {
+            backdrop.place_behind(self.hwnd);
         }
         Motion {
             scroll_ms,
@@ -2238,7 +2414,7 @@ impl Drop for Surface {
 fn apply_update(update: Option<&update::Update>) {
     let Some(update) = update else { return };
     if update.installer.is_some() {
-        with_app(|app| app.begin_install(update.clone()));
+        with_app(|app| app.prepare_update_install());
     } else {
         update.apply();
     }
@@ -2275,7 +2451,7 @@ fn finish_install(hwnd: HWND) {
 
 /// Menú contextual sobre la isla: opciones de salida de audio y centrar en la pantalla.
 /// Va fuera de `with_app`: el menú corre su propio bucle de mensajes.
-fn open_island_menu(app_id: Option<&str>, is_centered: bool) {
+fn open_island_menu(app_id: Option<&str>, is_centered: bool, pinned_expanded: bool) {
     let (label, pids, outputs, unavailable) = if let Some(app_id) = app_id {
         let label = audio::app_label(app_id);
         let pids = audio::app_pids(app_id);
@@ -2309,10 +2485,24 @@ fn open_island_menu(app_id: Option<&str>, is_centered: bool) {
         current.as_deref(),
         unavailable,
         is_centered,
+        pinned_expanded,
     ) else {
         return;
     };
     match choice {
+        tray::IslandMenuChoice::TogglePinnedExpanded => {
+            with_app(|app| {
+                app.settings.pinned_expanded = !app.settings.pinned_expanded;
+                app.settings.save();
+                if app.settings.pinned_expanded {
+                    app.reveal();
+                    app.stop_idle_countdown();
+                } else if !app.hovered {
+                    app.start_idle_countdown();
+                }
+                app.update_expansion();
+            });
+        }
         tray::IslandMenuChoice::Center => {
             with_app(|app| app.center_island());
         }
@@ -2346,6 +2536,24 @@ fn mouse_pos(lparam: LPARAM) -> (f32, f32) {
 }
 
 extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    let deferrable = msg >= WM_APP
+        || matches!(
+            msg,
+            WM_MOUSEMOVE
+                | WM_MOUSELEAVE
+                | WM_LBUTTONDOWN
+                | WM_LBUTTONDBLCLK
+                | WM_LBUTTONUP
+                | WM_RBUTTONUP
+                | WM_MOUSEWHEEL
+                | WM_CAPTURECHANGED
+                | WM_TIMER
+                | WM_HOTKEY
+        );
+    if deferrable && APP.with(|app| app.try_borrow_mut().is_err()) {
+        ui::defer(wndproc, hwnd, msg, wparam, lparam);
+        return LRESULT(0);
+    }
     match msg {
         WM_MOUSEMOVE => {
             let (x, y) = mouse_pos(lparam);
@@ -2354,9 +2562,8 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                     app.drag_island_to();
                     return;
                 }
-                // Oculta: el mouse está en la franja del borde (o sobre la isla mientras sube).
+                // La franja espera un clic: pasar el mouse no muestra la isla contraída.
                 if app.idle_hidden {
-                    app.reveal();
                     return;
                 }
                 if app.dragging.is_some() {
@@ -2376,6 +2583,15 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                     app.set_hovered(false);
                     app.set_hover(None);
                 }
+            });
+            LRESULT(0)
+        }
+        WM_LBUTTONDBLCLK => {
+            with_app(|app| {
+                app.centering_double_click = true;
+                // La isla puede alejarse del puntero al centrarse; recibe igualmente el UP.
+                unsafe { SetCapture(app.hwnd) };
+                app.center_island();
             });
             LRESULT(0)
         }
@@ -2418,6 +2634,12 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             // WM_DESTROY necesita el estado de la app libre.
             let mut pending = None;
             with_app(|app| {
+                if std::mem::take(&mut app.centering_double_click) {
+                    unsafe {
+                        let _ = ReleaseCapture();
+                    }
+                    return;
+                }
                 if let Some(drag) = app.drag_island.take() {
                     unsafe {
                         let _ = ReleaseCapture();
@@ -2434,6 +2656,22 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                     }
                     if app.notice.is_some() {
                         app.end_notice();
+                        return;
+                    }
+                    // Un clic en la franja abre directamente los controles.
+                    if app.idle_hidden {
+                        app.reveal();
+                        app.expanded_by_click = true;
+                        app.set_hovered(true);
+                        app.update_expansion();
+                        return;
+                    }
+                    // El clic que abre los controles no debe activar la carátula o un botón
+                    // que acaba de aparecer bajo el puntero.
+                    if !app.settings.expand_on_hover && !app.expanded_by_click {
+                        app.expanded_by_click = true;
+                        app.set_hovered(true);
+                        app.update_expansion();
                         return;
                     }
                     match drag.pending_hit {
@@ -2470,26 +2708,43 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
         WM_RBUTTONUP => {
             let mut app_id = None;
             let mut is_centered = true;
+            let mut pinned_expanded = false;
             with_app(|app| {
                 if (app.visible || app.edge_strip()) && app.notice.is_none() {
                     app_id = app.media.as_ref().map(|m| m.app_id.clone());
                     is_centered = app.settings.offset_x == 0;
+                    pinned_expanded = app.settings.pinned_expanded;
                 }
             });
-            open_island_menu(app_id.as_deref(), is_centered);
+            open_island_menu(app_id.as_deref(), is_centered, pinned_expanded);
             LRESULT(0)
         }
         WM_ANIM_TICK => {
             with_app(|app| {
+                // El aviso ya salió de la cola: permitir uno más mientras se dibuja
+                // evita perder el siguiente VSync si este cuadro termina cerca del límite.
                 app.high_refresh_driver.frame_processed();
                 if app.settings.high_refresh {
                     app.tick();
+                    app.last_vsync = Some(Instant::now());
                 }
             });
             LRESULT(0)
         }
         WM_TIMER if wparam.0 == ANIM_TIMER => {
-            with_app(|app| app.tick());
+            with_app(|app| {
+                let vsync_active = app.settings.high_refresh
+                    && app.hz > 60
+                    && app.timer_ms.is_some_and(|interval| interval < 15);
+                if vsync_active
+                    && app
+                        .last_vsync
+                        .is_some_and(|last| last.elapsed() < Duration::from_millis(30))
+                {
+                    return;
+                }
+                app.tick();
+            });
             LRESULT(0)
         }
         WM_TIMER if wparam.0 == IDLE_TIMER => {
@@ -2550,11 +2805,49 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             with_app(|app| app.set_lyrics(found));
             LRESULT(0)
         }
+        update::WM_UPDATE_PREPARED => {
+            let result = unsafe { update::take_prepared(lparam) };
+            let mut download = None;
+            with_app(|app| {
+                app.preparing_update = false;
+                match result {
+                    Ok(Some(latest)) => {
+                        app.update = Some(latest.clone());
+                        if latest.installer.is_some() {
+                            app.begin_install(latest);
+                        } else {
+                            app.announce(
+                                Notice {
+                                    icon: NoticeIcon::Failed,
+                                    color: RED,
+                                },
+                                "No se pudo preparar la instalación",
+                                "Se abrió la descarga de la última versión",
+                                NOTICE_UPDATE_MS,
+                            );
+                            download = Some(latest);
+                        }
+                    }
+                    Ok(None) => {
+                        app.update = None;
+                        app.update_checked(false);
+                    }
+                    Err(()) => app.update_checked(true),
+                }
+            });
+            if let Some(latest) = download {
+                latest.apply();
+            }
+            LRESULT(0)
+        }
         update::WM_UPDATE => {
             let found = unsafe { update::take(lparam) };
             // wparam 1 = la pidió "Buscar actualizaciones": se avisa en la isla.
             let manual = wparam.0 == 1;
             with_app(|app| {
+                if app.preparing_update || app.installing.is_some() {
+                    return;
+                }
                 let version = &found.version;
                 if manual {
                     let subtitle = if found.installer.is_some() {
@@ -2590,7 +2883,11 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
         }
         update::WM_UPDATE_CHECKED => {
             let failed = wparam.0 == 1;
-            with_app(|app| app.update_checked(failed));
+            with_app(|app| {
+                if !app.preparing_update && app.installing.is_none() {
+                    app.update_checked(failed);
+                }
+            });
             LRESULT(0)
         }
         // Clic derecho sobre el ícono de la bandeja: menú. El evento real va en la parte baja de lparam.
@@ -2704,6 +3001,26 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                         with_app(|app| app.apply_settings(settings.clone()));
                         true
                     }
+                    Command::BlurRadius(radius) => {
+                        settings.blur_radius = radius;
+                        settings.translucent = true;
+                        with_app(|app| {
+                            app.settings.blur_radius = radius;
+                            app.settings.translucent = true;
+                            app.redraw();
+                        });
+                        true
+                    }
+                    Command::ToggleExpandOnHover => {
+                        settings.expand_on_hover = !settings.expand_on_hover;
+                        settings.save();
+                        with_app(|app| {
+                            app.expanded_by_click = false;
+                            app.apply_settings(settings.clone());
+                            app.update_expansion();
+                        });
+                        true
+                    }
                     Command::SetHotkey(h) => {
                         settings.hotkey = h;
                         settings.save();
@@ -2750,6 +3067,136 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "prueba prolongada de refresco alto; NOTCH_STRESS_SECONDS controla su duración"]
+    fn refresco_alto_no_satura_la_cola_ni_bloquea_temporizadores() {
+        use std::cell::Cell;
+        thread_local! {
+            static DRIVER: RefCell<Option<HighRefreshDriver>> = const { RefCell::new(None) };
+            static FRAMES: Cell<u64> = const { Cell::new(0) };
+            static TIMERS: Cell<u64> = const { Cell::new(0) };
+            static FRAME_TIMES: RefCell<Vec<Instant>> = const { RefCell::new(Vec::new()) };
+        }
+        extern "system" fn stress_proc(
+            hwnd: HWND,
+            msg: u32,
+            wparam: WPARAM,
+            lparam: LPARAM,
+        ) -> LRESULT {
+            if msg == WM_ANIM_TICK {
+                DRIVER.with(|driver| driver.borrow().as_ref().unwrap().frame_processed());
+                FRAME_TIMES.with(|times| times.borrow_mut().push(Instant::now()));
+                FRAMES.set(FRAMES.get() + 1);
+                // Cuadro costoso y DwmFlush que retorna inmediatamente: caso adverso real.
+                std::thread::sleep(Duration::from_millis(3));
+                return LRESULT(0);
+            }
+            if msg == WM_TIMER {
+                TIMERS.set(TIMERS.get() + 1);
+                return LRESULT(0);
+            }
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+        }
+        unsafe {
+            let instance = GetModuleHandleW(None).unwrap();
+            let class = w!("NotchIslaStressRefresh");
+            RegisterClassExW(&WNDCLASSEXW {
+                cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+                lpfnWndProc: Some(stress_proc),
+                hInstance: instance.into(),
+                lpszClassName: class,
+                ..Default::default()
+            });
+            let hwnd = CreateWindowExW(
+                WS_EX_TOOLWINDOW,
+                class,
+                class,
+                WS_POPUP,
+                0,
+                0,
+                1,
+                1,
+                None,
+                None,
+                Some(instance.into()),
+                None,
+            )
+            .unwrap();
+            let real_vsync = std::env::var_os("NOTCH_REAL_VSYNC").is_some();
+            let hz = if real_vsync {
+                monitors::refresh_rate(monitors::find(""))
+            } else {
+                240
+            };
+            let driver = if real_vsync {
+                HighRefreshDriver::new(hwnd)
+            } else {
+                HighRefreshDriver::with_sync(hwnd, || Ok(()))
+            };
+            let running = Arc::clone(&driver.running);
+            driver
+                .interval_ns
+                .store(1_000_000_000 / hz as u64, Ordering::Relaxed);
+            driver.set_active(true);
+            DRIVER.with(|cell| *cell.borrow_mut() = Some(driver));
+            SetTimer(Some(hwnd), 99, 20, None);
+            let seconds = std::env::var("NOTCH_STRESS_SECONDS")
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(10)
+                .max(1);
+            let started = Instant::now();
+            while started.elapsed() < Duration::from_secs(seconds) {
+                let mut msg = MSG::default();
+                if !GetMessageW(&mut msg, None, 0, 0).as_bool() {
+                    break;
+                }
+                DispatchMessageW(&msg);
+                ui::promote_timers();
+            }
+            DRIVER.with(|cell| cell.borrow_mut().take());
+            let _ = KillTimer(Some(hwnd), 99);
+            let _ = DestroyWindow(hwnd);
+            let frames = FRAMES.get();
+            let timers = TIMERS.get();
+            let mut gaps = FRAME_TIMES.with(|times| {
+                times
+                    .borrow()
+                    .windows(2)
+                    .map(|pair| (pair[1] - pair[0]).as_secs_f64() * 1000.0)
+                    .collect::<Vec<_>>()
+            });
+            gaps.sort_by(f64::total_cmp);
+            if !gaps.is_empty() {
+                eprintln!(
+                    "CADENCIA: media={:.3} ms p50={:.3} ms p95={:.3} ms max={:.3} ms",
+                    gaps.iter().sum::<f64>() / gaps.len() as f64,
+                    gaps[gaps.len() / 2],
+                    gaps[gaps.len() * 95 / 100],
+                    gaps[gaps.len() - 1]
+                );
+            }
+            assert!(
+                frames >= seconds * hz as u64 * 80 / 100
+                    && frames <= seconds * (hz as u64 * 110 / 100 + 1),
+                "cuadros limitados al ritmo pedido: {frames} en {seconds} s"
+            );
+            assert!(
+                timers >= seconds * 15,
+                "los temporizadores deben seguir funcionando: {timers} en {seconds} s"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+            assert_eq!(
+                Arc::strong_count(&running),
+                1,
+                "el hilo de refresco debe terminar al cerrar"
+            );
+            eprintln!(
+                "{seconds} s: {frames} cuadros, {timers} temporizadores; objetivo {hz} Hz, VSync real={real_vsync}"
+            );
+        }
+    }
 
     #[test]
     fn en_reposo_no_hay_temporizador() {
