@@ -1879,9 +1879,11 @@ impl App {
         if pressed.is_none() {
             self.pressed = None;
         }
-        // El aviso que terminó se sigue viendo mientras la isla se contrae (o sale), hasta que
-        // su contenido se desvanece; si el mouse está encima, vuelve la música.
-        if self.notice.is_none() && (self.hovered || self.spring.value <= 0.55) {
+        // Conserva el aviso vencido durante la contracción. Si la isla sigue abierta,
+        // vuelve al reproductor sin esperar a que baje el resorte de expansión.
+        if self.notice.is_none()
+            && (self.hovered || self.spring.target() > 0.0 || self.spring.value <= 0.55)
+        {
             self.last_notice = None;
         }
         let notice = self.notice.as_ref().or(self.last_notice.as_ref());

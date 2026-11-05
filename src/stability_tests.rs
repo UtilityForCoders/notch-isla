@@ -42,6 +42,7 @@ fn isla_con_desenfoque_sigue_ocultandose_y_recibiendo_clics() {
         settings.real_bars = false;
         settings.lyrics_island = false;
         settings.lyrics_projector = false;
+        settings.pinned_expanded = false;
         settings.hotkey = None;
         let mut app = App::new(hwnd, monitors::find(""), settings).unwrap();
         app.tray.remove();
@@ -214,6 +215,49 @@ fn isla_con_desenfoque_sigue_ocultandose_y_recibiendo_clics() {
             APP.with(|cell| cell.borrow_mut().take());
             return;
         }
+        with_app(|app| {
+            app.settings.pinned_expanded = true;
+            app.hovered = false;
+            app.spring.reset(1.0);
+            app.show_notice(
+                Notice {
+                    icon: NoticeIcon::Mouse,
+                    color: [120, 220, 160],
+                },
+                "Dispositivo conectado",
+                "Mouse de prueba",
+                50,
+            );
+        });
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let mut msg = MSG::default();
+            if PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+                DispatchMessageW(&msg);
+                ui::promote_timers();
+            } else {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            let mut restored = false;
+            with_app(|app| {
+                assert_eq!(app.spring.value, 1.0, "la isla debe seguir extendida");
+                restored = app.notice.is_none()
+                    && app.last_notice.is_none()
+                    && app.notice_spring.value == 0.0;
+            });
+            if restored {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "el aviso debe ceder al reproductor"
+            );
+        }
+        with_app(|app| {
+            app.settings.pinned_expanded = false;
+            app.start_idle_countdown();
+        });
+
         let seconds = std::env::var("NOTCH_STRESS_SECONDS")
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
