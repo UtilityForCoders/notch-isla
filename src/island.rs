@@ -28,6 +28,7 @@ const NOTICE_ICON: (f32, f32, f32) = (9.0, 38.0, 9.0);
 
 /// Separación lógica entre el borde superior de la pantalla y la isla flotante (sin tocar el techo).
 const TOP_GAP: f32 = 8.0;
+pub const EXPANDED_CONTENT_START: f32 = 0.45;
 
 /// Medidas del panel izquierdo de reproducción (píxeles lógicos).
 const COVER_PAD_X: f32 = 18.0;
@@ -381,7 +382,7 @@ fn geometry(
         w,
         h,
         r: (lerp(COLLAPSED.2, EXPANDED_LYRICS.2) * scale).clamp(0.0, (w / 2.0).min(h / 2.0)),
-        alpha: ((p - 0.45) / 0.55).clamp(0.0, 1.0),
+        alpha: ((p - EXPANDED_CONTENT_START) / (1.0 - EXPANDED_CONTENT_START)).clamp(0.0, 1.0),
         scale,
     }
 }

@@ -225,6 +225,22 @@ fn isla_con_desenfoque_sigue_ocultandose_y_recibiendo_clics() {
             return;
         }
         with_app(|app| {
+            let media = app.media.as_ref().unwrap();
+            let current_song = lyrics::key(&media.title, &media.artist);
+            app.set_lyrics(lyrics::Lyrics {
+                key: current_song.clone(),
+                lines: Vec::new(),
+            });
+            for i in 0..MAX_CACHED_LYRICS {
+                app.set_lyrics(lyrics::Lyrics {
+                    key: format!("Canción {i}"),
+                    lines: Vec::new(),
+                });
+            }
+            assert_eq!(app.lyrics.len(), MAX_CACHED_LYRICS);
+            assert!(app.lyrics.contains_key(&current_song));
+            assert!(!app.lyrics.contains_key("Canción 0"));
+
             let rc = app.monitor_rect();
             let anchor = app.x_spring.value;
             let saved_offset = app.settings.offset_x;

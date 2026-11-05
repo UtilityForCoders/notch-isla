@@ -119,6 +119,7 @@ const COLLAPSE_SPRING: (f32, f32) = (110.0, 21.0);
 const NOTICE_MS: u32 = 2500;
 const NOTICE_TIMER_DONE_MS: u32 = 8000;
 const NOTICE_UPDATE_MS: u32 = 6000;
+const MAX_CACHED_LYRICS: usize = 64;
 
 /// Colores de los avisos: salida de audio e instalación, temporizador, actualización lista y
 /// fallida.
@@ -553,6 +554,7 @@ struct App {
     lingering: bool,
     /// Letras ya consultadas, por canción (`lyrics::key`); vacía = esa canción no tiene.
     lyrics: HashMap<String, Vec<lyrics::Verse>>,
+    lyrics_order: std::collections::VecDeque<String>,
     /// Canciones cuya letra se está pidiendo ahora.
     lyrics_pending: HashSet<String>,
     /// Carrusel de la letra en la isla expandida.
@@ -634,6 +636,7 @@ impl App {
             preparing_update: false,
             lingering: false,
             lyrics: HashMap::new(),
+            lyrics_order: std::collections::VecDeque::new(),
             lyrics_pending: HashSet::new(),
             lyric_slide: None,
             projector: None,
@@ -671,8 +674,31 @@ impl App {
     /// Llegó la letra de una canción (o la respuesta de que no hay).
     fn set_lyrics(&mut self, found: lyrics::Lyrics) {
         self.lyrics_pending.remove(&found.key);
+        let displayed = self
+            .media
+            .as_ref()
+            .or(self.last_media.as_ref())
+            .map(|media| lyrics::key(&media.title, &media.artist));
+        let redraw = displayed.as_ref() == Some(&found.key);
+        if !self.lyrics.contains_key(&found.key) {
+            if self.lyrics_order.len() == MAX_CACHED_LYRICS {
+                // Una descarga tardía no debe expulsar la letra que se está mostrando.
+                if let Some(index) = self
+                    .lyrics_order
+                    .iter()
+                    .position(|key| Some(key) != displayed.as_ref())
+                {
+                    if let Some(oldest) = self.lyrics_order.remove(index) {
+                        self.lyrics.remove(&oldest);
+                    }
+                }
+            }
+            self.lyrics_order.push_back(found.key.clone());
+        }
         self.lyrics.insert(found.key, found.lines);
-        self.redraw();
+        if redraw && self.settings.lyrics() {
+            self.redraw();
+        }
     }
 
     /// Muestra un aviso del sistema durante `ms`: la isla baja (aunque no haya música o se
@@ -1441,6 +1467,7 @@ impl App {
     fn update_visibility(&mut self) {
         if self.hidden_by_fullscreen() {
             self.clear_notice_card();
+            self.visualizer.set_target(None);
             // En pantalla completa (juego, video, presentación), la isla no debe aparecer
             // y si estaba visible se oculta de inmediato sin animaciones lentas que se traben.
             if let Some(backdrop) = self.backdrop.as_mut() {
@@ -1970,6 +1997,10 @@ impl App {
         let strip = self.edge_strip();
         let playing = (self.visible || strip) && self.media.as_ref().is_some_and(|m| m.playing);
         let bars = self.visible && playing && island::mini_alpha(self.spring.value) > 0.0;
+        let show_player = notice.is_none()
+            && self.spring.value > island::EXPANDED_CONTENT_START
+            && self.notice_spring.value < 1.0;
+        let show_island_lyrics = show_player && self.lyrics_spring.value > 0.01;
         // Se escucha el audio de la app solo mientras se ven las barras.
         let listen = self
             .media
@@ -2002,6 +2033,7 @@ impl App {
         // Mientras se muestra el volumen también hace falta redibujar: para quitarlo a tiempo.
         let progress = (self.visible
             && playing
+            && show_player
             && self.spring.value > 0.55
             && self.media.as_ref().is_some_and(|m| m.timeline.is_some()))
             || volume.is_some();
@@ -2010,18 +2042,24 @@ impl App {
             (Some(n), Some(text)) => text.measure(&n.title, &n.subtitle),
             _ => 0.0,
         };
-        let time_info = media.and_then(|m| m.timeline).map(|t| {
-            // Arrastrando la barra, los tiempos y la letra muestran el momento elegido.
-            let current = self
-                .dragging
-                .map_or_else(|| t.current_position(playing), |f| f * t.duration);
-            island::TimeInfo {
-                current: clock(current),
-                remaining: format!("-{}", clock(t.duration - current)),
-            }
-        });
+        let time_info = media
+            .filter(|_| show_player)
+            .and_then(|m| m.timeline)
+            .map(|t| {
+                // Arrastrando la barra, los tiempos y la letra muestran el momento elegido.
+                let current = self
+                    .dragging
+                    .map_or_else(|| t.current_position(playing), |f| f * t.duration);
+                island::TimeInfo {
+                    current: clock(current),
+                    remaining: format!("-{}", clock(t.duration - current)),
+                }
+            });
         let mut lyric_painting = false;
-        let lyrics_info = media.map(|m| {
+        if !show_island_lyrics {
+            self.lyric_slide = None;
+        }
+        let lyrics_info = media.filter(|_| show_island_lyrics).map(|m| {
             let key = lyrics::key(&m.title, &m.artist);
             let mut info = island::LyricsInfo {
                 lines: Vec::new(),
@@ -2029,9 +2067,7 @@ impl App {
                 sung: None,
                 status: None,
             };
-            if !self.settings.lyrics_island && self.lyrics_spring.value <= 0.01 {
-                // Apagada y ya desvanecida: nada que dibujar.
-            } else if let Some(lines) = self.lyrics.get(&key) {
+            if let Some(lines) = self.lyrics.get(&key) {
                 if lines.is_empty() {
                     if self.settings.lyrics_island {
                         info.status = Some("Sin letra sincronizada".to_string());
@@ -2197,7 +2233,7 @@ impl App {
                 }
                 lyrics::line_at(lines, secs)
             })
-        } else if self.visible && playing && self.settings.lyrics_island {
+        } else if self.visible && playing && show_island_lyrics && self.settings.lyrics_island {
             if let Some(m) = &self.media {
                 if let (Some(lines), Some(t)) = (
                     self.lyrics.get(&lyrics::key(&m.title, &m.artist)),
