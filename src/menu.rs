@@ -33,6 +33,7 @@ use windows::Win32::Graphics::Gdi::{
     MONITORINFO, MONITOR_DEFAULTTONEAREST,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VK_DOWN, VK_ESCAPE,
@@ -41,13 +42,13 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
     FindWindowExW, FindWindowW, GetAncestor, GetCursorPos, GetForegroundWindow, GetMessageW,
-    GetWindowRect, KillTimer, LoadCursorW, PostMessageW, PostQuitMessage, RegisterClassExW,
-    SetForegroundWindow, SetTimer, SetWindowsHookExW, ShowWindow, TranslateMessage,
-    UnhookWindowsHookEx, UpdateLayeredWindow, GA_ROOTOWNER, IDC_ARROW, KBDLLHOOKSTRUCT,
-    MA_NOACTIVATE, MSG, MSLLHOOKSTRUCT, SW_SHOWNOACTIVATE, ULW_ALPHA, WA_INACTIVE, WH_KEYBOARD_LL,
-    WH_MOUSE_LL, WM_ACTIVATE, WM_CAPTURECHANGED, WM_CLOSE, WM_DESTROY, WM_KEYDOWN, WM_KEYUP,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_RBUTTONDOWN,
-    WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WNDCLASSEXW, WS_EX_LAYERED,
+    GetWindowRect, GetWindowThreadProcessId, KillTimer, LoadCursorW, PostMessageW, PostQuitMessage,
+    RegisterClassExW, SetForegroundWindow, SetTimer, SetWindowsHookExW, ShowWindow,
+    TranslateMessage, UnhookWindowsHookEx, UpdateLayeredWindow, GA_ROOTOWNER, IDC_ARROW,
+    KBDLLHOOKSTRUCT, MA_NOACTIVATE, MSG, MSLLHOOKSTRUCT, SW_SHOWNOACTIVATE, ULW_ALPHA, WA_INACTIVE,
+    WH_KEYBOARD_LL, WH_MOUSE_LL, WM_ACTIVATE, WM_CAPTURECHANGED, WM_CLOSE, WM_DESTROY, WM_KEYDOWN,
+    WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEACTIVATE, WM_MOUSEMOVE,
+    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WNDCLASSEXW, WS_EX_LAYERED,
     WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 use windows_numerics::Vector2;
@@ -176,7 +177,7 @@ where
         }
     }
     let _guard = Reset;
-    let _ = run(items, from_tray);
+    let _ = run(items, from_tray, true);
 }
 
 /// Opción ya maquetada.
@@ -404,17 +405,18 @@ pub fn replace_items(items: Vec<Item>) {
     with_state(|state| state.update_items(items));
 }
 
-fn run(items: Vec<Item>, from_tray: bool) -> Result<Option<usize>> {
+fn run(items: Vec<Item>, from_tray: bool, listen_to_keyboard: bool) -> Result<Option<usize>> {
     unsafe {
         let mut anchor = POINT::default();
         GetCursorPos(&mut anchor)?;
         // La barra se oculta al perder el foco. El menú de bandeja recibe mouse/teclado
         // sin activarse: Explorer conserva el foco sin cambiar la preferencia de autoocultar.
         let focus = if from_tray {
-            taskbar_at(anchor).filter(|taskbar| {
-                let _ = SetForegroundWindow(*taskbar);
-                foreground_is(*taskbar)
-            })
+            let Some(taskbar) = taskbar_at(anchor).filter(|taskbar| focus_taskbar(*taskbar)) else {
+                // Sin Explorer en primer plano, activar el menú ocultaría la barra.
+                return Ok(None);
+            };
+            Some(taskbar)
         } else {
             None
         };
@@ -473,7 +475,7 @@ fn run(items: Vec<Item>, from_tray: bool) -> Result<Option<usize>> {
             Some(GetModuleHandleW(None)?.into()),
             None,
         )?);
-        let hwnd = create_window(Some(host.0), focus.is_some())?;
+        let hwnd = create_window(Some(host.0), from_tray)?;
         let open = vec![false; entries.len()];
         STATE.with(|cell| {
             *cell.borrow_mut() = Some(State {
@@ -508,13 +510,15 @@ fn run(items: Vec<Item>, from_tray: bool) -> Result<Option<usize>> {
         MENU_HWND.store(hwnd.0 as isize, Ordering::SeqCst);
         let hook = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook), None, 0).ok();
         let keyboard = focus
+            .filter(|_| listen_to_keyboard)
             .and_then(|_| SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook), None, 0).ok());
-        if keyboard.is_some() {
-            MENU_FOCUS.store(focus.unwrap().0 as isize, Ordering::SeqCst);
+        if let Some(focus) = focus {
+            // El modo pasivo depende del origen, no del éxito del gancho de teclado.
+            MENU_FOCUS.store(focus.0 as isize, Ordering::SeqCst);
             SetTimer(Some(hwnd), FOCUS_TIMER, 100, None);
         }
         let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-        if keyboard.is_none() {
+        if !from_tray {
             let _ = SetForegroundWindow(hwnd);
         }
 
@@ -576,6 +580,28 @@ fn foreground_is(window: HWND) -> bool {
     unsafe {
         let foreground = GetForegroundWindow();
         foreground == window || GetAncestor(foreground, GA_ROOTOWNER) == window
+    }
+}
+
+fn focus_taskbar(window: HWND) -> bool {
+    unsafe {
+        let _ = SetForegroundWindow(window);
+        if foreground_is(window) {
+            return true;
+        }
+        // Al pasar del menú anterior a otro panel, Explorer puede tener su cola
+        // de entrada en otro hilo. Compartirla solo durante la transferencia.
+        let current = GetCurrentThreadId();
+        let foreground = GetWindowThreadProcessId(GetForegroundWindow(), None);
+        if foreground == 0 || foreground == current {
+            return false;
+        }
+        if !AttachThreadInput(current, foreground, true).as_bool() {
+            return false;
+        }
+        let _ = SetForegroundWindow(window);
+        let _ = AttachThreadInput(current, foreground, false);
+        foreground_is(window)
     }
 }
 
@@ -1422,6 +1448,110 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
 mod tests {
     use super::*;
 
+    fn activate_for_test(window: HWND) {
+        if foreground_is(window) {
+            return;
+        }
+        unsafe {
+            let current = GetCurrentThreadId();
+            let foreground = GetWindowThreadProcessId(GetForegroundWindow(), None);
+            // El test no nace de un clic real en la bandeja; prepara ese mismo foco.
+            let attached =
+                foreground != current && AttachThreadInput(current, foreground, true).as_bool();
+            let _ = SetForegroundWindow(window);
+            if attached {
+                let _ = AttachThreadInput(current, foreground, false);
+            }
+            if !foreground_is(window) {
+                use windows::Win32::UI::Input::KeyboardAndMouse::{
+                    SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VK_MENU,
+                };
+                let keys = [Default::default(), KEYEVENTF_KEYUP].map(|flags| INPUT {
+                    r#type: INPUT_KEYBOARD,
+                    Anonymous: INPUT_0 {
+                        ki: KEYBDINPUT {
+                            wVk: VK_MENU,
+                            dwFlags: flags,
+                            ..Default::default()
+                        },
+                    },
+                });
+                SendInput(&keys, std::mem::size_of::<INPUT>() as i32);
+                let _ = SetForegroundWindow(window);
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requiere Explorer y cambia brevemente el foco al menú de bandeja"]
+    fn bandeja_no_toma_el_foco_si_falla_el_gancho_de_teclado() {
+        use std::time::{Duration, Instant};
+        use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GetWindowLongPtrW, IsWindowVisible, SendMessageW, GWL_EXSTYLE,
+        };
+        struct Restore(HWND);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                focus_taskbar(self.0);
+            }
+        }
+        let _restore = Restore(unsafe { GetForegroundWindow() });
+        unsafe {
+            CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok().unwrap();
+        }
+        unsafe {
+            let mut anchor = POINT::default();
+            GetCursorPos(&mut anchor).unwrap();
+            activate_for_test(taskbar_at(anchor).expect("barra de tareas"));
+        }
+        let driver = std::thread::spawn(|| {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            let hwnd = loop {
+                let hwnd = HWND(MENU_HWND.load(Ordering::SeqCst) as _);
+                if !hwnd.is_invalid() && unsafe { IsWindowVisible(hwnd).as_bool() } {
+                    break hwnd;
+                }
+                assert!(Instant::now() < deadline, "el menú debe abrirse");
+                std::thread::sleep(Duration::from_millis(10));
+            };
+            struct Close(HWND);
+            impl Drop for Close {
+                fn drop(&mut self) {
+                    unsafe {
+                        let _ = PostMessageW(Some(self.0), WM_CLOSE, WPARAM(0), LPARAM(0));
+                    }
+                }
+            }
+            let _close = Close(hwnd);
+            let shell = HWND(MENU_FOCUS.load(Ordering::SeqCst) as _);
+            assert!(
+                !shell.is_invalid(),
+                "sin gancho de teclado se sigue vigilando Explorer"
+            );
+            assert!(foreground_is(shell), "el menú no debe tomar el foco");
+            let style = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) } as u32;
+            assert_ne!(style & WS_EX_NOACTIVATE.0, 0);
+            assert_eq!(
+                unsafe { SendMessageW(hwnd, WM_MOUSEACTIVATE, None, None) }.0,
+                MA_NOACTIVATE as isize
+            );
+            std::thread::sleep(Duration::from_millis(200));
+            assert!(
+                foreground_is(shell),
+                "Explorer conserva el foco después de mostrar el menú"
+            );
+            assert_eq!(MENU_HWND.load(Ordering::SeqCst), hwnd.0 as isize);
+        });
+        run(
+            vec![Item::Label("Prueba de foco sin gancho de teclado".into())],
+            true,
+            false,
+        )
+        .unwrap();
+        driver.join().unwrap();
+    }
+
     #[test]
     fn deslizador_respeta_limites_y_coordenadas_fuera_de_la_barra() {
         assert_eq!(slider_value(-100.0, 30.0, 230.0, 0, 40), 0);
@@ -1441,44 +1571,8 @@ mod tests {
     fn cambiar_opciones_y_arrastrar_no_recrea_el_menu() {
         use std::time::{Duration, Instant};
         use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
-        use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
         use windows::Win32::UI::HiDpi::GetDpiForWindow;
-        use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
         use windows::Win32::UI::WindowsAndMessaging::{IsWindowVisible, SendMessageW};
-        fn activate_for_test(window: HWND) {
-            if foreground_is(window) {
-                return;
-            }
-            unsafe {
-                let current = GetCurrentThreadId();
-                let foreground = GetWindowThreadProcessId(GetForegroundWindow(), None);
-                // El test no nace de un clic real en la bandeja; prepara ese mismo foco.
-                let attached =
-                    foreground != current && AttachThreadInput(current, foreground, true).as_bool();
-                let _ = SetForegroundWindow(window);
-                if attached {
-                    let _ = AttachThreadInput(current, foreground, false);
-                }
-                if !foreground_is(window) {
-                    use windows::Win32::UI::Input::KeyboardAndMouse::{
-                        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
-                        VK_MENU,
-                    };
-                    let keys = [Default::default(), KEYEVENTF_KEYUP].map(|flags| INPUT {
-                        r#type: INPUT_KEYBOARD,
-                        Anonymous: INPUT_0 {
-                            ki: KEYBDINPUT {
-                                wVk: VK_MENU,
-                                dwFlags: flags,
-                                ..Default::default()
-                            },
-                        },
-                    });
-                    SendInput(&keys, std::mem::size_of::<INPUT>() as i32);
-                    let _ = SetForegroundWindow(window);
-                }
-            }
-        }
         struct Restore(HWND);
         impl Drop for Restore {
             fn drop(&mut self) {
