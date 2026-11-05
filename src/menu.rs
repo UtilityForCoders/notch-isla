@@ -60,7 +60,7 @@ use crate::text::make_format;
 use crate::Surface;
 
 /// Una opción del menú.
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub enum Item {
     /// Opción que se puede elegir: `show` devuelve su `id`. `checked` dibuja la marca.
     Action {
@@ -218,7 +218,6 @@ enum Entry {
     Separator,
     Group {
         text: usize,
-        children: Vec<Entry>,
     },
     DeviceStatus {
         text: usize,
@@ -388,19 +387,18 @@ impl State {
                             }
                         }
                     }
-                    Entry::Group { children, .. } => {
-                        text_index = update(children, id, value, checked).or(text_index);
-                    }
                     _ => {}
                 }
             }
             text_index
         }
-        if let Some(index) = update(&mut self.entries, id, value, checked) {
+        let text_index = update(&mut self.entries, id, value, checked);
+        if let Some(index) = text_index {
             if let Some(text) = layout(&self.dwrite, &self.font, label) {
                 self.texts[index] = text;
             }
         }
+        let mut changed = text_index.is_some();
         for row in &mut self.rows {
             match &mut row.kind {
                 RowKind::Slider {
@@ -416,38 +414,42 @@ impl State {
                     checked: current,
                 } => {
                     if let Some((action, next)) = checked {
-                        if *id == action {
+                        if *id == action && *current != next {
                             *current = next;
+                            changed = true;
                         }
                     }
                 }
                 _ => {}
             }
         }
-        let width = text_width(&self.entries, &self.texts, self.scale, false).clamp(MIN_W, MAX_W);
-        if width > self.width {
-            self.width = width;
-            relayout(self);
+        if changed {
+            let width =
+                text_width(&self.entries, &self.texts, self.scale, false).clamp(MIN_W, MAX_W);
+            if width > self.width {
+                self.width = width;
+                relayout(self);
+            }
+            render(self);
         }
-        render(self);
         if let Some(child) = &mut self.child_menu {
             child.update_slider_item(id, value, label, checked);
         }
     }
 
     fn update_items(&mut self, items: Vec<Item>) {
-        self.items = items.clone();
         let mut texts = Vec::new();
         let entries = build(
             &self.dwrite,
             &self.font,
             &self.label_font,
-            items,
+            &items,
             &mut texts,
         );
         let width = text_width(&entries, &texts, self.scale, false).clamp(MIN_W, MAX_W);
         self.entries = entries;
         self.texts = texts;
+        self.items = items;
         self.width = self.width.max(width);
         if self.open.len() < self.entries.len() {
             self.open.resize(self.entries.len(), false);
@@ -613,13 +615,7 @@ fn open_submenu(st: &mut State, index: usize, keyboard: bool) {
         return;
     };
     let mut texts = Vec::new();
-    let entries = build(
-        &st.dwrite,
-        &st.font,
-        &st.label_font,
-        items.clone(),
-        &mut texts,
-    );
+    let entries = build(&st.dwrite, &st.font, &st.label_font, &items, &mut texts);
     let width = text_width(&entries, &texts, st.scale, false).clamp(MIN_W, MAX_W);
     let bounds = panel_rect(st);
     let row_y = st.rows.get(index).map_or(0.0, |r| r.y);
@@ -703,15 +699,24 @@ fn with_state(f: impl FnOnce(&mut State)) {
 /// Actualiza solo un grupo; conserva el resto de ajustes y los grupos abiertos.
 pub fn replace_group(label: &str, items: Vec<Item>) {
     with_state(|state| {
-        let mut source = state.items.clone();
-        if let Some(Item::Group {
-            items: children, ..
-        }) = source
+        if let Some((
+            index,
+            Item::Group {
+                items: children, ..
+            },
+        )) = state
+            .items
             .iter_mut()
-            .find(|item| matches!(item, Item::Group { label: name, .. } if name == label))
+            .enumerate()
+            .find(|(_, item)| matches!(item, Item::Group { label: name, .. } if name == label))
         {
+            if *children == items {
+                return;
+            }
             *children = items;
-            state.update_items(source);
+            if state.open.get(index) == Some(&true) {
+                refresh_submenu(state);
+            }
         }
     });
 }
@@ -746,7 +751,7 @@ fn run(items: Vec<Item>, from_tray: bool, listen_to_keyboard: bool) -> Result<Op
         let font = make_format(&dwrite, DWRITE_FONT_WEIGHT_REGULAR, FONT * scale)?;
         let label_font = make_format(&dwrite, DWRITE_FONT_WEIGHT_REGULAR, LABEL_FONT * scale)?;
         let mut texts = Vec::new();
-        let entries = build(&dwrite, &font, &label_font, items.clone(), &mut texts);
+        let entries = build(&dwrite, &font, &label_font, &items, &mut texts);
         let width = text_width(&entries, &texts, scale, false).clamp(MIN_W, MAX_W);
 
         let factory: ID2D1Factory = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?;
@@ -1042,7 +1047,7 @@ fn build(
     dwrite: &IDWriteFactory,
     font: &IDWriteTextFormat,
     label_font: &IDWriteTextFormat,
-    items: Vec<Item>,
+    items: &[Item],
     texts: &mut Vec<Text>,
 ) -> Vec<Entry> {
     fn add(
@@ -1057,7 +1062,7 @@ fn build(
         texts.len().saturating_sub(1)
     }
     items
-        .into_iter()
+        .iter()
         .map(|item| match item {
             Item::Slider {
                 id,
@@ -1066,24 +1071,23 @@ fn build(
                 min,
                 max,
             } => Entry::Slider {
-                id,
-                text: add(dwrite, font, &label, texts),
-                value,
-                min,
-                max,
+                id: *id,
+                text: add(dwrite, font, label, texts),
+                value: *value,
+                min: *min,
+                max: *max,
             },
             Item::Action { id, label, checked } => Entry::Action {
-                id,
-                text: add(dwrite, font, &label, texts),
-                checked,
+                id: *id,
+                text: add(dwrite, font, label, texts),
+                checked: *checked,
             },
             Item::Label(label) => Entry::Label {
-                text: add(dwrite, label_font, &label, texts),
+                text: add(dwrite, label_font, label, texts),
             },
             Item::Separator => Entry::Separator,
-            Item::Group { label, items } => Entry::Group {
-                text: add(dwrite, font, &label, texts),
-                children: build(dwrite, font, label_font, items, texts),
+            Item::Group { label, .. } => Entry::Group {
+                text: add(dwrite, font, label, texts),
             },
             Item::DeviceStatus {
                 name,
@@ -1091,10 +1095,10 @@ fn build(
                 icon,
                 connection,
             } => Entry::DeviceStatus {
-                text: add(dwrite, font, &name, texts),
-                status: add(dwrite, label_font, &status, texts),
-                icon,
-                connection,
+                text: add(dwrite, font, name, texts),
+                status: add(dwrite, label_font, status, texts),
+                icon: *icon,
+                connection: *connection,
             },
         })
         .collect()
