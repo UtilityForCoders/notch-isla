@@ -68,6 +68,7 @@ pub struct Device {
     pub level: Option<Level>,
     pub charging: bool,
     pub stale: bool,
+    pub windows_cached: bool,
     /// Un receptor presente no implica que su periférico esté encendido.
     pub detail: String,
 }
@@ -168,7 +169,9 @@ impl Device {
         let mut text = self
             .level
             .map_or_else(|| "Batería no disponible".into(), Level::label);
-        if self.stale {
+        if self.windows_cached {
+            text.push_str(" · Caché de Windows");
+        } else if self.stale {
             text.push_str(" · Última lectura");
         } else if self.charging {
             text.push_str(" · Cargando");
@@ -176,6 +179,20 @@ impl Device {
             text.push_str(" · Baja");
         }
         text
+    }
+
+    fn update_bluetooth_level(&mut self, direct: Option<Level>, cached: Option<Level>) {
+        if let Some(level) = direct {
+            self.level = Some(level);
+            self.stale = false;
+            self.windows_cached = false;
+            self.detail.clear();
+        } else if let Some(level) = cached.filter(|_| self.level.is_none() || self.windows_cached) {
+            self.level = Some(level);
+            self.stale = true;
+            self.windows_cached = true;
+            self.detail.clear();
+        }
     }
 }
 
@@ -452,20 +469,18 @@ impl Alerts {
 
 fn preserve_last_readings(current: &mut Snapshot, previous: &Snapshot) {
     for device in &mut current.devices {
+        let Some(old) = previous.devices.iter().find(|old| old.id == device.id) else {
+            continue;
+        };
         if device.kind == DeviceKind::Unknown {
-            if let Some(old) = previous.devices.iter().find(|old| old.id == device.id) {
-                device.kind = old.kind;
-            }
+            device.kind = old.kind;
         }
-        if device.level.is_none() {
-            if let Some(old) = previous
-                .devices
-                .iter()
-                .find(|old| old.id == device.id && old.level.is_some())
-            {
-                device.level = old.level;
-                device.stale = true;
-            }
+        if old.level.is_some()
+            && (device.level.is_none() || (device.windows_cached && !old.windows_cached))
+        {
+            device.level = old.level;
+            device.windows_cached = old.windows_cached;
+            device.stale = true;
         }
     }
 }
@@ -573,7 +588,6 @@ fn bluetooth(out: &mut Vec<Device>, trace: bool) -> windows::core::Result<()> {
     }
     // Enumerar interfaces instaladas evita iniciar descubrimiento de radio (AEP),
     // que puede tardar un minuto incluso sin dispositivos nuevos.
-    let mut seen = HashSet::new();
     for le in [false, true] {
         let selector = if le {
             BluetoothLEDevice::GetDeviceSelectorFromConnectionStatus(
@@ -594,18 +608,24 @@ fn bluetooth(out: &mut Vec<Device>, trace: bool) -> windows::core::Result<()> {
         }
         for info in &devices {
             let id = info.Id()?;
-            let (connected, native_name, address, kind) = if le {
+            let (connected, native_name, address, kind, direct_level) = if le {
                 BluetoothLEDevice::FromIdAsync(&id)
                     .and_then(finish)
                     .map(|d| {
+                        let connected = d.ConnectionStatus().ok();
                         let result = (
-                            d.ConnectionStatus().ok(),
+                            connected,
                             d.Name().ok(),
                             d.BluetoothAddress().ok(),
                             d.Appearance()
                                 .and_then(|a| a.RawValue())
                                 .map(kind_from_appearance)
                                 .unwrap_or_default(),
+                            if connected == Some(BluetoothConnectionStatus::Connected) {
+                                ble_battery(&d)
+                            } else {
+                                None
+                            },
                         );
                         let _ = d.Close();
                         result
@@ -623,6 +643,7 @@ fn bluetooth(out: &mut Vec<Device>, trace: bool) -> windows::core::Result<()> {
                                 .and_then(|c| c.RawValue())
                                 .map(kind_from_class)
                                 .unwrap_or_default(),
+                            None,
                         );
                         let _ = d.Close();
                         result
@@ -635,7 +656,7 @@ fn bluetooth(out: &mut Vec<Device>, trace: bool) -> windows::core::Result<()> {
             let address = address
                 .map(|a| format!("{a:012X}"))
                 .unwrap_or_else(|| id.to_string());
-            let level = property(&info, "System.Devices.ContainerId")
+            let cached_level = property(&info, "System.Devices.ContainerId")
                 .and_then(|p| p.GetGuid().ok())
                 .and_then(|key| batteries.get(&key).copied())
                 .or_else(|| {
@@ -645,23 +666,18 @@ fn bluetooth(out: &mut Vec<Device>, trace: bool) -> windows::core::Result<()> {
                             .filter(|s| s.to_string().to_uppercase().contains(&address))
                             .and_then(|_| property_percent(&node))
                     })
-                })
-                .or_else(|| if le { ble_battery(&id) } else { None });
-            if !seen.insert(address.clone()) {
+                });
+            let key = format!("bt:{address}");
+            if let Some(existing) = out.iter_mut().find(|d| d.id == key) {
                 // Un dispositivo dual puede informar batería solo en su interfaz LE.
-                if let Some(existing) = out.iter_mut().find(|d| d.id == format!("bt:{address}")) {
-                    if existing.kind == DeviceKind::Unknown {
-                        existing.kind = kind;
-                    }
-                    if level.is_some() {
-                        existing.level = level;
-                        existing.detail.clear();
-                    }
+                if existing.kind == DeviceKind::Unknown {
+                    existing.kind = kind;
                 }
+                existing.update_bluetooth_level(direct_level, cached_level);
                 continue;
             }
-            out.push(Device {
-                id: format!("bt:{address}"),
+            let mut device = Device {
+                id: key,
                 kind,
                 name: native_name
                     .filter(|n| !n.is_empty())
@@ -669,68 +685,62 @@ fn bluetooth(out: &mut Vec<Device>, trace: bool) -> windows::core::Result<()> {
                     .map(|n| n.to_string())
                     .unwrap_or_else(|| format!("Bluetooth {address}")),
                 connection: "Bluetooth",
-                level,
+                level: None,
                 charging: false,
                 stale: false,
-                detail: if level.is_none() {
-                    "Windows no informa la batería".into()
-                } else {
-                    String::new()
-                },
-            });
+                windows_cached: false,
+                detail: "Sin lectura de batería por Bluetooth".into(),
+            };
+            device.update_bluetooth_level(direct_level, cached_level);
+            out.push(device);
         }
     }
     Ok(())
 }
-fn ble_battery(id: &HSTRING) -> Option<Level> {
-    let device = BluetoothLEDevice::FromIdAsync(id).and_then(finish).ok()?;
-    let result = (|| {
-        let services = device
-            .GetGattServicesForUuidAsync(GUID::from_u128(0x0000180f_0000_1000_8000_00805f9b34fb))
-            .and_then(finish)
-            .ok()?;
-        if services.Status().ok()? != GattCommunicationStatus::Success {
-            return None;
-        }
-        for service in &services.Services().ok()? {
-            let value = (|| {
-                let characteristics = service
-                    .GetCharacteristicsForUuidAsync(GUID::from_u128(
-                        0x00002a19_0000_1000_8000_00805f9b34fb,
-                    ))
+fn ble_battery(device: &BluetoothLEDevice) -> Option<Level> {
+    let services = device
+        .GetGattServicesForUuidAsync(GUID::from_u128(0x0000180f_0000_1000_8000_00805f9b34fb))
+        .and_then(finish)
+        .ok()?;
+    if services.Status().ok()? != GattCommunicationStatus::Success {
+        return None;
+    }
+    for service in &services.Services().ok()? {
+        let value = (|| {
+            let characteristics = service
+                .GetCharacteristicsForUuidAsync(GUID::from_u128(
+                    0x00002a19_0000_1000_8000_00805f9b34fb,
+                ))
+                .and_then(finish)
+                .ok()?;
+            if characteristics.Status().ok()? != GattCommunicationStatus::Success {
+                return None;
+            }
+            for characteristic in &characteristics.Characteristics().ok()? {
+                let reading = characteristic
+                    .ReadValueWithCacheModeAsync(BluetoothCacheMode::Uncached)
                     .and_then(finish)
                     .ok()?;
-                if characteristics.Status().ok()? != GattCommunicationStatus::Success {
-                    return None;
+                if reading.Status().ok()? != GattCommunicationStatus::Success {
+                    continue;
                 }
-                for characteristic in &characteristics.Characteristics().ok()? {
-                    let reading = characteristic
-                        .ReadValueWithCacheModeAsync(BluetoothCacheMode::Uncached)
-                        .and_then(finish)
-                        .ok()?;
-                    if reading.Status().ok()? != GattCommunicationStatus::Success {
-                        continue;
-                    }
-                    let buffer = reading.Value().ok()?;
-                    if buffer.Length().ok()? != 1 {
-                        continue;
-                    }
-                    let percent = DataReader::FromBuffer(&buffer).ok()?.ReadByte().ok()?;
-                    if percent <= 100 {
-                        return Some(Level::Percent(percent));
-                    }
+                let buffer = reading.Value().ok()?;
+                if buffer.Length().ok()? != 1 {
+                    continue;
                 }
-                None
-            })();
-            let _ = service.Close();
-            if value.is_some() {
-                return value;
+                let percent = DataReader::FromBuffer(&buffer).ok()?.ReadByte().ok()?;
+                if percent <= 100 {
+                    return Some(Level::Percent(percent));
+                }
             }
+            None
+        })();
+        let _ = service.Close();
+        if value.is_some() {
+            return value;
         }
-        None
-    })();
-    let _ = device.Close();
-    result
+    }
+    None
 }
 
 fn capacity_level(remaining: i32, full: i32) -> Option<Level> {
@@ -781,6 +791,8 @@ fn controllers(out: &mut Vec<Device>) -> windows::core::Result<()> {
         }) {
             if level.is_some() {
                 existing.level = level;
+                existing.stale = false;
+                existing.windows_cached = false;
                 existing.detail.clear();
             }
             existing.charging = status == Some(BatteryStatus::Charging);
@@ -799,6 +811,7 @@ fn controllers(out: &mut Vec<Device>) -> windows::core::Result<()> {
             level,
             charging: status == Some(BatteryStatus::Charging),
             stale: false,
+            windows_cached: false,
             detail: if level.is_none() {
                 "El mando o su receptor no informa la batería".into()
             } else {
@@ -1008,6 +1021,7 @@ fn receivers(out: &mut Vec<Device>, trace: bool) -> hidapi::HidResult<()> {
             level: value.map(|v| v.0),
             charging: value.is_some_and(|v| v.1),
             stale: false,
+            windows_cached: false,
             detail: if value.is_some() {
                 String::new()
             } else if known_ajazz || known_compx || known_mchose {
@@ -1306,6 +1320,7 @@ mod tests {
             level,
             charging,
             stale: false,
+            windows_cached: false,
             detail: String::new(),
         }
     }
@@ -1328,6 +1343,42 @@ mod tests {
         let mut alerts = Alerts::default();
         assert!(alerts.update(&current.devices, true).is_empty());
         assert_eq!(alerts.update(&old.devices, true).len(), 1);
+    }
+
+    #[test]
+    fn bluetooth_uses_direct_level_and_never_alerts_from_windows_cache() {
+        let mut phone = connected_device("bt:phone", false);
+        let windows = Some(Level::Percent(80));
+        phone.update_bluetooth_level(None, windows);
+        assert!(phone.windows_cached && phone.stale);
+        assert!(phone.status().contains("Caché de Windows"));
+
+        let direct = Some(Level::Percent(75));
+        phone.update_bluetooth_level(direct, windows);
+        assert_eq!(phone.level, direct);
+        assert!(!phone.windows_cached && !phone.stale);
+        phone.update_bluetooth_level(None, windows);
+        assert_eq!(phone.level, direct);
+
+        let mut cached = connected_device("bt:phone", false);
+        cached.update_bluetooth_level(None, Some(Level::Percent(15)));
+        let mut current = Snapshot {
+            devices: vec![cached],
+            ..Snapshot::default()
+        };
+        let mut alerts = Alerts::default();
+        assert!(alerts.update(&current.devices, true).is_empty());
+
+        let previous = Snapshot {
+            devices: vec![phone],
+            ..Snapshot::default()
+        };
+        preserve_last_readings(&mut current, &previous);
+        let retained = &mut current.devices[0];
+        assert_eq!(retained.level, direct);
+        assert!(retained.stale && !retained.windows_cached);
+        retained.update_bluetooth_level(Some(Level::Percent(15)), windows);
+        assert_eq!(alerts.update(&current.devices, true).len(), 1);
     }
 
     #[test]

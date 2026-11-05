@@ -479,7 +479,9 @@ pub fn battery_items(
         let mut status = device
             .level
             .map_or_else(|| "Sin lectura".into(), |level| level.label());
-        if snapshot.show_previous_reading(device) {
+        if device.windows_cached {
+            status.push_str(" (caché de Windows)");
+        } else if snapshot.show_previous_reading(device) {
             status.push_str(" (anterior)");
         } else if device.charging {
             status.push_str(" · Cargando");
