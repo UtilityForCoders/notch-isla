@@ -479,7 +479,7 @@ pub fn battery_items(
         let mut status = device
             .level
             .map_or_else(|| "Sin lectura".into(), |level| level.label());
-        if device.stale && device.level.is_some() {
+        if snapshot.show_previous_reading(device) {
             status.push_str(" (anterior)");
         } else if device.charging {
             status.push_str(" · Cargando");

@@ -28,6 +28,7 @@ pub const LOW_PERCENT: u8 = 20;
 const INTERVAL: Duration = Duration::from_secs(30);
 const CONNECTION_INTERVAL: Duration = Duration::from_secs(5);
 const DEVICE_ABSENCE_GRACE: Duration = Duration::from_secs(5);
+const RECEIVER_LABEL_GRACE: Duration = Duration::from_secs(5);
 const RECEIVER_READING_GRACE: Duration = Duration::from_secs(15);
 const BT_BATTERY: &str = "{104EA319-6EE2-4701-BD47-8DDBF425BBE5} 2";
 
@@ -185,18 +186,31 @@ pub struct Snapshot {
     pub scanning: bool,
     pub errors: Vec<String>,
     pub unavailable: HashSet<Source>,
-    checking_links: HashSet<String>,
+    checking_links: HashMap<String, Instant>,
 }
 
 impl Snapshot {
     pub fn confirmed_link(&self, device: &Device) -> bool {
         device.active_link()
-            && !self.checking_links.contains(&device.id)
+            && !self.checking_links.contains_key(&device.id)
             && !self.unavailable.contains(&device.source())
     }
 
     pub fn show_inactive_receiver(&self, device: &Device) -> bool {
-        device.receiver_without_link() && !self.checking_links.contains(&device.id)
+        device.receiver_without_link() && !self.checking_links.contains_key(&device.id)
+    }
+
+    /// Mantiene la etiqueta estable durante un fallo breve de lectura. La muestra
+    /// sigue marcada como antigua internamente y no puede generar avisos.
+    pub fn show_previous_reading(&self, device: &Device) -> bool {
+        device.stale
+            && device.level.is_some()
+            && !(device.source() == Source::Receiver
+                && self
+                    .checking_links
+                    .get(&device.id)
+                    .zip(self.updated)
+                    .is_some_and(|(since, now)| now.duration_since(*since) < RECEIVER_LABEL_GRACE))
     }
 }
 
@@ -318,7 +332,7 @@ impl LinkStability {
             retained.stale = true;
             retained.charging = false;
             if old.source() != Source::Receiver {
-                current.checking_links.insert(old.id.clone());
+                current.checking_links.insert(old.id.clone(), now);
             }
             current.devices.push(retained);
         }
@@ -329,8 +343,9 @@ impl LinkStability {
             if device.active_link() && !current.unavailable.contains(&Source::Receiver) {
                 self.receiver_silent_since.insert(device.id.clone(), None);
             } else if let Some(silent) = self.receiver_silent_since.get_mut(&device.id) {
-                if now.duration_since(*silent.get_or_insert(now)) < RECEIVER_READING_GRACE {
-                    current.checking_links.insert(device.id.clone());
+                let since = *silent.get_or_insert(now);
+                if now.duration_since(since) < RECEIVER_READING_GRACE {
+                    current.checking_links.insert(device.id.clone(), since);
                 }
             }
         }
@@ -885,7 +900,9 @@ fn parse_mchose(data: &[u8]) -> Option<(Level, bool)> {
 }
 
 fn mchose(device: &HidDevice, trace: bool) -> Option<(Level, bool)> {
-    for (report, size) in [(0x11, 21), (0x12, 65)] {
+    // El receptor a veces entrega un marco vacío mientras espera al mouse.
+    // Dar tiempo a cada solicitud y repetir ambas variantes una sola vez.
+    for (report, size) in [(0x11, 21), (0x12, 65), (0x11, 21), (0x12, 65)] {
         let mut request = vec![0xff; size];
         request[0] = report;
         request[1] = !0x06u8;
@@ -896,8 +913,8 @@ fn mchose(device: &HidDevice, trace: bool) -> Option<(Level, bool)> {
         if sent.is_err() {
             continue;
         }
-        std::thread::sleep(Duration::from_millis(20));
-        for _ in 0..3 {
+        for delay_ms in [20, 15, 15, 15] {
+            std::thread::sleep(Duration::from_millis(delay_ms));
             let mut response = vec![0; size];
             response[0] = report;
             if let Ok(count) = device.get_feature_report(&mut response) {
@@ -908,7 +925,6 @@ fn mchose(device: &HidDevice, trace: bool) -> Option<(Level, bool)> {
                     return Some(value);
                 }
             }
-            std::thread::sleep(Duration::from_millis(10));
         }
     }
     None
@@ -1168,11 +1184,19 @@ mod tests {
         let missed = scan(15, idle.clone());
         assert_eq!(missed.devices[0].level, Some(Level::Percent(78)));
         assert!(missed.devices[0].stale);
+        assert!(!missed.show_previous_reading(&missed.devices[0]));
         assert!(!missed.confirmed_link(&missed.devices[0]));
         assert!(!missed.show_inactive_receiver(&missed.devices[0]));
         assert!(tracker.update(&missed, true).is_empty());
+        let rapid_refresh = scan(16, idle.clone());
+        assert!(!rapid_refresh.show_previous_reading(&rapid_refresh.devices[0]));
+        assert!(tracker.update(&rapid_refresh, true).is_empty());
         assert!(tracker.update(&scan(20, active.clone()), true).is_empty());
         tracker.update(&scan(25, idle.clone()), true);
+        let no_reading = scan(30, idle.clone());
+        assert!(no_reading.show_previous_reading(&no_reading.devices[0]));
+        assert!(!no_reading.show_inactive_receiver(&no_reading.devices[0]));
+        assert!(tracker.update(&no_reading, true).is_empty());
         let sleeping = scan(40, idle);
         assert!(sleeping.show_inactive_receiver(&sleeping.devices[0]));
         assert!(tracker.update(&sleeping, true).is_empty());

@@ -56,7 +56,9 @@ reemplazar otro aviso. La batería baja tiene prioridad sobre la conexión.
 
 Un receptor USB puede seguir presente con el mouse apagado o dormido. Una
 respuesta vacía o inválida significa **sin lectura**, nunca 0 %. Si ya hubo una
-lectura válida, se conserva en memoria y se marca **anterior / Última lectura**.
+lectura válida, se conserva en memoria. En los receptores, la fila marca el
+porcentaje como **anterior** si la falta de lectura persiste cinco segundos.
+El porcentaje guardado queda excluido de los avisos desde el primer fallo.
 Un receptor que ya respondió conserva su fila durante los primeros 15 segundos
 sin lectura. Si la falta de respuesta continúa, pasa a **Receptores sin enlace
 confirmado**, con su porcentaje como detalle histórico. En MCHOSE también
