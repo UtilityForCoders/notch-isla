@@ -1,6 +1,6 @@
 [package]
 name = "notch-isla"
-version = "0.5.2"
+version = "0.5.3"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/UtilityForCoders/notch-isla"
@@ -13,6 +13,9 @@ tiny-skia = { version = "0.12", default-features = false, features = ["std", "si
 windows-numerics = "0.3"
 # El macro `implement` (avisos de volumen y de salida de audio) genera código que la nombra.
 windows-core = "0.62"
+windows-collections = "0.3"
+windows-future = "0.3"
+hidapi = { version = "2.6", default-features = false, features = ["windows-native"] }
 
 [dependencies.windows]
 version = "0.62"
@@ -20,6 +23,19 @@ features = [
     # SMTC: la música que suena en cualquier app (Spotify, navegador...).
     "Foundation",
     "Foundation_Collections",
+    "Graphics_Effects",
+    "System",
+    "System_Power",
+    "Devices_Enumeration",
+    "Devices_Bluetooth",
+    "Devices_Bluetooth_GenericAttributeProfile",
+    "Devices_Power",
+    "Gaming_Input",
+    "UI_Composition",
+    "UI_Composition_Desktop",
+    "Win32_System_WinRT_Composition",
+    "Win32_System_WinRT_Graphics_Direct2D",
+    "Win32_Graphics_Dwm",
     "Media_Control",
     # Carátula: abrir la miniatura y decodificarla (JPEG/PNG) con WIC.
     "Graphics_Imaging",
@@ -57,6 +73,14 @@ features = [
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
 ]
+
+# El rasterizador sin optimizar consume el presupuesto de un cuadro a 144/240 Hz.
+# Mantener símbolos y comprobaciones de debug, pero optimizar las rutas de dibujo.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
 
 [profile.release]
 opt-level = 3

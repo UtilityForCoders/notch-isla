@@ -24,6 +24,10 @@ impl Spring {
         self.target = target;
     }
 
+    pub fn target(&self) -> f32 {
+        self.target
+    }
+
     /// Cambia rapidez y rebote sin cortar el movimiento (sigue desde donde va).
     pub fn retune(&mut self, stiffness: f32, damping: f32) {
         self.stiffness = stiffness;

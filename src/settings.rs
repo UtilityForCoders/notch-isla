@@ -25,6 +25,8 @@ pub struct Settings {
     pub hide_fullscreen: bool,
     /// Avisa al cambiar la salida de audio (audífonos, parlantes).
     pub notices: bool,
+    pub battery_notices: bool,
+    pub connection_notices: bool,
     /// Letra sincronizada dentro de la isla expandida y en el proyector bajo la isla encogida.
     /// Se activan por separado; apagadas si no se activan (la letra se pide a lrclib.net).
     pub lyrics_island: bool,
@@ -37,8 +39,14 @@ pub struct Settings {
     pub offset_x: i32,
     /// Adapta la frecuencia de cuadros de las animaciones a los Hz del monitor (120 Hz, 240 Hz, etc.).
     pub high_refresh: bool,
-    /// Fondo translúcido con efecto acrílico y borde sutil (si no, negro opaco).
+    /// Fondo desenfocado por el compositor con tinte oscuro (si no, negro opaco).
     pub translucent: bool,
+    /// Expandir al pasar el puntero; por defecto se requiere un clic.
+    pub expand_on_hover: bool,
+    /// Mantiene los controles abiertos aunque el puntero salga de la isla.
+    pub pinned_expanded: bool,
+    /// Desviación del desenfoque gaussiano en píxeles lógicos (0 a 40).
+    pub blur_radius: u32,
 }
 
 impl Settings {
@@ -59,6 +67,8 @@ impl Settings {
             monitor: read_string(w!("Monitor")).unwrap_or_default(),
             hide_fullscreen: read_dword(w!("HideFullscreen")).is_none_or(|v| v != 0),
             notices: read_dword(w!("Notices")).is_none_or(|v| v != 0),
+            battery_notices: read_dword(w!("BatteryNotices")).is_none_or(|v| v != 0),
+            connection_notices: read_dword(w!("ConnectionNotices")).is_none_or(|v| v != 0),
             lyrics_island: read_dword(w!("LyricsIsland")).map_or(lyrics, |v| v != 0),
             lyrics_projector: read_dword(w!("LyricsProjector")).map_or(lyrics, |v| v != 0),
             real_bars: read_dword(w!("RealBars")).is_none_or(|v| v != 0),
@@ -66,6 +76,9 @@ impl Settings {
             offset_x: read_dword(w!("OffsetX")).map_or(0, |v| v as i32),
             high_refresh: read_dword(w!("HighRefresh")).is_some_and(|v| v != 0),
             translucent: read_dword(w!("Translucent")).is_none_or(|v| v != 0),
+            expand_on_hover: read_dword(w!("ExpandOnHover")).is_some_and(|v| v != 0),
+            pinned_expanded: read_dword(w!("PinnedExpanded")).is_some_and(|v| v != 0),
+            blur_radius: read_dword(w!("BlurRadius")).unwrap_or(16).min(40),
         }
     }
 
@@ -74,6 +87,8 @@ impl Settings {
         write_string(w!("Monitor"), &self.monitor);
         write_dword(w!("HideFullscreen"), self.hide_fullscreen as u32);
         write_dword(w!("Notices"), self.notices as u32);
+        write_dword(w!("BatteryNotices"), self.battery_notices as u32);
+        write_dword(w!("ConnectionNotices"), self.connection_notices as u32);
         write_dword(w!("LyricsIsland"), self.lyrics_island as u32);
         write_dword(w!("LyricsProjector"), self.lyrics_projector as u32);
         write_dword(w!("RealBars"), self.real_bars as u32);
@@ -82,6 +97,15 @@ impl Settings {
         write_dword(w!("OffsetX"), self.offset_x as u32);
         write_dword(w!("HighRefresh"), self.high_refresh as u32);
         write_dword(w!("Translucent"), self.translucent as u32);
+        write_dword(w!("ExpandOnHover"), self.expand_on_hover as u32);
+        write_dword(w!("PinnedExpanded"), self.pinned_expanded as u32);
+        write_dword(w!("BlurRadius"), self.blur_radius);
+    }
+
+    /// Guarda la vista previa del deslizador al cerrar el menú, sin reescribir todo.
+    pub fn save_appearance(&self) {
+        write_dword(w!("Translucent"), self.translucent as u32);
+        write_dword(w!("BlurRadius"), self.blur_radius);
     }
 
     /// Alguna de las dos letras está activada: hay que pedirla.

@@ -3,19 +3,21 @@
 
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use windows::core::{w, Result};
+use windows::core::{w, Result, PCWSTR};
 use windows::Win32::Foundation::{E_FAIL, HWND};
 use windows::Win32::Graphics::Gdi::{
     CreateBitmap, CreateDIBSection, DeleteObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
     DIB_RGB_COLORS,
 };
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Shell::{
     Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_USER, NIM_ADD, NIM_DELETE,
     NIM_MODIFY, NOTIFYICONDATAW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateIconIndirect, DestroyIcon, GetSystemMetrics, LoadIconW, RegisterWindowMessageW, HICON,
-    ICONINFO, IDI_APPLICATION, SM_CXSMICON, WM_APP,
+    CreateIconIndirect, DestroyIcon, GetSystemMetrics, LoadIconW, LoadImageW,
+    RegisterWindowMessageW, HICON, ICONINFO, IDI_APPLICATION, IMAGE_ICON, LR_DEFAULTCOLOR,
+    SM_CXSMICON, SM_CYSMICON, WM_APP,
 };
 
 use crate::hotkey::{self, Hotkey};
@@ -45,6 +47,11 @@ const CMD_LYRICS_PROJECTOR: usize = 13;
 const CMD_CENTER: usize = 14;
 const CMD_HIGH_REFRESH: usize = 15;
 const CMD_TRANSLUCENT: usize = 16;
+const CMD_EXPAND_ON_HOVER: usize = 17;
+const CMD_PIN_EXPANDED: usize = 18;
+const CMD_BATTERY_NOTICES: usize = 20;
+const CMD_BATTERY_REFRESH: usize = 21;
+const CMD_CONNECTION_NOTICES: usize = 22;
 /// Las opciones de los submenús van numeradas a partir de estas bases.
 const CMD_HIDE_DELAY: usize = 100;
 const CMD_MONITOR: usize = 200;
@@ -52,11 +59,15 @@ const CMD_TIMER: usize = 300;
 /// Menú de salida de audio de la isla.
 const CMD_OUTPUT_DEFAULT: usize = 400;
 const CMD_OUTPUT: usize = 401;
+const CMD_BLUR_RADIUS: usize = 500;
 
 /// Duraciones del temporizador en minutos.
 pub const TIMER_MINUTES: [u32; 6] = [5, 10, 15, 25, 45, 60];
 
 pub enum Command {
+    ToggleBatteryNotices,
+    ToggleConnectionNotices,
+    RefreshBattery,
     ToggleAutostart,
     Update,
     Exit,
@@ -83,13 +94,15 @@ pub enum Command {
     Center,
     /// Alternar adaptación de animaciones a los Hz del monitor.
     ToggleHighRefresh,
-    /// Alternar fondo translúcido estilo acrílico.
+    /// Alternar desenfoque real del fondo.
     ToggleTranslucent,
+    ToggleExpandOnHover,
+    BlurRadius(u32),
 }
 
 /// Lo que el menú necesita saber para marcar las opciones actuales.
 pub struct MenuState<'a> {
-    /// Texto de la opción de actualizar, si hay una versión nueva; va arriba de todo.
+    /// Texto de la opción de actualizar, si hay una versión nueva.
     pub update: Option<&'a str>,
     pub settings: Settings,
     pub monitors: &'a [Monitor],
@@ -117,7 +130,8 @@ impl Tray {
                 RegisterWindowMessageW(w!("TaskbarCreated")),
                 Ordering::Relaxed,
             );
-            let icon = make_icon()
+            let icon = load_app_icon()
+                .or_else(|_| make_icon())
                 .or_else(|_| LoadIconW(None, IDI_APPLICATION))
                 .unwrap_or_default();
             let tray = Self { hwnd, icon };
@@ -190,7 +204,10 @@ pub fn build_items(state: &MenuState) -> Vec<Item> {
         label: label.to_string(),
         checked,
     };
-    let mut items = Vec::new();
+    let mut items = vec![
+        Item::Label(format!("Notch Isla v{}", env!("CARGO_PKG_VERSION"))),
+        Item::Separator,
+    ];
     if let Some(label) = state.update {
         items.push(action(CMD_UPDATE, label, false));
         items.push(Item::Separator);
@@ -243,6 +260,12 @@ pub fn build_items(state: &MenuState) -> Vec<Item> {
     });
 
     items.push(Item::Separator);
+    let mut devices = Vec::new();
+    crate::with_app(|app| devices = app.battery_group_items());
+    items.push(Item::Group {
+        label: "Dispositivos y batería".into(),
+        items: devices,
+    });
     // La letra se pide a internet: se dice a quién, para que cada uno decida activarla.
     items.push(Item::Group {
         label: "Mostrar letra de la canción".to_string(),
@@ -253,7 +276,6 @@ pub fn build_items(state: &MenuState) -> Vec<Item> {
                 "Con la isla encogida",
                 settings.lyrics_projector,
             ),
-            Item::Label("Se busca en lrclib.net".to_string()),
         ],
     });
     items.push(action(
@@ -276,15 +298,31 @@ pub fn build_items(state: &MenuState) -> Vec<Item> {
         "Adaptar animaciones a los Hz de la pantalla",
         settings.high_refresh,
     ));
-    items.push(action(
+    let mut blur = vec![action(
         CMD_TRANSLUCENT,
-        "Fondo translúcido",
+        "Activar desenfoque",
         settings.translucent,
-    ));
+    )];
+    blur.push(Item::Slider {
+        id: CMD_BLUR_RADIUS,
+        label: format!("Intensidad: {} %", settings.blur_radius * 100 / 40),
+        value: settings.blur_radius,
+        min: 0,
+        max: 40,
+    });
+    items.push(Item::Group {
+        label: "Desenfoque del fondo".to_string(),
+        items: blur,
+    });
     items.push(action(
         CMD_CENTER,
         "Centrar en la pantalla",
         settings.offset_x == 0,
+    ));
+    items.push(action(
+        CMD_EXPAND_ON_HOVER,
+        "Expandir al pasar el puntero",
+        settings.expand_on_hover,
     ));
     items.push(action(
         CMD_AUTOSTART,
@@ -318,6 +356,9 @@ pub fn build_items(state: &MenuState) -> Vec<Item> {
 fn id_to_command(id: usize, state: &MenuState) -> Option<Command> {
     let pick = |base: usize, len: usize| (base..base + len).contains(&id).then(|| id - base);
     match id {
+        CMD_BATTERY_NOTICES => Some(Command::ToggleBatteryNotices),
+        CMD_CONNECTION_NOTICES => Some(Command::ToggleConnectionNotices),
+        CMD_BATTERY_REFRESH => Some(Command::RefreshBattery),
         CMD_AUTOSTART => Some(Command::ToggleAutostart),
         CMD_UPDATE => Some(Command::Update),
         CMD_EXIT => Some(Command::Exit),
@@ -331,11 +372,14 @@ fn id_to_command(id: usize, state: &MenuState) -> Option<Command> {
         CMD_CENTER => Some(Command::Center),
         CMD_HIGH_REFRESH => Some(Command::ToggleHighRefresh),
         CMD_TRANSLUCENT => Some(Command::ToggleTranslucent),
+        CMD_EXPAND_ON_HOVER => Some(Command::ToggleExpandOnHover),
         CMD_HOTKEY_CHANGE => Some(Command::ChangeHotkey),
         CMD_HOTKEY_DEFAULT => Some(Command::SetHotkey(Some(hotkey::DEFAULT))),
         CMD_HOTKEY_OFF => Some(Command::SetHotkey(None)),
         _ => {
-            if let Some(i) = pick(CMD_HIDE_DELAY, HIDE_DELAYS.len()) {
+            if let Some(i) = pick(CMD_BLUR_RADIUS, 41) {
+                Some(Command::BlurRadius(i as u32))
+            } else if let Some(i) = pick(CMD_HIDE_DELAY, HIDE_DELAYS.len()) {
                 Some(Command::HideDelay(HIDE_DELAYS[i]))
             } else if let Some(i) = pick(CMD_MONITOR, state.monitors.len()) {
                 Some(Command::Monitor(i))
@@ -354,25 +398,150 @@ where
     F: FnMut(Command, &mut Settings) -> bool,
 {
     let items = build_items(&state);
-    menu::show_interactive(items, move |id| {
+    let mut appearance_changed = false;
+    menu::show_tray(items, |id| {
         let Some(cmd) = id_to_command(id, &state) else {
             return menu::MenuAction::Close;
         };
         let mut settings = state.settings.clone();
+        let blur_changed = matches!(&cmd, Command::BlurRadius(_));
         let keep_open = on_command(cmd, &mut settings);
         if keep_open {
             state.settings = settings;
+            if blur_changed {
+                appearance_changed = true;
+                return menu::MenuAction::UpdateSlider {
+                    id: CMD_BLUR_RADIUS,
+                    value: state.settings.blur_radius,
+                    label: format!("Intensidad: {} %", state.settings.blur_radius * 100 / 40),
+                    checked: Some((CMD_TRANSLUCENT, state.settings.translucent)),
+                };
+            }
             let new_items = build_items(&state);
             menu::MenuAction::KeepOpen(new_items)
         } else {
             menu::MenuAction::Close
         }
     });
+    if appearance_changed {
+        state.settings.save_appearance();
+    }
 }
 
 pub enum IslandMenuChoice {
     Output(Option<usize>),
     Center,
+    TogglePinnedExpanded,
+}
+
+pub fn battery_items(
+    snapshot: &crate::battery::Snapshot,
+    notices: bool,
+    connections: bool,
+) -> Vec<Item> {
+    let mut items = vec![
+        Item::Label("Dispositivos y batería".into()),
+        Item::Separator,
+        Item::Action {
+            id: CMD_CONNECTION_NOTICES,
+            label: "Avisar al conectar un dispositivo".into(),
+            checked: connections,
+        },
+        Item::Action {
+            id: CMD_BATTERY_NOTICES,
+            label: "Avisar con batería baja (< 20 %)".into(),
+            checked: notices,
+        },
+        Item::Action {
+            id: CMD_BATTERY_REFRESH,
+            label: if snapshot.scanning {
+                "Consultando dispositivos…".into()
+            } else {
+                "Actualizar ahora".into()
+            },
+            checked: false,
+        },
+        Item::Separator,
+    ];
+    if snapshot.updated.is_some()
+        && !snapshot
+            .devices
+            .iter()
+            .any(|d| !snapshot.show_inactive_receiver(d))
+    {
+        items.push(Item::Label("Sin periféricos activos detectados".into()));
+    }
+    for device in snapshot
+        .devices
+        .iter()
+        .filter(|d| !snapshot.show_inactive_receiver(d))
+    {
+        let mut status = device
+            .level
+            .map_or_else(|| "Sin lectura".into(), |level| level.label());
+        if device.windows_cached {
+            status.push_str(" (caché de Windows)");
+        } else if snapshot.show_previous_reading(device) {
+            status.push_str(" (anterior)");
+        } else if device.charging {
+            status.push_str(" · Cargando");
+        }
+        items.push(Item::DeviceStatus {
+            name: device.name.clone(),
+            status,
+            icon: island::device_icon(device.kind),
+            connection: match device.connection {
+                "Bluetooth" => island::NoticeIcon::Bluetooth,
+                "USB / 2.4 GHz" | "Inalámbrico" => island::NoticeIcon::Wireless,
+                "USB / receptor" | "USB" => island::NoticeIcon::Usb,
+                _ => island::NoticeIcon::Device,
+            },
+        });
+    }
+    let inactive: Vec<_> = snapshot
+        .devices
+        .iter()
+        .filter(|d| snapshot.show_inactive_receiver(d))
+        .collect();
+    if !inactive.is_empty() {
+        let mut details = vec![Item::Label("USB conectado; enlace no confirmado".into())];
+        for device in &inactive {
+            details.push(Item::Label(device.name.clone()));
+            if let Some(level) = device.level {
+                details.push(Item::Label(format!(
+                    "Última lectura por receptor: {}",
+                    level.label()
+                )));
+            }
+            if !device.detail.is_empty() {
+                details.push(Item::Label(device.detail.clone()));
+            }
+        }
+        details.push(Item::Label("Estas lecturas no generan avisos".into()));
+        items.push(Item::Group {
+            label: format!("Receptores sin enlace confirmado ({})", inactive.len()),
+            items: details,
+        });
+    }
+    if !snapshot.errors.is_empty() {
+        items.push(Item::Group {
+            label: "No se pudo consultar alguna fuente".into(),
+            items: snapshot.errors.iter().cloned().map(Item::Label).collect(),
+        });
+    }
+    items
+}
+
+/// El encabezado del submenú reemplaza el título del antiguo panel.
+pub fn battery_group_items(
+    snapshot: &crate::battery::Snapshot,
+    notices: bool,
+    connections: bool,
+) -> Vec<Item> {
+    battery_items(snapshot, notices, connections)
+        .into_iter()
+        .skip(2)
+        .collect()
 }
 
 /// Menú contextual sobre la isla: opciones de salida de audio y centrar en la pantalla.
@@ -382,8 +551,15 @@ pub fn show_island_menu(
     current: Option<&str>,
     unavailable: Option<&str>,
     is_centered: bool,
+    pinned_expanded: bool,
 ) -> Option<IslandMenuChoice> {
     let mut items = Vec::new();
+    items.push(Item::Action {
+        id: CMD_PIN_EXPANDED,
+        label: "Fijar versión extendida".to_string(),
+        checked: pinned_expanded,
+    });
+    items.push(Item::Separator);
     if let Some(app) = app {
         items.push(Item::Label(format!("Salida de audio de {app}")));
         items.push(Item::Separator);
@@ -411,6 +587,7 @@ pub fn show_island_menu(
         checked: is_centered,
     });
     match menu::show(items)? {
+        CMD_PIN_EXPANDED => Some(IslandMenuChoice::TogglePinnedExpanded),
         CMD_CENTER => Some(IslandMenuChoice::Center),
         CMD_OUTPUT_DEFAULT => Some(IslandMenuChoice::Output(None)),
         id if (CMD_OUTPUT..CMD_OUTPUT + outputs.len()).contains(&id) => {
@@ -420,7 +597,25 @@ pub fn show_island_menu(
     }
 }
 
-/// Convierte el dibujo de `island::tray_icon` en un HICON del tamaño que usa la bandeja.
+/// Carga el recurso 1 de app.rc (assets/icon.ico) al tamaño de la bandeja.
+#[allow(clippy::manual_dangling_ptr)]
+fn load_app_icon() -> Result<HICON> {
+    unsafe {
+        let instance = GetModuleHandleW(None)?;
+        // Sin LR_SHARED: Tray es dueño del HICON y lo libera con DestroyIcon.
+        let icon = LoadImageW(
+            Some(instance.into()),
+            PCWSTR(1usize as *const u16),
+            IMAGE_ICON,
+            GetSystemMetrics(SM_CXSMICON).max(16),
+            GetSystemMetrics(SM_CYSMICON).max(16),
+            LR_DEFAULTCOLOR,
+        )?;
+        Ok(HICON(icon.0))
+    }
+}
+
+/// Dibujo de respaldo si no se puede cargar el ícono incrustado.
 fn make_icon() -> Result<HICON> {
     unsafe {
         let size = GetSystemMetrics(SM_CXSMICON).max(16) as u32;
