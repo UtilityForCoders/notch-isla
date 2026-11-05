@@ -49,7 +49,6 @@ const CMD_HIGH_REFRESH: usize = 15;
 const CMD_TRANSLUCENT: usize = 16;
 const CMD_EXPAND_ON_HOVER: usize = 17;
 const CMD_PIN_EXPANDED: usize = 18;
-const CMD_DEVICES: usize = 19;
 const CMD_BATTERY_NOTICES: usize = 20;
 const CMD_BATTERY_REFRESH: usize = 21;
 /// Las opciones de los submenús van numeradas a partir de estas bases.
@@ -65,7 +64,8 @@ const CMD_BLUR_RADIUS: usize = 500;
 pub const TIMER_MINUTES: [u32; 6] = [5, 10, 15, 25, 45, 60];
 
 pub enum Command {
-    Devices,
+    ToggleBatteryNotices,
+    RefreshBattery,
     ToggleAutostart,
     Update,
     Exit,
@@ -258,8 +258,13 @@ pub fn build_items(state: &MenuState) -> Vec<Item> {
     });
 
     items.push(Item::Separator);
+    let mut devices = Vec::new();
+    crate::with_app(|app| devices = app.battery_group_items());
+    items.push(Item::Group {
+        label: "Dispositivos y batería".into(),
+        items: devices,
+    });
     // La letra se pide a internet: se dice a quién, para que cada uno decida activarla.
-    items.push(action(CMD_DEVICES, "Dispositivos y batería", false));
     items.push(Item::Group {
         label: "Mostrar letra de la canción".to_string(),
         items: vec![
@@ -350,7 +355,8 @@ pub fn build_items(state: &MenuState) -> Vec<Item> {
 fn id_to_command(id: usize, state: &MenuState) -> Option<Command> {
     let pick = |base: usize, len: usize| (base..base + len).contains(&id).then(|| id - base);
     match id {
-        CMD_DEVICES => Some(Command::Devices),
+        CMD_BATTERY_NOTICES => Some(Command::ToggleBatteryNotices),
+        CMD_BATTERY_REFRESH => Some(Command::RefreshBattery),
         CMD_AUTOSTART => Some(Command::ToggleAutostart),
         CMD_UPDATE => Some(Command::Update),
         CMD_EXIT => Some(Command::Exit),
@@ -513,19 +519,25 @@ pub fn battery_items(snapshot: &crate::battery::Snapshot, notices: bool) -> Vec<
     items
 }
 
-pub fn show_battery_menu(mut on_action: impl FnMut(bool)) {
-    let mut initial = Vec::new();
-    crate::with_app(|app| initial = app.battery_menu_items());
-    menu::show_tray(initial, |id| {
-        match id {
-            CMD_BATTERY_NOTICES => on_action(true),
-            CMD_BATTERY_REFRESH => on_action(false),
-            _ => return menu::MenuAction::Close,
+/// Contenido plano del grupo: mantiene accesibles las demás opciones del menú.
+pub fn battery_group_items(snapshot: &crate::battery::Snapshot, notices: bool) -> Vec<Item> {
+    let mut result = Vec::new();
+    // Quitar el encabezado del antiguo panel; la etiqueta del grupo lo reemplaza.
+    for item in battery_items(snapshot, notices).into_iter().skip(2) {
+        match item {
+            Item::Group { label, items } => {
+                result.push(Item::Label(label));
+                result.extend(
+                    items
+                        .into_iter()
+                        .filter(|item| matches!(item, Item::Label(_))),
+                );
+            }
+            Item::Separator => {}
+            item => result.push(item),
         }
-        let mut items = Vec::new();
-        crate::with_app(|app| items = app.battery_menu_items());
-        menu::MenuAction::KeepOpen(items)
-    });
+    }
+    result
 }
 
 /// Menú contextual sobre la isla: opciones de salida de audio y centrar en la pantalla.

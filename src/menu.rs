@@ -48,9 +48,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WindowFromPoint, GA_ROOT, GA_ROOTOWNER, IDC_ARROW, KBDLLHOOKSTRUCT, MA_NOACTIVATE, MSG,
     MSLLHOOKSTRUCT, SW_SHOWNOACTIVATE, ULW_ALPHA, WA_INACTIVE, WH_KEYBOARD_LL, WH_MOUSE_LL,
     WM_ACTIVATE, WM_CAPTURECHANGED, WM_CLOSE, WM_DESTROY, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_RBUTTONDOWN, WM_RBUTTONUP,
-    WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN,
+    WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WNDCLASSEXW, WS_EX_LAYERED,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 use windows_numerics::Vector2;
 
@@ -59,6 +59,7 @@ use crate::text::make_format;
 use crate::Surface;
 
 /// Una opción del menú.
+#[derive(Clone)]
 pub enum Item {
     /// Opción que se puede elegir: `show` devuelve su `id`. `checked` dibuja la marca.
     Action {
@@ -253,6 +254,10 @@ struct Row {
 
 struct State {
     hwnd: HWND,
+    items: Vec<Item>,
+    scroll: f32,
+    content_height: f32,
+    keyboard_pointer: Option<POINT>,
     entries: Vec<Entry>,
     texts: Vec<Text>,
     /// Grupos desplegados (por posición entre las opciones de primer nivel).
@@ -287,6 +292,41 @@ impl State {
         label: &str,
         checked: Option<(usize, bool)>,
     ) {
+        fn sync(
+            items: &mut [Item],
+            id: usize,
+            value: u32,
+            label: &str,
+            checked: Option<(usize, bool)>,
+        ) {
+            for item in items {
+                match item {
+                    Item::Slider {
+                        id: candidate,
+                        value: current,
+                        label: text,
+                        ..
+                    } if *candidate == id => {
+                        *current = value;
+                        *text = label.into();
+                    }
+                    Item::Action {
+                        id: candidate,
+                        checked: current,
+                        ..
+                    } => {
+                        if let Some((wanted, next)) = checked {
+                            if *candidate == wanted {
+                                *current = next;
+                            }
+                        }
+                    }
+                    Item::Group { items, .. } => sync(items, id, value, label, checked),
+                    _ => {}
+                }
+            }
+        }
+        sync(&mut self.items, id, value, label, checked);
         fn update(
             entries: &mut [Entry],
             id: usize,
@@ -362,6 +402,7 @@ impl State {
     }
 
     fn update_items(&mut self, items: Vec<Item>) {
+        self.items = items.clone();
         let mut texts = Vec::new();
         let entries = build(
             &self.dwrite,
@@ -401,9 +442,20 @@ fn with_state(f: impl FnOnce(&mut State)) {
     }
 }
 
-/// Actualiza un panel abierto desde un mensaje de la ventana principal.
-pub fn replace_items(items: Vec<Item>) {
-    with_state(|state| state.update_items(items));
+/// Actualiza solo un grupo; conserva el resto de ajustes y los grupos abiertos.
+pub fn replace_group(label: &str, items: Vec<Item>) {
+    with_state(|state| {
+        let mut source = state.items.clone();
+        if let Some(Item::Group {
+            items: children, ..
+        }) = source
+            .iter_mut()
+            .find(|item| matches!(item, Item::Group { label: name, .. } if name == label))
+        {
+            *children = items;
+            state.update_items(source);
+        }
+    });
 }
 
 fn run(items: Vec<Item>, from_tray: bool, listen_to_keyboard: bool) -> Result<Option<usize>> {
@@ -436,7 +488,7 @@ fn run(items: Vec<Item>, from_tray: bool, listen_to_keyboard: bool) -> Result<Op
         let font = make_format(&dwrite, DWRITE_FONT_WEIGHT_REGULAR, FONT * scale)?;
         let label_font = make_format(&dwrite, DWRITE_FONT_WEIGHT_REGULAR, LABEL_FONT * scale)?;
         let mut texts = Vec::new();
-        let entries = build(&dwrite, &font, &label_font, items, &mut texts);
+        let entries = build(&dwrite, &font, &label_font, items.clone(), &mut texts);
         let width = text_width(&entries, &texts, scale, false).clamp(MIN_W, MAX_W);
 
         let factory: ID2D1Factory = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?;
@@ -482,6 +534,10 @@ fn run(items: Vec<Item>, from_tray: bool, listen_to_keyboard: bool) -> Result<Op
         STATE.with(|cell| {
             *cell.borrow_mut() = Some(State {
                 hwnd,
+                items,
+                scroll: 0.0,
+                content_height: 0.0,
+                keyboard_pointer: None,
                 entries,
                 texts,
                 open,
@@ -918,11 +974,17 @@ fn relayout(st: &mut State) {
         }
     }
     let height = y + PAD;
+    st.content_height = height;
+    let viewport = height.min((st.work.bottom - st.work.top) as f32 / st.scale);
+    st.scroll = st.scroll.clamp(0.0, (height - viewport).max(0.0));
+    for row in &mut rows {
+        row.y -= st.scroll;
+    }
     st.rows = rows;
 
     let s = st.scale;
     let w = (st.width * s).ceil() as i32;
-    let h = (height * s).ceil() as i32;
+    let h = (viewport * s).floor() as i32;
     let work = st.work;
     // Hacia la derecha del cursor si cabe; si no, hacia la izquierda.
     let x = if st.anchor.x + w <= work.right {
@@ -1055,6 +1117,14 @@ fn render(st: &mut State) {
                 stroke(pixmap, &paint, pb, 1.6 * s);
             }
         }
+    }
+    let viewport = h / s;
+    if st.content_height > viewport {
+        let track = (viewport - 2.0 * RADIUS).max(1.0);
+        let thumb = (track * viewport / st.content_height).max(18.0).min(track);
+        let y = RADIUS + (track - thumb) * st.scroll / (st.content_height - viewport);
+        paint.set_color_rgba8(255, 255, 255, 100);
+        fill_rounded_rect(pixmap, &paint, w - 4.0 * s, y * s, 2.0 * s, thumb * s, s);
     }
     st.surface.copy_to_dib();
 
@@ -1222,6 +1292,17 @@ fn step(st: &mut State, dir: i32) {
         i = (i + dir).rem_euclid(n);
         if st.rows[i as usize].kind.selectable() {
             st.hover = Some(i as usize);
+            let row = &st.rows[i as usize];
+            let viewport = st.surface.height as f32 / st.scale;
+            let delta = if row.y < PAD {
+                row.y - PAD
+            } else {
+                (row.y + row.h - viewport + PAD).max(0.0)
+            };
+            if delta != 0.0 {
+                st.scroll += delta;
+                relayout(st);
+            }
             render(st);
             return;
         }
@@ -1232,6 +1313,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
     let deferrable = matches!(
         msg,
         WM_MOUSEMOVE
+            | WM_MOUSEWHEEL
             | 0x02A3
             | WM_LBUTTONDOWN
             | WM_LBUTTONUP
@@ -1247,6 +1329,19 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
         return LRESULT(0);
     }
     match msg {
+        WM_MOUSEWHEEL => {
+            let delta = ((wparam.0 >> 16) as u16 as i16) as f32 / 120.0;
+            with_state(|st| {
+                if st.dragging_slider.is_none() {
+                    st.scroll -= delta * ROW_H * 3.0;
+                    st.hover = None;
+                    st.keyboard_pointer = None;
+                    relayout(st);
+                    render(st);
+                }
+            });
+            LRESULT(0)
+        }
         WM_MOUSEACTIVATE if MENU_FOCUS.load(Ordering::SeqCst) != 0 => {
             LRESULT(MA_NOACTIVATE as isize)
         }
@@ -1294,6 +1389,17 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                     }
                     st.tracking = true;
                 }
+                let pointer = POINT {
+                    x: st.pos.x + x as i32,
+                    y: st.pos.y + y as i32,
+                };
+                if st
+                    .keyboard_pointer
+                    .is_some_and(|old| old.x == pointer.x && old.y == pointer.y)
+                {
+                    return;
+                }
+                st.keyboard_pointer = None;
                 let hover = row_at(st, y);
                 if hover != st.hover {
                     st.hover = hover;
@@ -1334,7 +1440,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
         0x02A3 => {
             with_state(|st| {
                 st.tracking = false;
-                if st.hover.is_some() {
+                if st.hover.is_some() && st.keyboard_pointer.is_none() {
                     st.hover = None;
                     render(st);
                 }
@@ -1366,45 +1472,51 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
         }
         WM_KEYDOWN => {
             let key = wparam.0 as u16;
-            with_state(|st| match key {
-                k if k == VK_ESCAPE.0 => st.done = Some(None),
-                k if k == VK_DOWN.0 => step(st, 1),
-                k if k == VK_UP.0 => step(st, -1),
-                k if k == VK_RETURN.0 || k == VK_SPACE.0 => {
-                    if let Some(i) = st.hover {
-                        activate(st, i);
-                    }
+            with_state(|st| {
+                let mut pointer = POINT::default();
+                if unsafe { GetCursorPos(&mut pointer) }.is_ok() {
+                    st.keyboard_pointer = Some(pointer);
                 }
-                // Derecha despliega el grupo seleccionado; izquierda lo pliega.
-                k if k == VK_RIGHT.0 || k == VK_LEFT.0 => {
-                    if let Some(RowKind::Slider {
-                        id,
-                        value,
-                        min,
-                        max,
-                    }) = st.hover.and_then(|i| st.rows.get(i)).map(|r| r.kind)
-                    {
-                        let next = if k == VK_RIGHT.0 {
-                            value.saturating_add(1).min(max)
-                        } else {
-                            value.saturating_sub(1).max(min)
-                        };
-                        if next != value {
-                            dispatch(st, id + next as usize);
+                match key {
+                    k if k == VK_ESCAPE.0 => st.done = Some(None),
+                    k if k == VK_DOWN.0 => step(st, 1),
+                    k if k == VK_UP.0 => step(st, -1),
+                    k if k == VK_RETURN.0 || k == VK_SPACE.0 => {
+                        if let Some(i) = st.hover {
+                            activate(st, i);
                         }
-                        return;
                     }
-                    if let Some(RowKind::Group { open, .. }) =
-                        st.hover.and_then(|i| st.rows.get(i)).map(|r| r.kind)
-                    {
-                        if open != (k == VK_RIGHT.0) {
-                            if let Some(i) = st.hover {
-                                activate(st, i);
+                    // Derecha despliega el grupo seleccionado; izquierda lo pliega.
+                    k if k == VK_RIGHT.0 || k == VK_LEFT.0 => {
+                        if let Some(RowKind::Slider {
+                            id,
+                            value,
+                            min,
+                            max,
+                        }) = st.hover.and_then(|i| st.rows.get(i)).map(|r| r.kind)
+                        {
+                            let next = if k == VK_RIGHT.0 {
+                                value.saturating_add(1).min(max)
+                            } else {
+                                value.saturating_sub(1).max(min)
+                            };
+                            if next != value {
+                                dispatch(st, id + next as usize);
+                            }
+                            return;
+                        }
+                        if let Some(RowKind::Group { open, .. }) =
+                            st.hover.and_then(|i| st.rows.get(i)).map(|r| r.kind)
+                        {
+                            if open != (k == VK_RIGHT.0) {
+                                if let Some(i) = st.hover {
+                                    activate(st, i);
+                                }
                             }
                         }
                     }
+                    _ => {}
                 }
-                _ => {}
             });
             LRESULT(0)
         }
@@ -1432,6 +1544,27 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
         WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN
     );
     let menu = MENU_HWND.load(Ordering::SeqCst);
+    if code >= 0 && menu != 0 && wparam.0 as u32 == WM_MOUSEWHEEL {
+        let hwnd = HWND(menu as _);
+        let info = unsafe { &*(lparam.0 as *const MSLLHOOKSTRUCT) };
+        let mut rect = RECT::default();
+        if unsafe { GetWindowRect(hwnd, &mut rect) }.is_ok()
+            && info.pt.x >= rect.left
+            && info.pt.x < rect.right
+            && info.pt.y >= rect.top
+            && info.pt.y < rect.bottom
+        {
+            unsafe {
+                let _ = PostMessageW(
+                    Some(hwnd),
+                    WM_MOUSEWHEEL,
+                    WPARAM(info.mouseData as usize),
+                    LPARAM(0),
+                );
+            }
+            return LRESULT(1);
+        }
+    }
     if code >= 0
         && menu != 0
         && SLIDER_CAPTURE.load(Ordering::SeqCst)
@@ -1476,6 +1609,236 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "abre un menú y comprueba dispositivos, ajustes y desplazamiento en la misma ventana"]
+    fn dispositivos_y_otros_ajustes_comparten_ventana() {
+        use std::time::{Duration, Instant};
+        use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
+        use windows::Win32::UI::WindowsAndMessaging::{SendMessageW, WM_APP};
+        const REFRESH: u32 = WM_APP + 100;
+        const CHECK: u32 = WM_APP + 101;
+        extern "system" fn host_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+            if msg == REFRESH || msg == CHECK {
+                if msg == REFRESH {
+                    replace_group(
+                        "Dispositivos y batería",
+                        (0..80)
+                            .map(|i| Item::Label(format!("Dispositivo {i}: 78 %")))
+                            .collect(),
+                    );
+                }
+                let mut bits = 0;
+                with_state(|st| {
+                    if st.open[0] {
+                        bits |= 1;
+                    }
+                    if st.items.iter().any(|i| {
+                        matches!(
+                            i,
+                            Item::Action {
+                                id: 1,
+                                checked: true,
+                                ..
+                            }
+                        )
+                    }) {
+                        bits |= 2;
+                    }
+                    if st.items.iter().any(|i| {
+                        matches!(
+                            i,
+                            Item::Slider {
+                                id: 500,
+                                value: 17,
+                                ..
+                            }
+                        )
+                    }) {
+                        bits |= 4;
+                    }
+                    if st.entries.iter().any(|i| {
+                        matches!(
+                            i,
+                            Entry::Slider {
+                                id: 500,
+                                value: 17,
+                                ..
+                            }
+                        )
+                    }) {
+                        bits |= 8;
+                    }
+                    if st.surface.height as i32 <= st.work.bottom - st.work.top {
+                        bits |= 16;
+                    }
+                    if st.content_height > st.surface.height as f32 / st.scale {
+                        bits |= 32;
+                    }
+                    if st.scroll > 0.0 {
+                        bits |= 64;
+                    }
+                    if let Some(row) = st.hover.and_then(|i| st.rows.get(i)) {
+                        if row.y >= 0.0 && row.y + row.h <= st.surface.height as f32 / st.scale {
+                            bits |= 128;
+                        }
+                    }
+                });
+                return LRESULT(bits);
+            }
+            unsafe { DefWindowProcW(hwnd, msg, wp, lp) }
+        }
+        fn items(checked: bool, radius: u32) -> Vec<Item> {
+            vec![
+                Item::Group {
+                    label: "Dispositivos y batería".into(),
+                    items: vec![
+                        Item::Action {
+                            id: 2,
+                            label: "Actualizar".into(),
+                            checked: false,
+                        },
+                        Item::Label("Mouse: 78 %".into()),
+                    ],
+                },
+                Item::Action {
+                    id: 1,
+                    label: "Otra opción".into(),
+                    checked,
+                },
+                Item::Slider {
+                    id: 500,
+                    label: format!("Radio: {radius}"),
+                    value: radius,
+                    min: 0,
+                    max: 40,
+                },
+            ]
+        }
+        struct Restore(HWND);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                activate_for_test(self.0);
+            }
+        }
+        let _restore = Restore(unsafe { GetForegroundWindow() });
+        unsafe {
+            CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok().unwrap();
+        }
+        let mut anchor = POINT::default();
+        unsafe {
+            GetCursorPos(&mut anchor).unwrap();
+        }
+        activate_for_test(taskbar_at(anchor).unwrap());
+        let instance = unsafe { GetModuleHandleW(None).unwrap() };
+        let class = w!("NotchIslaDeviceMenuTest");
+        unsafe {
+            RegisterClassExW(&WNDCLASSEXW {
+                cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+                lpfnWndProc: Some(host_proc),
+                hInstance: instance.into(),
+                lpszClassName: class,
+                ..Default::default()
+            });
+        }
+        let host = unsafe {
+            CreateWindowExW(
+                WS_EX_TOOLWINDOW,
+                class,
+                class,
+                WS_POPUP,
+                0,
+                0,
+                1,
+                1,
+                None,
+                None,
+                Some(instance.into()),
+                None,
+            )
+            .unwrap()
+        };
+        let host_id = host.0 as isize;
+        let driver = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            let hwnd = loop {
+                let hwnd = HWND(MENU_HWND.load(Ordering::SeqCst) as _);
+                if !hwnd.is_invalid() && unsafe { IsWindowVisible(hwnd).as_bool() } {
+                    break hwnd;
+                }
+                assert!(Instant::now() < deadline, "el menú debe abrirse");
+                std::thread::sleep(Duration::from_millis(10));
+            };
+            struct Close(HWND);
+            impl Drop for Close {
+                fn drop(&mut self) {
+                    unsafe {
+                        let _ = PostMessageW(Some(self.0), WM_CLOSE, WPARAM(0), LPARAM(0));
+                    }
+                }
+            }
+            let _close = Close(hwnd);
+            // Abrir dispositivos, actualizar, cambiar otra opción y ajustar el radio.
+            for key in [
+                VK_DOWN, VK_RETURN, VK_DOWN, VK_RETURN, VK_DOWN, VK_RETURN, VK_DOWN, VK_RIGHT,
+            ] {
+                unsafe {
+                    SendMessageW(hwnd, WM_KEYDOWN, Some(WPARAM(key.0 as usize)), None);
+                }
+                assert_eq!(MENU_HWND.load(Ordering::SeqCst), hwnd.0 as isize);
+            }
+            let host = HWND(host_id as _);
+            assert_eq!(
+                unsafe { SendMessageW(host, REFRESH, None, None) }.0 & 63,
+                63
+            );
+            unsafe {
+                SendMessageW(
+                    hwnd,
+                    WM_MOUSEWHEEL,
+                    Some(WPARAM(((-120i16 as u16 as u32) << 16) as usize)),
+                    None,
+                );
+            }
+            assert_ne!(unsafe { SendMessageW(host, CHECK, None, None) }.0 & 64, 0);
+            unsafe {
+                SendMessageW(hwnd, WM_KEYDOWN, Some(WPARAM(VK_DOWN.0 as usize)), None);
+                SendMessageW(hwnd, WM_KEYDOWN, Some(WPARAM(VK_DOWN.0 as usize)), None);
+            }
+            assert_eq!(
+                unsafe { SendMessageW(host, CHECK, None, None) }.0 & 192,
+                192
+            );
+            assert_eq!(MENU_HWND.load(Ordering::SeqCst), hwnd.0 as isize);
+        });
+        let mut checked = false;
+        let mut radius = 16;
+        let mut refreshes = 0;
+        show_tray(items(checked, radius), |id| {
+            match id {
+                1 => checked = !checked,
+                2 => refreshes += 1,
+                value => {
+                    radius = (value - 500) as u32;
+                    return MenuAction::UpdateSlider {
+                        id: 500,
+                        value: radius,
+                        label: format!("Radio: {radius}"),
+                        checked: Some((1, checked)),
+                    };
+                }
+            }
+            MenuAction::KeepOpen(items(checked, radius))
+        });
+        let result = driver.join();
+        unsafe {
+            let _ = DestroyWindow(host);
+        }
+        result.unwrap();
+        assert!(checked);
+        assert_eq!(refreshes, 1);
+        assert_eq!(radius, 17);
+    }
 
     fn activate_for_test(window: HWND) {
         if foreground_is(window) {

@@ -1,9 +1,12 @@
 # Batería de periféricos
 
-Abre **Dispositivos y batería** en el menú del ícono de la bandeja. Cada dispositivo
+Despliega **Dispositivos y batería** dentro del menú del ícono de la bandeja. Las
+demás opciones permanecen en la misma ventana; puedes plegar el grupo y seguir
+cambiando ajustes. Si el contenido no cabe, usa la rueda o las flechas del teclado.
+Cada dispositivo
 incluye su conexión, nivel y, cuando se informa, estado de carga. La consulta se
 hace al abrir la app, cada 30 segundos y al pulsar **Actualizar ahora**. Abrir el
-apartado también pide una actualización. El panel recibe las nuevas lecturas
+menú general también pide una actualización. El grupo recibe las nuevas lecturas
 mientras permanece abierto.
 
 El aviso de batería baja está activado por defecto y se puede desactivar en ese
