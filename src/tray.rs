@@ -519,25 +519,12 @@ pub fn battery_items(snapshot: &crate::battery::Snapshot, notices: bool) -> Vec<
     items
 }
 
-/// Contenido plano del grupo: mantiene accesibles las demás opciones del menú.
+/// El encabezado del submenú reemplaza el título del antiguo panel.
 pub fn battery_group_items(snapshot: &crate::battery::Snapshot, notices: bool) -> Vec<Item> {
-    let mut result = Vec::new();
-    // Quitar el encabezado del antiguo panel; la etiqueta del grupo lo reemplaza.
-    for item in battery_items(snapshot, notices).into_iter().skip(2) {
-        match item {
-            Item::Group { label, items } => {
-                result.push(Item::Label(label));
-                result.extend(
-                    items
-                        .into_iter()
-                        .filter(|item| matches!(item, Item::Label(_))),
-                );
-            }
-            Item::Separator => {}
-            item => result.push(item),
-        }
-    }
-    result
+    battery_items(snapshot, notices)
+        .into_iter()
+        .skip(2)
+        .collect()
 }
 
 /// Menú contextual sobre la isla: opciones de salida de audio y centrar en la pantalla.

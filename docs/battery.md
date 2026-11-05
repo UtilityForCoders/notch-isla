@@ -1,10 +1,12 @@
 # Batería de periféricos
 
-Despliega **Dispositivos y batería** dentro del menú del ícono de la bandeja. Las
-demás opciones permanecen en la misma ventana; puedes plegar el grupo y seguir
-cambiando ajustes. Si el contenido no cabe, usa la rueda o las flechas del teclado.
-Cada dispositivo
-incluye su conexión, nivel y, cuando se informa, estado de carga. La consulta se
+Abre **Dispositivos y batería** como submenú lateral del menú de la bandeja.
+El menú principal conserva su tamaño y sigue disponible para cambiar otros
+ajustes. Pasa el puntero, haz clic o usa la flecha derecha para abrir un grupo;
+izquierda o Esc vuelve al nivel anterior. Los detalles de cada dispositivo
+abren otro submenú. Solo una lista que no quepa en pantalla necesita
+desplazamiento con rueda o flechas.
+Cada dispositivo incluye su conexión, nivel y, cuando se informa, estado de carga. La consulta se
 hace al abrir la app, cada 30 segundos y al pulsar **Actualizar ahora**. Abrir el
 menú general también pide una actualización. El grupo recibe las nuevas lecturas
 mientras permanece abierto.

@@ -83,7 +83,7 @@ Al pulsar **Instalar**, la isla vuelve a consultar el último release y prepara 
 - **Música por SMTC** (`Windows.Media.Control`) con eventos, sin sondeo. Los eventos llegan en otros hilos y se pasan a la ventana con `PostMessageW`.
 - **Carátula** decodificada con WIC (`Windows.Graphics.Imaging`), recortada al centro.
 - **Texto** con DirectWrite, dibujado por Direct2D en modo software sobre el mismo mapa de bits.
-- **Menús propios** dibujados igual que la isla (ventana layered, tiny-skia y DirectWrite), en lugar del menú clásico de Windows. Los grupos se despliegan dentro del mismo menú; se usa con el mouse o con las flechas, Enter y Esc.
+- **Menús propios** dibujados igual que la isla (ventana layered, tiny-skia y DirectWrite), en lugar del menú clásico de Windows. Los grupos abren submenús laterales sin agrandar el principal. Se abren con el puntero, un clic o la flecha derecha; izquierda o Esc vuelve al nivel anterior. Se puede seguir usando el menú principal sin cerrarlo.
 - **Pantalla completa** detectada registrando la ventana como appbar (`ABN_FULLSCREENAPP`), también sin sondeo.
 
 ```
