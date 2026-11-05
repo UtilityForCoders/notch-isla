@@ -3,13 +3,14 @@
 Abre **Dispositivos y batería** como submenú lateral del menú de la bandeja.
 El menú principal conserva su tamaño y sigue disponible para cambiar otros
 ajustes. Pasa el puntero, haz clic o usa la flecha derecha para abrir un grupo;
-izquierda o Esc vuelve al nivel anterior. Los detalles de cada dispositivo
-abren otro submenú. Solo una lista que no quepa en pantalla necesita
-desplazamiento con rueda o flechas.
-Cada dispositivo activo muestra un ícono de mouse, teclado, audífonos, parlantes
-o mando. Sus detalles incluyen el tipo, la conexión, el nivel y, cuando se
-informa, el estado de carga. Los avisos de conexión y batería baja también
-usan el ícono del periférico cuando se conoce su tipo.
+izquierda o Esc vuelve al nivel anterior. Solo una lista que no quepa en
+pantalla necesita desplazamiento con la rueda.
+Cada dispositivo activo tiene una fila con el ícono del tipo, el nombre, el
+nivel de batería y el ícono de conexión. El símbolo de Bluetooth identifica
+ese enlace, las ondas indican radio (como 2.4 GHz) y el símbolo USB identifica
+los dispositivos detectados por USB. El estado de carga aparece junto al nivel
+cuando se informa. Los avisos de conexión y batería baja también usan el ícono
+del periférico cuando se conoce su tipo.
 
 La detección usa la clase de Bluetooth clásico, la apariencia de Bluetooth LE
 y la información de mandos y receptores que expone Windows. Los perfiles de

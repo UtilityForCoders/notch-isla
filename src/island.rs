@@ -248,6 +248,9 @@ pub enum NoticeIcon {
     Gamepad,
     Speaker,
     Device,
+    Bluetooth,
+    Wireless,
+    Usb,
     Battery,
     /// Salida de audio (audífonos, parlantes).
     Audio,
@@ -885,6 +888,41 @@ pub(crate) fn draw_notice_icon(
 ) {
     let line = 1.8 * s;
     match icon {
+        NoticeIcon::Bluetooth => {
+            let mut pb = PathBuilder::new();
+            pb.move_to(cx - 5.0 * s, cy - 5.0 * s);
+            pb.line_to(cx + 5.0 * s, cy + 5.0 * s);
+            pb.line_to(cx, cy + 10.0 * s);
+            pb.line_to(cx, cy - 10.0 * s);
+            pb.line_to(cx + 5.0 * s, cy - 5.0 * s);
+            pb.line_to(cx - 5.0 * s, cy + 5.0 * s);
+            stroke(pixmap, paint, pb, line);
+        }
+        NoticeIcon::Wireless => {
+            let mut pb = PathBuilder::new();
+            for (radius, y) in [(9.0, -3.5), (6.0, 0.0), (3.0, 3.5)] {
+                pb.move_to(cx - radius * s, cy + y * s);
+                pb.quad_to(cx, cy + (y - radius) * s, cx + radius * s, cy + y * s);
+            }
+            stroke(pixmap, paint, pb, line);
+            fill_circle(pixmap, paint, cx, cy + 7.0 * s, 1.3 * s);
+        }
+        NoticeIcon::Usb => {
+            let mut pb = PathBuilder::new();
+            pb.move_to(cx, cy + 8.5 * s);
+            pb.line_to(cx, cy - 8.0 * s);
+            pb.move_to(cx - 2.8 * s, cy - 5.5 * s);
+            pb.line_to(cx, cy - 8.5 * s);
+            pb.line_to(cx + 2.8 * s, cy - 5.5 * s);
+            pb.move_to(cx, cy + 4.5 * s);
+            pb.line_to(cx - 5.0 * s, cy + s);
+            pb.line_to(cx - 5.0 * s, cy - 2.0 * s);
+            pb.move_to(cx, cy + s);
+            pb.line_to(cx + 5.0 * s, cy - 2.5 * s);
+            pb.line_to(cx + 5.0 * s, cy - 5.0 * s);
+            stroke(pixmap, paint, pb, line);
+            fill_circle(pixmap, paint, cx, cy + 8.0 * s, 1.8 * s);
+        }
         NoticeIcon::Mouse => {
             if let Some(body) =
                 rounded_rect_path(cx - 7.0 * s, cy - 10.0 * s, 14.0 * s, 21.0 * s, 7.0 * s)

@@ -1278,14 +1278,28 @@ mod tests {
         assert_eq!(current.devices[1].level, Some(Level::Percent(78)));
         assert!(current.devices[1].receiver_without_link());
         let items = crate::tray::battery_items(&current, true, true);
-        let active_count = items
-            .iter()
-            .filter(|item| {
-                matches!(item,
-            crate::menu::Item::IconGroup { label, .. } if label.starts_with("MCHOSE K7 Ultra"))
-            })
-            .count();
-        assert_eq!(active_count, 1);
+        let active_connections = |items: &[crate::menu::Item]| {
+            items
+                .iter()
+                .filter_map(|item| {
+                    if let crate::menu::Item::DeviceStatus {
+                        name,
+                        status,
+                        connection,
+                        ..
+                    } = item
+                    {
+                        if name == "MCHOSE K7 Ultra" {
+                            assert_eq!(status, "78 %");
+                            return Some(*connection);
+                        }
+                    }
+                    None
+                })
+                .collect::<Vec<_>>()
+        };
+        use crate::island::NoticeIcon;
+        assert!(active_connections(&items) == [NoticeIcon::Bluetooth]);
         assert!(items.iter().any(|item| matches!(item,
             crate::menu::Item::Group { label, .. } if label == "Receptores sin enlace confirmado (1)")));
 
@@ -1293,14 +1307,7 @@ mod tests {
         // pueden corresponder a dos unidades y deben conservarse separados.
         current.devices[1].stale = false;
         let items = crate::tray::battery_items(&current, true, true);
-        assert_eq!(
-            items
-                .iter()
-                .filter(|item| matches!(item,
-            crate::menu::Item::IconGroup { label, .. } if label.starts_with("MCHOSE K7 Ultra")))
-                .count(),
-            2
-        );
+        assert!(active_connections(&items) == [NoticeIcon::Bluetooth, NoticeIcon::Wireless]);
     }
 
     #[test]

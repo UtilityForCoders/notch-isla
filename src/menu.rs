@@ -76,10 +76,12 @@ pub enum Item {
         label: String,
         items: Vec<Item>,
     },
-    IconGroup {
-        label: String,
+    /// Dispositivo informativo: conserva el estado y los íconos visibles en una sola fila.
+    DeviceStatus {
+        name: String,
+        status: String,
         icon: crate::island::NoticeIcon,
-        items: Vec<Item>,
+        connection: crate::island::NoticeIcon,
     },
     /// Deslizador continuo; el comando emitido es `id + value` (ambos límites incluidos).
     Slider {
@@ -101,6 +103,8 @@ const TEXT_X: f32 = 12.0;
 const CHILD_INDENT: f32 = 14.0;
 /// Espacio a la derecha para la marca o la flecha del grupo.
 const RIGHT: f32 = 30.0;
+const DEVICE_ICON_SPACE: f32 = 24.0;
+const DEVICE_STATUS_GAP: f32 = 10.0;
 const RADIUS: f32 = 14.0;
 const ROW_RADIUS: f32 = 8.0;
 const MIN_W: f32 = 190.0;
@@ -215,7 +219,12 @@ enum Entry {
     Group {
         text: usize,
         children: Vec<Entry>,
-        icon: Option<crate::island::NoticeIcon>,
+    },
+    DeviceStatus {
+        text: usize,
+        status: usize,
+        icon: crate::island::NoticeIcon,
+        connection: crate::island::NoticeIcon,
     },
 }
 
@@ -239,6 +248,11 @@ enum RowKind {
         checked: bool,
     },
     Label,
+    DeviceStatus {
+        status: usize,
+        icon: crate::island::NoticeIcon,
+        connection: crate::island::NoticeIcon,
+    },
     Separator,
     /// `index` = posición del grupo entre las opciones de primer nivel.
     Group {
@@ -261,7 +275,6 @@ struct Row {
     kind: RowKind,
     text: Option<usize>,
     child: bool,
-    icon: Option<crate::island::NoticeIcon>,
     y: f32,
     h: f32,
 }
@@ -339,9 +352,7 @@ impl State {
                             }
                         }
                     }
-                    Item::Group { items, .. } | Item::IconGroup { items, .. } => {
-                        sync(items, id, value, label, checked)
-                    }
+                    Item::Group { items, .. } => sync(items, id, value, label, checked),
                     _ => {}
                 }
             }
@@ -517,13 +528,6 @@ fn with_menu(hwnd: HWND, f: impl FnOnce(&mut State)) {
     });
 }
 
-fn group_items(item: &Item) -> Option<&[Item]> {
-    match item {
-        Item::Group { items, .. } | Item::IconGroup { items, .. } => Some(items),
-        _ => None,
-    }
-}
-
 fn panel_rect(st: &State) -> RECT {
     RECT {
         left: st.pos.x,
@@ -573,11 +577,11 @@ fn refresh_submenu(st: &mut State) {
         close_submenu(st);
         return;
     };
-    let Some(items) = st.items.get(index).and_then(group_items) else {
+    let Some(Item::Group { items, .. }) = st.items.get(index) else {
         close_submenu(st);
         return;
     };
-    let items = items.to_vec();
+    let items = items.clone();
     let bounds = panel_rect(st);
     let row_y = st.rows.get(index).map_or(0.0, |r| r.y);
     if let Some(child) = &mut st.child_menu {
@@ -600,10 +604,10 @@ fn open_submenu(st: &mut State, index: usize, keyboard: bool) {
         }
         return;
     }
-    let Some(items) = st.items.get(index).and_then(group_items) else {
+    let Some(Item::Group { items, .. }) = st.items.get(index) else {
         return;
     };
-    let items = items.to_vec();
+    let items = items.clone();
     close_submenu(st);
     let Ok(hwnd) = create_window(Some(st.hwnd), true) else {
         return;
@@ -1080,12 +1084,17 @@ fn build(
             Item::Group { label, items } => Entry::Group {
                 text: add(dwrite, font, &label, texts),
                 children: build(dwrite, font, label_font, items, texts),
-                icon: None,
             },
-            Item::IconGroup { label, items, icon } => Entry::Group {
-                text: add(dwrite, font, &label, texts),
-                children: build(dwrite, font, label_font, items, texts),
-                icon: Some(icon),
+            Item::DeviceStatus {
+                name,
+                status,
+                icon,
+                connection,
+            } => Entry::DeviceStatus {
+                text: add(dwrite, font, &name, texts),
+                status: add(dwrite, label_font, &status, texts),
+                icon,
+                connection,
             },
         })
         .collect()
@@ -1117,11 +1126,14 @@ fn text_width(entries: &[Entry], texts: &[Text], scale: f32, child: bool) -> f32
                 texts[*text].w / scale + indent + 2.0 * (PAD + TEXT_X) + RIGHT
             }
             Entry::Separator => 0.0,
-            Entry::Group { text, icon, .. } => {
-                texts[*text].w / scale
-                    + 2.0 * (PAD + TEXT_X)
+            Entry::Group { text, .. } => texts[*text].w / scale + 2.0 * (PAD + TEXT_X) + RIGHT,
+            Entry::DeviceStatus { text, status, .. } => {
+                (texts[*text].w + texts[*status].w) / scale
+                    + 2.0 * PAD
+                    + TEXT_X
                     + RIGHT
-                    + if icon.is_some() { 24.0 } else { 0.0 }
+                    + DEVICE_ICON_SPACE
+                    + DEVICE_STATUS_GAP
             }
         })
         .fold(0.0, f32::max)
@@ -1142,7 +1154,6 @@ fn relayout(st: &mut State) {
             kind,
             text,
             child,
-            icon: None,
             y,
             h,
         });
@@ -1187,11 +1198,21 @@ fn relayout(st: &mut State) {
                 false,
                 &mut rows,
             ),
-        }
-    }
-    for (row, entry) in rows.iter_mut().zip(&st.entries) {
-        if let Entry::Group { icon, .. } = entry {
-            row.icon = *icon;
+            Entry::DeviceStatus {
+                text,
+                status,
+                icon,
+                connection,
+            } => push(
+                RowKind::DeviceStatus {
+                    status: *status,
+                    icon: *icon,
+                    connection: *connection,
+                },
+                Some(*text),
+                false,
+                &mut rows,
+            ),
         }
     }
     let height = y + PAD;
@@ -1229,6 +1250,31 @@ fn relayout(st: &mut State) {
     if st.surface.width != w as u32 || st.surface.height != h as u32 {
         if let Ok(surface) = Surface::new(w.max(1) as u32, h.max(1) as u32) {
             st.surface = surface;
+        }
+    }
+}
+
+fn draw_menu_text(
+    target: &ID2D1DCRenderTarget,
+    text: &Text,
+    x: f32,
+    y: f32,
+    clip: D2D_RECT_F,
+    color: D2D1_COLOR_F,
+) {
+    if clip.right <= clip.left || clip.bottom <= clip.top {
+        return;
+    }
+    unsafe {
+        if let Ok(brush) = target.CreateSolidColorBrush(&color, None) {
+            target.PushAxisAlignedClip(&clip, D2D1_ANTIALIAS_MODE_ALIASED);
+            target.DrawTextLayout(
+                Vector2 { X: x, Y: y },
+                &text.layout,
+                &brush,
+                D2D1_DRAW_TEXT_OPTIONS_NONE,
+            );
+            target.PopAxisAlignedClip();
         }
     }
 }
@@ -1276,7 +1322,11 @@ fn render(st: &mut State) {
                         ROW_RADIUS * s,
                     );
                 }
-                if let Some(icon) = row.icon {
+                let cx = w - (PAD + RIGHT / 2.0) * s;
+                if let RowKind::DeviceStatus {
+                    icon, connection, ..
+                } = kind
+                {
                     paint.set_color_rgba8(235, 235, 240, 235);
                     crate::island::draw_notice_icon(
                         pixmap,
@@ -1286,8 +1336,9 @@ fn render(st: &mut State) {
                         cy,
                         0.8 * s,
                     );
+                    paint.set_color_rgba8(173, 193, 220, 240);
+                    crate::island::draw_notice_icon(pixmap, &paint, connection, cx, cy, 0.72 * s);
                 }
-                let cx = w - (PAD + RIGHT / 2.0) * s;
                 if let RowKind::Slider {
                     value, min, max, ..
                 } = kind
@@ -1373,8 +1424,16 @@ fn render(st: &mut State) {
                 let Some(text) = row.text.and_then(|t| st.texts.get(t)) else {
                     continue;
                 };
+                let status = match row.kind {
+                    RowKind::DeviceStatus { status, .. } => st.texts.get(status),
+                    _ => None,
+                };
                 let indent = if row.child { CHILD_INDENT } else { 0.0 }
-                    + if row.icon.is_some() { 24.0 } else { 0.0 };
+                    + if status.is_some() {
+                        DEVICE_ICON_SPACE
+                    } else {
+                        0.0
+                    };
                 let x = (PAD + TEXT_X + indent) * s;
                 let y = if matches!(row.kind, RowKind::Slider { .. }) {
                     row.y * s + 6.0 * s
@@ -1398,17 +1457,24 @@ fn render(st: &mut State) {
                 if clip.bottom <= clip.top {
                     continue;
                 }
-                if let Ok(brush) = st.target.CreateSolidColorBrush(&color, None) {
-                    st.target
-                        .PushAxisAlignedClip(&clip, D2D1_ANTIALIAS_MODE_ALIASED);
-                    st.target.DrawTextLayout(
-                        Vector2 { X: x, Y: y },
-                        &text.layout,
-                        &brush,
-                        D2D1_DRAW_TEXT_OPTIONS_NONE,
-                    );
-                    st.target.PopAxisAlignedClip();
+                let mut name_clip = clip;
+                if let Some(status) = status {
+                    let status_x = (clip.right - status.w).max(x);
+                    name_clip.right = status_x - DEVICE_STATUS_GAP * s;
+                    let status_clip = D2D_RECT_F {
+                        left: status_x,
+                        ..clip
+                    };
+                    let status_y = row.y * s + (row.h * s - status.h) / 2.0;
+                    let color = D2D1_COLOR_F {
+                        r: 0.78,
+                        g: 0.81,
+                        b: 0.85,
+                        a: 1.0,
+                    };
+                    draw_menu_text(&st.target, status, status_x, status_y, status_clip, color);
                 }
+                draw_menu_text(&st.target, text, x, y, name_clip, color);
             }
             let _ = st.target.EndDraw(None, None);
         }
@@ -1999,9 +2065,8 @@ mod tests {
         const SNAPSHOT: u32 = WM_APP + 102;
         const KEY: u32 = WM_APP + 103;
         fn nested() -> Item {
-            Item::IconGroup {
-                label: "Detalles del mouse".into(),
-                icon: crate::island::NoticeIcon::Mouse,
+            Item::Group {
+                label: "Receptores sin enlace confirmado".into(),
                 items: vec![Item::Action {
                     id: 3,
                     label: "Acción anidada".into(),
@@ -2107,7 +2172,18 @@ mod tests {
                             label: "Actualizar".into(),
                             checked: false,
                         },
-                        Item::Label("Mouse: 78 %".into()),
+                        Item::DeviceStatus {
+                            name: "MCHOSE K7 Ultra".into(),
+                            status: "78 %".into(),
+                            icon: crate::island::NoticeIcon::Mouse,
+                            connection: crate::island::NoticeIcon::Wireless,
+                        },
+                        Item::DeviceStatus {
+                            name: "Audífonos inalámbricos".into(),
+                            status: "95 % · Cargando".into(),
+                            icon: crate::island::NoticeIcon::Audio,
+                            connection: crate::island::NoticeIcon::Bluetooth,
+                        },
                         nested(),
                     ],
                 },
