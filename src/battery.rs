@@ -27,7 +27,8 @@ pub const WM_BATTERY: u32 = WM_APP + 11;
 pub const LOW_PERCENT: u8 = 20;
 const INTERVAL: Duration = Duration::from_secs(30);
 const CONNECTION_INTERVAL: Duration = Duration::from_secs(5);
-const RECEIVER_DISCONNECT_GRACE: Duration = Duration::from_secs(15);
+const DEVICE_ABSENCE_GRACE: Duration = Duration::from_secs(5);
+const RECEIVER_READING_GRACE: Duration = Duration::from_secs(15);
 const BT_BATTERY: &str = "{104EA319-6EE2-4701-BD47-8DDBF425BBE5} 2";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -184,6 +185,19 @@ pub struct Snapshot {
     pub scanning: bool,
     pub errors: Vec<String>,
     pub unavailable: HashSet<Source>,
+    checking_links: HashSet<String>,
+}
+
+impl Snapshot {
+    pub fn confirmed_link(&self, device: &Device) -> bool {
+        device.active_link()
+            && !self.checking_links.contains(&device.id)
+            && !self.unavailable.contains(&device.source())
+    }
+
+    pub fn show_inactive_receiver(&self, device: &Device) -> bool {
+        device.receiver_without_link() && !self.checking_links.contains(&device.id)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
@@ -220,10 +234,11 @@ impl Monitor {
             // WGI completa su lista inicial de forma asíncrona.
             let _ = RawGameController::RawGameControllers();
             std::thread::sleep(Duration::from_millis(500));
+            let mut stability = LinkStability::default();
             loop {
                 let mut snapshot = scan();
                 let mut previous = state.lock().unwrap_or_else(|e| e.into_inner());
-                preserve_last_readings(&mut snapshot, &previous);
+                stability.update(&mut snapshot, &previous);
                 *previous = snapshot;
                 drop(previous);
                 unsafe {
@@ -270,10 +285,60 @@ impl Monitor {
     }
 }
 
-struct ConnectionState {
-    source: Source,
-    active: bool,
-    missing_since: Option<Instant>,
+/// Conserva filas durante una ausencia breve y distingue la presencia del
+/// receptor de la capacidad de leer el periférico en este sondeo.
+#[derive(Default)]
+struct LinkStability {
+    missing_since: HashMap<String, Instant>,
+    // Solo receptores que ya respondieron. None indica que aún no falló la lectura.
+    receiver_silent_since: HashMap<String, Option<Instant>>,
+}
+
+impl LinkStability {
+    fn update(&mut self, current: &mut Snapshot, previous: &Snapshot) {
+        let Some(now) = current.updated else { return };
+        for device in &current.devices {
+            self.missing_since.remove(&device.id);
+        }
+        for old in &previous.devices {
+            if current.devices.iter().any(|device| device.id == old.id) {
+                continue;
+            }
+            if current.unavailable.contains(&old.source()) {
+                self.missing_since.remove(&old.id);
+            } else {
+                let since = self.missing_since.entry(old.id.clone()).or_insert(now);
+                if now.duration_since(*since) >= DEVICE_ABSENCE_GRACE {
+                    self.missing_since.remove(&old.id);
+                    self.receiver_silent_since.remove(&old.id);
+                    continue;
+                }
+            }
+            let mut retained = old.clone();
+            retained.stale = true;
+            retained.charging = false;
+            if old.source() != Source::Receiver {
+                current.checking_links.insert(old.id.clone());
+            }
+            current.devices.push(retained);
+        }
+        for device in &current.devices {
+            if device.source() != Source::Receiver {
+                continue;
+            }
+            if device.active_link() && !current.unavailable.contains(&Source::Receiver) {
+                self.receiver_silent_since.insert(device.id.clone(), None);
+            } else if let Some(silent) = self.receiver_silent_since.get_mut(&device.id) {
+                if now.duration_since(*silent.get_or_insert(now)) < RECEIVER_READING_GRACE {
+                    current.checking_links.insert(device.id.clone());
+                }
+            }
+        }
+        preserve_last_readings(current, previous);
+        current
+            .devices
+            .sort_by_key(|device| device.name.to_lowercase());
+    }
 }
 
 /// Observa transiciones a un enlace confirmado. El primer sondeo de cada fuente
@@ -281,7 +346,7 @@ struct ConnectionState {
 #[derive(Default)]
 pub struct Connections {
     initialized: HashSet<Source>,
-    devices: HashMap<String, ConnectionState>,
+    devices: HashMap<String, Source>,
     updated: Option<Instant>,
     enabled: Option<bool>,
     suppress_on_enable: HashSet<Source>,
@@ -312,42 +377,20 @@ impl Connections {
             let first = self.initialized.insert(source);
             let suppressed = self.suppress_on_enable.remove(&source);
             let baseline = first || suppressed;
-            for (id, state) in &mut self.devices {
-                if state.source != source {
-                    continue;
-                }
-                let current = snapshot.devices.iter().find(|d| d.id == *id);
-                if current.is_some_and(Device::active_link) {
-                    continue;
-                }
-                // Un USB retirado o un enlace Bluetooth ausente son desconexiones
-                // observadas. Un receptor presente sin lectura también puede dormir.
-                let confirmed_missing = current.is_none() || source != Source::Receiver;
-                let since = state.missing_since.get_or_insert(now);
-                if confirmed_missing
-                    || now.saturating_duration_since(*since) >= RECEIVER_DISCONNECT_GRACE
-                {
-                    state.active = false;
-                }
-            }
+            // Rearmar solo cuando desaparezca el dispositivo de la lista estabilizada.
+            // Un dongle presente sin datos no distingue suspensión de apagado.
+            self.devices.retain(|id, device_source| {
+                *device_source != source || snapshot.devices.iter().any(|device| device.id == *id)
+            });
             for device in snapshot
                 .devices
                 .iter()
-                .filter(|d| d.source() == source && d.active_link())
+                .filter(|d| d.source() == source && snapshot.confirmed_link(d))
             {
-                let state = self
-                    .devices
-                    .entry(device.id.clone())
-                    .or_insert(ConnectionState {
-                        source,
-                        active: false,
-                        missing_since: None,
-                    });
-                if !baseline && !state.active && enabled {
+                let new = self.devices.insert(device.id.clone(), source).is_none();
+                if !baseline && new && enabled {
                     notices.push(device.clone());
                 }
-                state.active = true;
-                state.missing_since = None;
             }
         }
         notices
@@ -1109,60 +1152,84 @@ mod tests {
     fn receiver_only_notifies_when_the_peripheral_responds() {
         let at = Instant::now();
         let mut tracker = Connections::default();
+        let mut stability = LinkStability::default();
+        let mut previous = Snapshot::default();
+        let mut scan = |seconds, device| {
+            let mut snapshot = connection_snapshot(at, seconds, vec![device]);
+            stability.update(&mut snapshot, &previous);
+            previous = snapshot.clone();
+            snapshot
+        };
         let idle = connected_device("hid:k7", false);
-        assert!(tracker
-            .update(&connection_snapshot(at, 0, vec![idle.clone()]), true)
-            .is_empty());
-        assert!(tracker
-            .update(&connection_snapshot(at, 5, vec![idle.clone()]), true)
-            .is_empty());
+        assert!(tracker.update(&scan(0, idle.clone()), true).is_empty());
+        assert!(tracker.update(&scan(5, idle.clone()), true).is_empty());
         let active = connected_device("hid:k7", true);
-        assert_eq!(
-            tracker
-                .update(&connection_snapshot(at, 10, vec![active.clone()]), true)
-                .len(),
-            1
-        );
-        assert!(tracker
-            .update(&connection_snapshot(at, 15, vec![active.clone()]), true)
-            .is_empty());
-        let mut cached = idle;
-        cached.level = Some(Level::Percent(78));
-        cached.stale = true;
-        assert!(tracker
-            .update(&connection_snapshot(at, 20, vec![cached.clone()]), true)
-            .is_empty());
-        // Una pérdida breve de lectura no rearma el aviso.
-        assert!(tracker
-            .update(&connection_snapshot(at, 25, vec![active.clone()]), true)
-            .is_empty());
-        tracker.update(&connection_snapshot(at, 30, vec![cached.clone()]), true);
-        tracker.update(&connection_snapshot(at, 45, vec![cached]), true);
-        assert_eq!(
-            tracker
-                .update(&connection_snapshot(at, 50, vec![active]), true)
-                .len(),
-            1
-        );
+        assert_eq!(tracker.update(&scan(10, active.clone()), true).len(), 1);
+        let missed = scan(15, idle.clone());
+        assert_eq!(missed.devices[0].level, Some(Level::Percent(78)));
+        assert!(missed.devices[0].stale);
+        assert!(!missed.confirmed_link(&missed.devices[0]));
+        assert!(!missed.show_inactive_receiver(&missed.devices[0]));
+        assert!(tracker.update(&missed, true).is_empty());
+        assert!(tracker.update(&scan(20, active.clone()), true).is_empty());
+        tracker.update(&scan(25, idle.clone()), true);
+        let sleeping = scan(40, idle);
+        assert!(sleeping.show_inactive_receiver(&sleeping.devices[0]));
+        assert!(tracker.update(&sleeping, true).is_empty());
+        assert!(tracker.update(&scan(70, active), true).is_empty());
     }
 
     #[test]
-    fn removing_receiver_or_bluetooth_link_rearms_connection_notice() {
+    fn only_confirmed_absence_rearms_connection_notice() {
         let at = Instant::now();
         let mut tracker = Connections::default();
+        let mut stability = LinkStability::default();
+        let mut previous = Snapshot::default();
+        let mut scan = |seconds, devices, unavailable| {
+            let mut snapshot = connection_snapshot(at, seconds, devices);
+            snapshot.unavailable.extend(unavailable);
+            stability.update(&mut snapshot, &previous);
+            previous = snapshot.clone();
+            snapshot
+        };
         let devices = vec![
             connected_device("hid:k7", true),
             connected_device("bt:keyboard", false),
+            connected_device("gamepad:pad", true),
         ];
-        tracker.update(&connection_snapshot(at, 0, devices.clone()), true);
-        tracker.update(&connection_snapshot(at, 5, Vec::new()), true);
-        // Bluetooth confirma el enlace aunque no informe porcentaje.
-        assert_eq!(
-            tracker
-                .update(&connection_snapshot(at, 10, devices), true)
-                .len(),
-            2
+        tracker.update(&scan(0, devices.clone(), vec![]), true);
+        for seconds in [5, 6, 9] {
+            let missing = scan(seconds, vec![], vec![]);
+            assert_eq!(missing.devices.len(), 3);
+            assert!(missing
+                .devices
+                .iter()
+                .all(|d| d.stale && !missing.confirmed_link(d)));
+            assert!(tracker.update(&missing, true).is_empty());
+        }
+        assert!(tracker
+            .update(&scan(10, devices.clone(), vec![]), true)
+            .is_empty());
+        tracker.update(&scan(15, vec![], vec![]), true);
+        let failed = scan(
+            20,
+            vec![],
+            vec![Source::Bluetooth, Source::Controller, Source::Receiver],
         );
+        assert_eq!(failed.devices.len(), 3);
+        tracker.update(&failed, true);
+        let first = scan(25, vec![], vec![]);
+        assert_eq!(
+            first.devices.len(),
+            3,
+            "un fallo de fuente no cuenta como ausencia"
+        );
+        tracker.update(&first, true);
+        let disconnected = scan(30, vec![], vec![]);
+        assert!(disconnected.devices.is_empty());
+        tracker.update(&disconnected, true);
+        // Bluetooth confirma el enlace aunque no informe porcentaje.
+        assert_eq!(tracker.update(&scan(35, devices, vec![]), true).len(), 3);
     }
 
     #[test]

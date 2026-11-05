@@ -41,23 +41,27 @@ de Windows piden una lectura inmediata y el sondeo permite detectar un mouse
 encendido sin retirar su dongle. La detección puede tardar unos 5 segundos más
 el tiempo de respuesta del controlador.
 
-Un receptor sin enlace confirmado, una lectura anterior o una fuente que falla
-no disparan el aviso. Las pérdidas de respuesta con el dongle presente deben
-durar 15 segundos antes de rearmarlo; retirar el USB o perder un enlace Bluetooth
-sí permite detectar una reconexión en el siguiente sondeo. Si un periférico corta
-su enlace al dormir, también puede avisar al despertar después de ese intervalo:
-el protocolo no siempre permite diferenciar suspensión y apagado. Se confirma
-que el periférico responde, no se vigilan movimientos del mouse ni teclas.
+La lista conserva el dispositivo durante un fallo breve de detección. La
+ausencia se confirma con sondeos válidos separados por al menos cinco segundos;
+un fallo de la fuente interrumpe esa comprobación. Después de una ausencia
+confirmada, volver a detectar el enlace sí genera un aviso.
+
+Un dongle que sigue presente solo genera un aviso la primera vez que el
+periférico responde. El mismo receptor puede perder la lectura durante una
+suspensión o un apagado. Recuperarla en ese caso actualiza la fila sin un
+segundo aviso. Si se retira el dongle durante el tiempo de confirmación,
+volver a conectarlo y obtener una respuesta habilita otro aviso.
 Los avisos esperan a que se cierre el menú o se salga de pantalla completa, sin
 reemplazar otro aviso. La batería baja tiene prioridad sobre la conexión.
 
 Un receptor USB puede seguir presente con el mouse apagado o dormido. Una
 respuesta vacía o inválida significa **sin lectura**, nunca 0 %. Si ya hubo una
 lectura válida, se conserva en memoria y se marca **anterior / Última lectura**.
-Los receptores sin respuesta válida aparecen en **Receptores sin enlace
-confirmado**, separados de los periféricos activos. Su porcentaje anterior solo
-se ve como detalle histórico. En MCHOSE también se comprueba el bit de enlace
-del informe, para rechazar un porcentaje almacenado sin mouse enlazado.
+Un receptor que ya respondió conserva su fila durante los primeros 15 segundos
+sin lectura. Si la falta de respuesta continúa, pasa a **Receptores sin enlace
+confirmado**, con su porcentaje como detalle histórico. En MCHOSE también
+se comprueba el bit de enlace del informe, para rechazar un porcentaje
+almacenado sin mouse enlazado.
 Al despertar el mouse, usa **Actualizar ahora** para obtener el nivel de nuevo.
 La lista incluye los dispositivos Bluetooth conectados y los periféricos USB
 reconocidos; no pretende listar todos los dispositivos del administrador de Windows.

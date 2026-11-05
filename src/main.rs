@@ -811,7 +811,7 @@ impl App {
                 snapshot
                     .devices
                     .iter()
-                    .find(|current| current.id == pending.id && current.active_link())
+                    .find(|current| current.id == pending.id && snapshot.confirmed_link(current))
                     .cloned()
             })
             .collect();

@@ -463,18 +463,23 @@ pub fn battery_items(
         },
         Item::Separator,
     ];
-    if snapshot.updated.is_some() && !snapshot.devices.iter().any(|d| !d.receiver_without_link()) {
+    if snapshot.updated.is_some()
+        && !snapshot
+            .devices
+            .iter()
+            .any(|d| !snapshot.show_inactive_receiver(d))
+    {
         items.push(Item::Label("Sin periféricos activos detectados".into()));
     }
     for device in snapshot
         .devices
         .iter()
-        .filter(|d| !d.receiver_without_link())
+        .filter(|d| !snapshot.show_inactive_receiver(d))
     {
         let mut status = device
             .level
             .map_or_else(|| "Sin lectura".into(), |level| level.label());
-        if device.stale {
+        if device.stale && device.level.is_some() {
             status.push_str(" (anterior)");
         } else if device.charging {
             status.push_str(" · Cargando");
@@ -494,7 +499,7 @@ pub fn battery_items(
     let inactive: Vec<_> = snapshot
         .devices
         .iter()
-        .filter(|d| d.receiver_without_link())
+        .filter(|d| snapshot.show_inactive_receiver(d))
         .collect();
     if !inactive.is_empty() {
         let mut details = vec![Item::Label("USB conectado; enlace no confirmado".into())];
