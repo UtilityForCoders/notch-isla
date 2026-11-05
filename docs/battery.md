@@ -30,8 +30,8 @@ Cada dispositivo avisa una vez por descarga durante la sesión de la app; vuelve
 a habilitarse el aviso tras detectar carga o al alcanzar el 25 %. Los avisos
 esperan a que termine otro aviso y a que se salga de pantalla completa.
 
-**Avisar al conectar un dispositivo**, activado por defecto, muestra en la isla
-**Dispositivo conectado**, con nombre, conexión y batería si hay una lectura
+**Avisar al conectar un dispositivo**, activado por defecto, muestra una tarjeta
+**Dispositivo conectado** debajo de la isla, con nombre, conexión y batería si hay una lectura
 actual. Funciona con los periféricos detectados por las mismas fuentes del panel:
 Bluetooth, mandos de Windows y receptores compatibles. El primer sondeo de cada
 fuente establece la lista inicial sin anunciar los equipos ya conectados; volver

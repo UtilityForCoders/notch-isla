@@ -787,8 +787,52 @@ pub fn draw(
 /// `text_w`: ancho del texto más largo (píxeles físicos), para centrar ícono y texto juntos
 /// en la isla; en vertical van al centro (los avisos no tienen barra de progreso debajo).
 fn draw_notice(pixmap: &mut Pixmap, g: &Geometry, n: &Notice, text_w: f32) -> TextArea {
+    draw_notice_content(pixmap, g, n, text_w, 1.0)
+}
+
+/// Tarjeta independiente con el mismo contenido del aviso, en una fila más baja.
+pub fn draw_notice_card(
+    pixmap: &mut Pixmap,
+    scale: f32,
+    notice: &Notice,
+    text_w: f32,
+) -> LayoutAreas {
+    let g = Geometry {
+        x0: 0.0,
+        y0: 0.0,
+        w: pixmap.width() as f32,
+        h: pixmap.height() as f32,
+        r: 16.0 * scale,
+        alpha: 1.0,
+        scale,
+    };
+    let mut paint = Paint {
+        anti_alias: true,
+        ..Default::default()
+    };
+    paint.set_color_rgba8(20, 20, 24, 250);
+    fill_rounded_rect(pixmap, &paint, g.x0, g.y0, g.w, g.h, g.r);
+    if let Some(path) = rounded_rect_path(0.5, 0.5, g.w - 1.0, g.h - 1.0, g.r) {
+        paint.set_color_rgba8(255, 255, 255, 36);
+        stroke_path(pixmap, &paint, &path, 1.0);
+    }
+    LayoutAreas {
+        text: draw_notice_content(pixmap, &g, notice, text_w, 0.8),
+        time: None,
+        lyrics: None,
+        seek: None,
+    }
+}
+
+fn draw_notice_content(
+    pixmap: &mut Pixmap,
+    g: &Geometry,
+    n: &Notice,
+    text_w: f32,
+    icon_scale: f32,
+) -> TextArea {
     let s = g.scale;
-    let size = NOTICE_ICON.1 * s;
+    let size = NOTICE_ICON.1 * s * icon_scale;
     let gap = 10.0 * s;
     let margin = NOTICE_ICON.0 * s;
     // Lo que cabe del texto entre los márgenes; si no cabe entero, se desplaza (marquee).
@@ -802,9 +846,24 @@ fn draw_notice(pixmap: &mut Pixmap, g: &Geometry, n: &Notice, text_w: f32) -> Te
         ..Default::default()
     };
     paint.set_color_rgba8(r, gr, b, (g.alpha * 46.0) as u8);
-    fill_rounded_rect(pixmap, &paint, x, y, size, size, NOTICE_ICON.2 * s);
+    fill_rounded_rect(
+        pixmap,
+        &paint,
+        x,
+        y,
+        size,
+        size,
+        NOTICE_ICON.2 * s * icon_scale,
+    );
     paint.set_color_rgba8(r, gr, b, (g.alpha * 255.0) as u8);
-    draw_notice_icon(pixmap, &paint, n.icon, x + size / 2.0, y + size / 2.0, s);
+    draw_notice_icon(
+        pixmap,
+        &paint,
+        n.icon,
+        x + size / 2.0,
+        y + size / 2.0,
+        s * icon_scale,
+    );
     TextArea {
         x: x + size + gap,
         // Un píxel de más: el ancho medido tiene decimales y el recorte no debe comerse la

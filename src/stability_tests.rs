@@ -253,6 +253,89 @@ fn isla_con_desenfoque_sigue_ocultandose_y_recibiendo_clics() {
                 "el aviso debe ceder al reproductor"
             );
         }
+        for expanded in [true, false] {
+            with_app(|app| {
+                app.settings.pinned_expanded = expanded;
+                app.spring.reset(if expanded { 1.0 } else { 0.0 });
+                app.presence.reset(1.0);
+                app.show_notice_card(
+                    Notice {
+                        icon: if expanded {
+                            NoticeIcon::Mouse
+                        } else {
+                            NoticeIcon::Audio
+                        },
+                        color: if expanded { GREEN } else { BLUE },
+                    },
+                    if expanded {
+                        "Dispositivo conectado"
+                    } else {
+                        "Salida de audio"
+                    },
+                    if expanded {
+                        "MCHOSE K7 Ultra · USB / 2.4 GHz · 78 %"
+                    } else {
+                        "Audífonos inalámbricos"
+                    },
+                    300,
+                );
+                let card = app
+                    .notice_card
+                    .as_mut()
+                    .expect("crear la ventana del aviso");
+                card.set_display(
+                    app.scale,
+                    RECT {
+                        left: -32000,
+                        top: -32000,
+                        right: -30000,
+                        bottom: -30000,
+                    },
+                )
+                .unwrap();
+                app.place_notice_card();
+                let mut rect = RECT::default();
+                windows::Win32::UI::WindowsAndMessaging::GetWindowRect(
+                    app.notice_card.as_ref().unwrap().window(),
+                    &mut rect,
+                )
+                .unwrap();
+                let bottom = app.pos.y
+                    + island::bottom(
+                        app.surface.width as f32,
+                        app.surface.height as f32,
+                        app.scale,
+                        app.spring.value,
+                        app.presence.value,
+                        app.shape(),
+                    )
+                    .ceil() as i32;
+                assert!(rect.top > bottom, "la tarjeta queda debajo de la isla");
+                assert!(app.notice.is_none(), "la tarjeta no ocupa el reproductor");
+            });
+            let deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                let mut msg = MSG::default();
+                if PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+                    DispatchMessageW(&msg);
+                    ui::promote_timers();
+                } else {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                let mut closed = false;
+                with_app(|app| {
+                    assert_eq!(app.spring.value, if expanded { 1.0 } else { 0.0 });
+                    closed = app.notice_card.is_none();
+                });
+                if closed {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "la tarjeta debe cerrarse a tiempo"
+                );
+            }
+        }
         with_app(|app| {
             app.settings.pinned_expanded = false;
             app.start_idle_countdown();

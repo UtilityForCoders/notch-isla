@@ -14,6 +14,7 @@ mod lyrics;
 mod media;
 mod menu;
 mod monitors;
+mod notice_card;
 mod projector;
 mod routing;
 mod settings;
@@ -36,6 +37,7 @@ use std::time::{Duration, Instant};
 use audio::Volume;
 use island::{Button, Controls, Hit, Notice, NoticeIcon};
 use media::NowPlaying;
+use notice_card::NoticeCard;
 use projector::Projector;
 use settings::Settings;
 use spring::Spring;
@@ -105,6 +107,7 @@ const COLLAPSE_DELAY_MS: u32 = 800;
 /// Comprobación periódica de pantalla completa (juegos y apps que no avisan por Explorer).
 const FULLSCREEN_TIMER: usize = 8;
 const FULLSCREEN_CHECK_MS: u32 = 500;
+const NOTICE_CARD_TIMER: usize = 9;
 
 /// Resorte de la expansión (rigidez, amortiguación): rápido, con un pequeño rebote.
 const EXPAND_SPRING: (f32, f32) = (260.0, 22.0);
@@ -529,6 +532,7 @@ struct App {
     notice: Option<ActiveNotice>,
     /// Último aviso, que se sigue dibujando mientras la isla se contrae o sale.
     last_notice: Option<ActiveNotice>,
+    notice_card: Option<NoticeCard>,
     /// Escucha la salida de audio; `None` si Core Audio no está disponible.
     audio: Option<AudioWatch>,
     battery: Option<battery::Monitor>,
@@ -614,6 +618,7 @@ impl App {
             settings,
             notice: None,
             last_notice: None,
+            notice_card: None,
             audio: None,
             battery: None,
             battery_alerts: battery::Alerts::default(),
@@ -701,6 +706,66 @@ impl App {
         self.redraw();
     }
 
+    fn show_notice_card(&mut self, view: Notice, title: &str, subtitle: &str, ms: u32) {
+        if self.hidden_by_fullscreen() {
+            return;
+        }
+        let notice = ActiveNotice {
+            view,
+            title: title.to_string(),
+            subtitle: subtitle.to_string(),
+        };
+        if let Ok(card) = NoticeCard::new(self.scale, self.monitor_rect(), notice, ms) {
+            self.notice_card = Some(card);
+            self.place_notice_card();
+            self.advance_notice_card();
+        }
+    }
+
+    fn place_notice_card(&mut self) {
+        if self.notice_card.is_none() {
+            return;
+        }
+        let bottom = island::bottom(
+            self.surface.width as f32,
+            self.surface.height as f32,
+            self.scale,
+            self.spring.value,
+            self.presence.value,
+            self.shape(),
+        );
+        let center = self.pos.x + self.surface.width as i32 / 2;
+        let bottom = self.pos.y + bottom.max(0.0).ceil() as i32;
+        let bottom = self
+            .projector
+            .as_ref()
+            .and_then(Projector::bottom)
+            .map_or(bottom, |y| bottom.max(y));
+        if let Some(card) = self.notice_card.as_mut() {
+            card.place(center, bottom);
+        }
+    }
+
+    fn advance_notice_card(&mut self) {
+        if let Some(card) = self.notice_card.as_mut() {
+            if let Ok(Some(delay)) = card.advance() {
+                let ms = delay.as_millis().clamp(1, u32::MAX as u128) as u32;
+                if unsafe { SetTimer(Some(self.hwnd), NOTICE_CARD_TIMER, ms, None) } != 0 {
+                    return;
+                }
+            }
+        }
+        self.clear_notice_card();
+    }
+
+    fn clear_notice_card(&mut self) {
+        if self.notice_card.take().is_some() {
+            unsafe {
+                let _ = KillTimer(Some(self.hwnd), NOTICE_CARD_TIMER);
+            }
+        }
+    }
+
     /// Cambió la salida de audio predeterminada: se avisa su nombre.
     fn on_audio_device(&mut self) {
         let Some(audio) = self.audio.as_ref() else {
@@ -717,7 +782,7 @@ impl App {
                 color: BLUE,
             };
             let name = name.unwrap_or_default();
-            self.show_notice(view, "Salida de audio", &name, NOTICE_MS);
+            self.show_notice_card(view, "Salida de audio", &name, NOTICE_MS);
         }
     }
 
@@ -789,6 +854,7 @@ impl App {
             self.connection_pending.clear();
         }
         if self.notice.is_some()
+            || self.notice_card.is_some()
             || self.fullscreen
             || self.installing.is_some()
             || self.tray_menu_open
@@ -803,7 +869,7 @@ impl App {
                         subtitle.push_str(&format!(" · {}", level.label()));
                     }
                 }
-                self.show_notice(
+                self.show_notice_card(
                     Notice {
                         icon: island::device_icon(device.kind),
                         color: GREEN,
@@ -1183,7 +1249,16 @@ impl App {
             if let Some(projector) = self.projector.as_mut() {
                 projector.set_scale(scale);
             }
+            if self.notice_card.is_some() {
+                let bounds = self.monitor_rect();
+                if let Some(card) = self.notice_card.as_mut() {
+                    if card.set_display(scale, bounds).is_err() {
+                        self.clear_notice_card();
+                    }
+                }
+            }
             self.render();
+            self.advance_notice_card();
         }
     }
 
@@ -1360,6 +1435,7 @@ impl App {
     /// salvo que haya algo a pantalla completa (si así está en los ajustes).
     fn update_visibility(&mut self) {
         if self.hidden_by_fullscreen() {
+            self.clear_notice_card();
             // En pantalla completa (juego, video, presentación), la isla no debe aparecer
             // y si estaba visible se oculta de inmediato sin animaciones lentas que se traben.
             if let Some(backdrop) = self.backdrop.as_mut() {
@@ -1691,6 +1767,7 @@ impl App {
                 if let Some(projector) = self.projector.as_mut() {
                     projector.moved_by(dx);
                 }
+                self.place_notice_card();
             } else {
                 // UpdateLayeredWindow vuelve a sincronizar la posición si el lote no se acepta.
                 self.redraw();
@@ -2270,6 +2347,7 @@ impl App {
         if let Some(backdrop) = self.backdrop.as_mut() {
             backdrop.place_behind(self.hwnd);
         }
+        self.place_notice_card();
         Motion {
             scroll_ms,
             bars,
@@ -2656,7 +2734,7 @@ fn open_island_menu(app_id: Option<&str>, is_centered: bool, pinned_expanded: bo
                     icon: NoticeIcon::Audio,
                     color: BLUE,
                 };
-                app.show_notice(view, &format!("Salida de {label}"), &subtitle, NOTICE_MS);
+                app.show_notice_card(view, &format!("Salida de {label}"), &subtitle, NOTICE_MS);
             });
         }
     }
@@ -2887,6 +2965,15 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
         }
         WM_TIMER if wparam.0 == NOTICE_TIMER => {
             with_app(|app| app.end_notice());
+            LRESULT(0)
+        }
+        WM_TIMER if wparam.0 == NOTICE_CARD_TIMER => {
+            with_app(|app| {
+                app.advance_notice_card();
+                if app.notice_card.is_none() {
+                    app.show_next_device_notice();
+                }
+            });
             LRESULT(0)
         }
         WM_TIMER if wparam.0 == COUNTDOWN_TIMER => {
@@ -3253,7 +3340,10 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 let _ = KillTimer(Some(hwnd), FULLSCREEN_TIMER);
             }
             fullscreen::unregister(hwnd);
-            with_app(|app| app.tray.remove());
+            with_app(|app| {
+                app.clear_notice_card();
+                app.tray.remove();
+            });
             unsafe { PostQuitMessage(0) };
             LRESULT(0)
         }
