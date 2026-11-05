@@ -1475,14 +1475,14 @@ mod tests {
             assert!(alerts.update(&[device(level, false)], true).is_empty());
         }
         let low = device(Some(Level::Percent(19)), false);
-        assert_eq!(alerts.update(&[low.clone()], true).len(), 1);
+        assert_eq!(alerts.update(std::slice::from_ref(&low), true).len(), 1);
         assert!(alerts.update(&[], true).is_empty());
         assert!(alerts.update(&[device(None, false)], true).is_empty());
-        assert!(alerts.update(&[low.clone()], true).is_empty());
+        assert!(alerts.update(std::slice::from_ref(&low), true).is_empty());
         alerts.update(&[device(Some(Level::Percent(20)), false)], true);
-        assert!(alerts.update(&[low.clone()], true).is_empty());
+        assert!(alerts.update(std::slice::from_ref(&low), true).is_empty());
         alerts.update(&[device(Some(Level::Percent(25)), false)], true);
-        assert_eq!(alerts.update(&[low.clone()], true).len(), 1);
+        assert_eq!(alerts.update(std::slice::from_ref(&low), true).len(), 1);
         alerts.update(&[device(Some(Level::Percent(19)), true)], true);
         assert_eq!(alerts.update(&[low], true).len(), 1);
     }
@@ -1491,7 +1491,7 @@ mod tests {
     fn disabled_alerts_do_not_consume_warning_and_coarse_levels_are_honest() {
         let mut alerts = Alerts::default();
         let low = device(Some(Level::Low), false);
-        assert!(alerts.update(&[low.clone()], false).is_empty());
+        assert!(alerts.update(std::slice::from_ref(&low), false).is_empty());
         assert_eq!(alerts.update(&[low], true).len(), 1);
         assert_eq!(capacity_level(1, 3), Some(Level::Low));
         assert_eq!(capacity_level(18, 100), Some(Level::Percent(18)));

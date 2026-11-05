@@ -598,6 +598,7 @@ pub fn show_island_menu(
 }
 
 /// Carga el recurso 1 de app.rc (assets/icon.ico) al tamaño de la bandeja.
+#[allow(clippy::manual_dangling_ptr)]
 fn load_app_icon() -> Result<HICON> {
     unsafe {
         let instance = GetModuleHandleW(None)?;

@@ -597,14 +597,15 @@ fn refresh_submenu(st: &mut State) {
 }
 
 fn open_submenu(st: &mut State, index: usize, keyboard: bool) {
-    if st.open.get(index) == Some(&true) && st.child_menu.is_some() {
-        if keyboard {
-            let child = st.child_menu.as_mut().unwrap();
-            child.hover = child.rows.iter().position(|r| r.kind.selectable());
-            MENU_KEYBOARD.store(child.hwnd.0 as isize, Ordering::SeqCst);
-            render(child);
+    if st.open.get(index) == Some(&true) {
+        if let Some(child) = st.child_menu.as_mut() {
+            if keyboard {
+                child.hover = child.rows.iter().position(|r| r.kind.selectable());
+                MENU_KEYBOARD.store(child.hwnd.0 as isize, Ordering::SeqCst);
+                render(child);
+            }
+            return;
         }
-        return;
     }
     let Some(Item::Group { items, .. }) = st.items.get(index) else {
         return;
@@ -2035,7 +2036,9 @@ mod tests {
                 )
             };
             let rgba: Vec<u8> = bgra
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .flat_map(|p| [p[2], p[1], p[0], p[3]])
                 .collect();
             std::fs::write(format!("target/cascade-preview/{filename}"), rgba).unwrap();
