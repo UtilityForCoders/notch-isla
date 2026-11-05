@@ -317,6 +317,50 @@ fn isla_con_desenfoque_sigue_ocultandose_y_recibiendo_clics() {
                 "el aviso debe ceder al reproductor"
             );
         }
+        with_app(|app| {
+            let notices = app.settings.notices;
+            let connections = app.settings.connection_notices;
+            app.settings.notices = true;
+            app.settings.connection_notices = true;
+            let headset = battery::Device {
+                id: "bt:prueba".into(),
+                name: "Audífonos de prueba".into(),
+                kind: battery::DeviceKind::Headphones,
+                connection: "Bluetooth",
+                level: Some(battery::Level::Percent(80)),
+                charging: false,
+                stale: false,
+                windows_cached: false,
+                detail: String::new(),
+            };
+            let audio = |app: &mut App| {
+                app.queue_audio_notice("Salida de audio".into(), headset.name.clone(), true);
+            };
+            let connect = |app: &mut App| {
+                app.connection_pending.push_back(headset.clone());
+                app.show_next_notice();
+            };
+            for audio_first in [true, false] {
+                let (first, second) = if audio_first {
+                    (&audio as &dyn Fn(&mut App), &connect as &dyn Fn(&mut App))
+                } else {
+                    (&connect as &dyn Fn(&mut App), &audio as &dyn Fn(&mut App))
+                };
+                first(app);
+                let shown = app.notice_card.as_ref().unwrap().window();
+                second(app);
+                assert_eq!(app.notice_card.as_ref().unwrap().window(), shown);
+                assert_eq!(app.audio_notice_pending.is_some(), !audio_first);
+                assert_eq!(app.connection_pending.len(), usize::from(audio_first));
+                app.clear_notice_card();
+                app.show_next_notice();
+                assert!(app.notice_card.is_some());
+                assert!(app.audio_notice_pending.is_none() && app.connection_pending.is_empty());
+                app.clear_notice_card();
+            }
+            app.settings.notices = notices;
+            app.settings.connection_notices = connections;
+        });
         for expanded in [true, false] {
             with_app(|app| {
                 app.settings.pinned_expanded = expanded;

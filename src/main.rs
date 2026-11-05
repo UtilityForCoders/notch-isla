@@ -542,6 +542,7 @@ struct App {
     battery_pending: std::collections::VecDeque<battery::Device>,
     connections: battery::Connections,
     connection_pending: std::collections::VecDeque<battery::Device>,
+    audio_notice_pending: Option<PendingAudioNotice>,
     tray_menu_open: bool,
     /// Nombre de la salida de audio actual, para avisar solo cuando de verdad cambia.
     audio_device: Option<String>,
@@ -575,6 +576,12 @@ struct ActiveNotice {
     view: Notice,
     title: String,
     subtitle: String,
+}
+
+struct PendingAudioNotice {
+    title: String,
+    subtitle: String,
+    automatic: bool,
 }
 
 impl App {
@@ -629,6 +636,7 @@ impl App {
             battery_pending: std::collections::VecDeque::new(),
             connections: battery::Connections::default(),
             connection_pending: std::collections::VecDeque::new(),
+            audio_notice_pending: None,
             tray_menu_open: false,
             audio_device: None,
             countdown: None,
@@ -732,10 +740,11 @@ impl App {
             self.start_idle_countdown();
         }
         self.redraw();
+        self.show_next_notice();
     }
 
     fn show_notice_card(&mut self, view: Notice, title: &str, subtitle: &str, ms: u32) {
-        if self.hidden_by_fullscreen() {
+        if self.notice_card.is_some() || self.hidden_by_fullscreen() {
             return;
         }
         let notice = ActiveNotice {
@@ -794,6 +803,18 @@ impl App {
         }
     }
 
+    fn queue_audio_notice(&mut self, title: String, subtitle: String, automatic: bool) {
+        if !self.hidden_by_fullscreen() {
+            // Si cambia varias veces mientras hay una tarjeta, solo interesa la última salida.
+            self.audio_notice_pending = Some(PendingAudioNotice {
+                title,
+                subtitle,
+                automatic,
+            });
+            self.show_next_notice();
+        }
+    }
+
     /// Cambió la salida de audio predeterminada: se avisa su nombre.
     fn on_audio_device(&mut self) {
         let Some(audio) = self.audio.as_ref() else {
@@ -805,12 +826,8 @@ impl App {
         }
         self.audio_device = name.clone();
         if self.settings.notices {
-            let view = Notice {
-                icon: NoticeIcon::Audio,
-                color: BLUE,
-            };
             let name = name.unwrap_or_default();
-            self.show_notice_card(view, "Salida de audio", &name, NOTICE_MS);
+            self.queue_audio_notice("Salida de audio".into(), name, true);
         }
     }
 
@@ -869,10 +886,10 @@ impl App {
             .battery_alerts
             .update(&snapshot.devices, self.settings.battery_notices);
         self.battery_pending.extend(alerts);
-        self.show_next_device_notice();
+        self.show_next_notice();
     }
 
-    fn show_next_device_notice(&mut self) {
+    fn show_next_notice(&mut self) {
         if !self.settings.battery_notices {
             for pending in self.battery_pending.drain(..) {
                 self.battery_alerts.retry_unshown(&pending.id);
@@ -883,10 +900,28 @@ impl App {
         }
         if self.notice.is_some()
             || self.notice_card.is_some()
-            || self.fullscreen
+            || self.hidden_by_fullscreen()
             || self.installing.is_some()
-            || self.tray_menu_open
         {
+            return;
+        }
+        if let Some(audio) = self.audio_notice_pending.take() {
+            if !audio.automatic || self.settings.notices {
+                self.show_notice_card(
+                    Notice {
+                        icon: NoticeIcon::Audio,
+                        color: BLUE,
+                    },
+                    &audio.title,
+                    &audio.subtitle,
+                    NOTICE_MS,
+                );
+                if self.notice_card.is_some() {
+                    return;
+                }
+            }
+        }
+        if self.fullscreen || self.tray_menu_open {
             return;
         }
         let Some(device) = self.battery_pending.pop_front() else {
@@ -1467,6 +1502,7 @@ impl App {
     fn update_visibility(&mut self) {
         if self.hidden_by_fullscreen() {
             self.clear_notice_card();
+            self.audio_notice_pending = None;
             self.visualizer.set_target(None);
             // En pantalla completa (juego, video, presentación), la isla no debe aparecer
             // y si estaba visible se oculta de inmediato sin animaciones lentas que se traben.
@@ -2766,11 +2802,7 @@ fn open_island_menu(app_id: Option<&str>, is_centered: bool, pinned_expanded: bo
                 (true, None) => "Predeterminada del sistema".to_string(),
             };
             with_app(|app| {
-                let view = Notice {
-                    icon: NoticeIcon::Audio,
-                    color: BLUE,
-                };
-                app.show_notice_card(view, &format!("Salida de {label}"), &subtitle, NOTICE_MS);
+                app.queue_audio_notice(format!("Salida de {label}"), subtitle, false);
             });
         }
     }
@@ -3007,7 +3039,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             with_app(|app| {
                 app.advance_notice_card();
                 if app.notice_card.is_none() {
-                    app.show_next_device_notice();
+                    app.show_next_notice();
                 }
             });
             LRESULT(0)
@@ -3073,7 +3105,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
         WM_TIMER if wparam.0 == FULLSCREEN_TIMER => {
             with_app(|app| {
                 app.poll_fullscreen();
-                app.show_next_device_notice();
+                app.show_next_notice();
             });
             LRESULT(0)
         }
@@ -3359,7 +3391,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 });
                 with_app(|app| {
                     app.tray_menu_open = false;
-                    app.show_next_device_notice();
+                    app.show_next_notice();
                 });
             }
             LRESULT(0)

@@ -51,8 +51,10 @@ periférico responde. El mismo receptor puede perder la lectura durante una
 suspensión o un apagado. Recuperarla en ese caso actualiza la fila sin un
 segundo aviso. Si se retira el dongle durante el tiempo de confirmación,
 volver a conectarlo y obtener una respuesta habilita otro aviso.
-Los avisos esperan a que se cierre el menú o se salga de pantalla completa, sin
-reemplazar otro aviso. La batería baja tiene prioridad sobre la conexión.
+Los avisos de dispositivos esperan a que se cierre el menú o se salga de
+pantalla completa. La batería baja tiene prioridad sobre la conexión. Si
+unos audífonos también pasan a ser la salida de audio, ambas tarjetas
+aparecen por turnos.
 
 Un receptor USB puede seguir presente con el mouse apagado o dormido. Una
 respuesta vacía o inválida significa **sin lectura**, nunca 0 %. Si ya hubo una
