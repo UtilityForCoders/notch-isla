@@ -1,0 +1,949 @@
+//! Baterías de periféricos. Las consultas se hacen en un hilo separado cada 30 s.
+//! Solo se envían consultas de estado a receptores con protocolo identificado.
+
+use std::collections::{HashMap, HashSet};
+use std::sync::{mpsc, Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use hidapi::{HidApi, HidDevice};
+use windows::core::{Interface, GUID, HSTRING};
+use windows::Devices::Bluetooth::GenericAttributeProfile::GattCommunicationStatus;
+use windows::Devices::Bluetooth::{
+    BluetoothCacheMode, BluetoothConnectionStatus, BluetoothDevice, BluetoothLEDevice,
+};
+use windows::Devices::Enumeration::{DeviceInformation, DeviceInformationKind};
+use windows::Foundation::IPropertyValue;
+use windows::Gaming::Input::RawGameController;
+use windows::Storage::Streams::DataReader;
+use windows::System::Power::BatteryStatus;
+use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+use windows::Win32::System::WinRT::{RoInitialize, RoUninitialize, RO_INIT_MULTITHREADED};
+use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_APP};
+use windows_future::{AsyncOperationCompletedHandler, IAsyncOperation};
+
+pub const WM_BATTERY: u32 = WM_APP + 11;
+pub const LOW_PERCENT: u8 = 20;
+const INTERVAL: Duration = Duration::from_secs(30);
+const BT_BATTERY: &str = "{104EA319-6EE2-4701-BD47-8DDBF425BBE5} 2";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Level {
+    Percent(u8),
+    Low,
+    Medium,
+    Full,
+}
+
+impl Level {
+    pub fn label(self) -> String {
+        match self {
+            Self::Percent(p) => format!("{p} %"),
+            Self::Low => "Baja (aprox.)".into(),
+            Self::Medium => "Media (aprox.)".into(),
+            Self::Full => "Alta (aprox.)".into(),
+        }
+    }
+
+    fn low(self) -> bool {
+        matches!(self, Self::Percent(p) if p < LOW_PERCENT) || self == Self::Low
+    }
+
+    fn recharged(self) -> bool {
+        matches!(self, Self::Percent(p) if p >= 25) || matches!(self, Self::Medium | Self::Full)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Device {
+    pub id: String,
+    pub name: String,
+    pub connection: &'static str,
+    pub level: Option<Level>,
+    pub charging: bool,
+    pub stale: bool,
+    /// Un receptor presente no implica que su periférico esté encendido.
+    pub detail: String,
+}
+
+impl Device {
+    /// El USB sigue conectado aunque el enlace con el periférico no responda.
+    /// No constituye una segunda conexión activa ni una identidad física común.
+    pub fn receiver_without_link(&self) -> bool {
+        self.connection == "USB / 2.4 GHz" && (self.stale || self.level.is_none())
+    }
+
+    pub fn status(&self) -> String {
+        let mut text = self
+            .level
+            .map_or_else(|| "Batería no disponible".into(), Level::label);
+        if self.stale {
+            text.push_str(" · Última lectura");
+        } else if self.charging {
+            text.push_str(" · Cargando");
+        } else if self.level.is_some_and(Level::low) {
+            text.push_str(" · Baja");
+        }
+        text
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct Snapshot {
+    pub devices: Vec<Device>,
+    pub updated: Option<Instant>,
+    pub scanning: bool,
+    pub errors: Vec<String>,
+}
+
+enum Request {
+    Refresh,
+    Stop,
+}
+
+pub struct Monitor {
+    shared: Arc<Mutex<Snapshot>>,
+    sender: mpsc::SyncSender<Request>,
+}
+
+impl Monitor {
+    pub fn start(hwnd: HWND) -> Self {
+        let shared = Arc::new(Mutex::new(Snapshot {
+            scanning: true,
+            ..Snapshot::default()
+        }));
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let state = shared.clone();
+        let hwnd = hwnd.0 as isize;
+        std::thread::spawn(move || {
+            let initialized = unsafe { RoInitialize(RO_INIT_MULTITHREADED) }.is_ok();
+            loop {
+                let mut snapshot = scan();
+                let mut previous = state.lock().unwrap_or_else(|e| e.into_inner());
+                preserve_last_readings(&mut snapshot, &previous);
+                *previous = snapshot;
+                drop(previous);
+                unsafe {
+                    let _ = PostMessageW(Some(HWND(hwnd as _)), WM_BATTERY, WPARAM(0), LPARAM(0));
+                }
+                match receiver.recv_timeout(INTERVAL) {
+                    Ok(Request::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                    _ => {}
+                }
+            }
+            if initialized {
+                unsafe { RoUninitialize() };
+            }
+        });
+        Self { shared, sender }
+    }
+
+    pub fn snapshot(&self) -> Snapshot {
+        self.shared
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    pub fn refresh(&self) {
+        let mut state = self.shared.lock().unwrap_or_else(|e| e.into_inner());
+        if !state.scanning && self.sender.try_send(Request::Refresh).is_ok() {
+            state.scanning = true;
+        }
+    }
+}
+
+impl Drop for Monitor {
+    fn drop(&mut self) {
+        // No se espera al controlador USB desde el hilo de la ventana.
+        let _ = self.sender.try_send(Request::Stop);
+    }
+}
+
+/// Se conserva el aviso durante desconexiones y lecturas fallidas. Solo una recarga
+/// comprobada lo rearma; la histéresis evita avisos por oscilaciones de 19 a 20 %.
+#[derive(Default)]
+pub struct Alerts {
+    warned: HashSet<String>,
+}
+
+impl Alerts {
+    pub fn retry_unshown(&mut self, id: &str) {
+        self.warned.remove(id);
+    }
+
+    pub fn update(&mut self, devices: &[Device], enabled: bool) -> Vec<Device> {
+        let mut alerts = Vec::new();
+        for device in devices {
+            if device.stale || device.receiver_without_link() {
+                continue;
+            }
+            if device.charging || device.level.is_some_and(Level::recharged) {
+                self.warned.remove(&device.id);
+            } else if enabled
+                && device.level.is_some_and(Level::low)
+                && self.warned.insert(device.id.clone())
+            {
+                alerts.push(device.clone());
+            }
+        }
+        alerts
+    }
+}
+
+fn preserve_last_readings(current: &mut Snapshot, previous: &Snapshot) {
+    for device in &mut current.devices {
+        if device.level.is_none() {
+            if let Some(old) = previous
+                .devices
+                .iter()
+                .find(|old| old.id == device.id && old.level.is_some())
+            {
+                device.level = old.level;
+                device.stale = true;
+            }
+        }
+    }
+}
+
+fn scan() -> Snapshot {
+    scan_with_diagnostics(false)
+}
+
+fn scan_with_diagnostics(trace: bool) -> Snapshot {
+    let mut snapshot = Snapshot::default();
+    let at = Instant::now();
+    if let Err(e) = bluetooth(&mut snapshot.devices, trace) {
+        snapshot.errors.push(format!("Bluetooth: {e}"));
+    }
+    if trace {
+        println!("Bluetooth: {:.2} s", at.elapsed().as_secs_f32());
+    }
+    if let Err(e) = controllers(&mut snapshot.devices) {
+        snapshot.errors.push(format!("Mandos: {e}"));
+    }
+    if trace {
+        println!("Mandos: {:.2} s", at.elapsed().as_secs_f32());
+    }
+    if let Err(e) = receivers(&mut snapshot.devices, trace) {
+        snapshot.errors.push(format!("Receptores USB: {e}"));
+    }
+    if trace {
+        println!("Receptores: {:.2} s", at.elapsed().as_secs_f32());
+    }
+    snapshot.devices.sort_by_key(|d| d.name.to_lowercase());
+    snapshot.updated = Some(Instant::now());
+    snapshot
+}
+
+fn properties(names: &[&str]) -> windows_collections::IIterable<HSTRING> {
+    names
+        .iter()
+        .map(|s| HSTRING::from(*s))
+        .collect::<Vec<_>>()
+        .into()
+}
+
+fn property(device: &DeviceInformation, name: &str) -> Option<IPropertyValue> {
+    device
+        .Properties()
+        .ok()?
+        .Lookup(&HSTRING::from(name))
+        .ok()?
+        .cast()
+        .ok()
+}
+
+/// Un dispositivo Bluetooth apagado o su controlador no debe detener el monitor.
+fn finish<T: windows::core::RuntimeType + 'static>(
+    operation: IAsyncOperation<T>,
+) -> windows::core::Result<T> {
+    let (sender, receiver) = mpsc::sync_channel(1);
+    operation.SetCompleted(&AsyncOperationCompletedHandler::new(move |_, _| {
+        let _ = sender.try_send(());
+        Ok(())
+    }))?;
+    if receiver.recv_timeout(Duration::from_secs(3)).is_err() {
+        let _ = operation.Cancel();
+        return Err(windows::core::Error::from(windows::core::HRESULT(
+            0x800705b4u32 as i32,
+        )));
+    }
+    operation.GetResults()
+}
+
+fn property_percent(device: &DeviceInformation) -> Option<Level> {
+    let value = property(device, BT_BATTERY)?;
+    let p = value
+        .GetUInt8()
+        .ok()
+        .map(u32::from)
+        .or_else(|| value.GetUInt32().ok())
+        .or_else(|| value.GetInt32().ok().and_then(|v| u32::try_from(v).ok()))?;
+    (p <= 100).then_some(Level::Percent(p as u8))
+}
+
+fn bluetooth(out: &mut Vec<Device>, trace: bool) -> windows::core::Result<()> {
+    // La batería que conoce Windows está en el nodo PnP, no siempre en el AEP.
+    let nodes = finish(
+        DeviceInformation::FindAllAsyncWithKindAqsFilterAndAdditionalProperties(
+            &HSTRING::from("System.Devices.DeviceInstanceId:~<\"BTH\" AND System.Devices.Present:=System.StructuredQueryType.Boolean#True"),
+            &properties(&[BT_BATTERY, "System.Devices.ContainerId"]),
+            DeviceInformationKind::Device,
+        )?,
+    )?;
+    if trace {
+        println!("Bluetooth: nodos PnP enumerados");
+    }
+    let mut batteries = HashMap::new();
+    for node in &nodes {
+        if let (Some(level), Some(container)) = (
+            property_percent(&node),
+            property(&node, "System.Devices.ContainerId").and_then(|p| p.GetGuid().ok()),
+        ) {
+            batteries.insert(container, level);
+        }
+    }
+    // Enumerar interfaces instaladas evita iniciar descubrimiento de radio (AEP),
+    // que puede tardar un minuto incluso sin dispositivos nuevos.
+    let mut seen = HashSet::new();
+    for le in [false, true] {
+        let selector = if le {
+            BluetoothLEDevice::GetDeviceSelectorFromConnectionStatus(
+                BluetoothConnectionStatus::Connected,
+            )?
+        } else {
+            BluetoothDevice::GetDeviceSelectorFromConnectionStatus(
+                BluetoothConnectionStatus::Connected,
+            )?
+        };
+        let devices = DeviceInformation::FindAllAsyncAqsFilterAndAdditionalProperties(
+            &selector,
+            &properties(&["System.Devices.ContainerId"]),
+        )
+        .and_then(finish)?;
+        if trace {
+            println!("Bluetooth: interfaces LE={le}: {}", devices.Size()?);
+        }
+        for info in &devices {
+            let id = info.Id()?;
+            let (connected, native_name, address) = if le {
+                BluetoothLEDevice::FromIdAsync(&id)
+                    .and_then(finish)
+                    .map(|d| {
+                        let result = (
+                            d.ConnectionStatus().ok(),
+                            d.Name().ok(),
+                            d.BluetoothAddress().ok(),
+                        );
+                        let _ = d.Close();
+                        result
+                    })
+                    .unwrap_or_default()
+            } else {
+                BluetoothDevice::FromIdAsync(&id)
+                    .and_then(finish)
+                    .map(|d| {
+                        let result = (
+                            d.ConnectionStatus().ok(),
+                            d.Name().ok(),
+                            d.BluetoothAddress().ok(),
+                        );
+                        let _ = d.Close();
+                        result
+                    })
+                    .unwrap_or_default()
+            };
+            if connected != Some(BluetoothConnectionStatus::Connected) {
+                continue;
+            }
+            let address = address
+                .map(|a| format!("{a:012X}"))
+                .unwrap_or_else(|| id.to_string());
+            let level = property(&info, "System.Devices.ContainerId")
+                .and_then(|p| p.GetGuid().ok())
+                .and_then(|key| batteries.get(&key).copied())
+                .or_else(|| {
+                    (&nodes).into_iter().find_map(|node| {
+                        node.Id()
+                            .ok()
+                            .filter(|s| s.to_string().to_uppercase().contains(&address))
+                            .and_then(|_| property_percent(&node))
+                    })
+                })
+                .or_else(|| if le { ble_battery(&id) } else { None });
+            if !seen.insert(address.clone()) {
+                // Un dispositivo dual puede informar batería solo en su interfaz LE.
+                if let Some(existing) = out.iter_mut().find(|d| d.id == format!("bt:{address}")) {
+                    if level.is_some() {
+                        existing.level = level;
+                        existing.detail.clear();
+                    }
+                }
+                continue;
+            }
+            out.push(Device {
+                id: format!("bt:{address}"),
+                name: native_name
+                    .filter(|n| !n.is_empty())
+                    .or_else(|| info.Name().ok().filter(|n| !n.is_empty()))
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|| format!("Bluetooth {address}")),
+                connection: "Bluetooth",
+                level,
+                charging: false,
+                stale: false,
+                detail: if level.is_none() {
+                    "Windows no informa la batería".into()
+                } else {
+                    String::new()
+                },
+            });
+        }
+    }
+    Ok(())
+}
+fn ble_battery(id: &HSTRING) -> Option<Level> {
+    let device = BluetoothLEDevice::FromIdAsync(id).and_then(finish).ok()?;
+    let result = (|| {
+        let services = device
+            .GetGattServicesForUuidAsync(GUID::from_u128(0x0000180f_0000_1000_8000_00805f9b34fb))
+            .and_then(finish)
+            .ok()?;
+        if services.Status().ok()? != GattCommunicationStatus::Success {
+            return None;
+        }
+        for service in &services.Services().ok()? {
+            let value = (|| {
+                let characteristics = service
+                    .GetCharacteristicsForUuidAsync(GUID::from_u128(
+                        0x00002a19_0000_1000_8000_00805f9b34fb,
+                    ))
+                    .and_then(finish)
+                    .ok()?;
+                if characteristics.Status().ok()? != GattCommunicationStatus::Success {
+                    return None;
+                }
+                for characteristic in &characteristics.Characteristics().ok()? {
+                    let reading = characteristic
+                        .ReadValueWithCacheModeAsync(BluetoothCacheMode::Uncached)
+                        .and_then(finish)
+                        .ok()?;
+                    if reading.Status().ok()? != GattCommunicationStatus::Success {
+                        continue;
+                    }
+                    let buffer = reading.Value().ok()?;
+                    if buffer.Length().ok()? != 1 {
+                        continue;
+                    }
+                    let percent = DataReader::FromBuffer(&buffer).ok()?.ReadByte().ok()?;
+                    if percent <= 100 {
+                        return Some(Level::Percent(percent));
+                    }
+                }
+                None
+            })();
+            let _ = service.Close();
+            if value.is_some() {
+                return value;
+            }
+        }
+        None
+    })();
+    let _ = device.Close();
+    result
+}
+
+fn capacity_level(remaining: i32, full: i32) -> Option<Level> {
+    if full <= 0 || remaining < 0 || remaining > full {
+        return None;
+    }
+    // Algunos controladores devuelven los cuatro niveles de XInput como 0..3.
+    if full == 3 {
+        return Some(match remaining {
+            0 | 1 => Level::Low,
+            2 => Level::Medium,
+            _ => Level::Full,
+        });
+    }
+    Some(Level::Percent(
+        ((i64::from(remaining) * 100) / i64::from(full)) as u8,
+    ))
+}
+
+fn controllers(out: &mut Vec<Device>) -> windows::core::Result<()> {
+    let controllers = RawGameController::RawGameControllers()?;
+    let mut names = HashMap::new();
+    for controller in &controllers {
+        *names
+            .entry(controller.DisplayName()?.to_string().to_lowercase())
+            .or_insert(0) += 1;
+    }
+    for controller in &controllers {
+        let name = controller.DisplayName()?.to_string();
+        let id = controller.NonRoamableId()?.to_string();
+        let report = controller.TryGetBatteryReport().ok();
+        let status = report.as_ref().and_then(|r| r.Status().ok());
+        let level = report.as_ref().and_then(|r| {
+            capacity_level(
+                r.RemainingCapacityInMilliwattHours().ok()?.Value().ok()?,
+                r.FullChargeCapacityInMilliwattHours().ok()?.Value().ok()?,
+            )
+        });
+        // Solo fusionar nombres inequívocos; dos mandos iguales deben seguir separados.
+        let unique_bt = names.get(&name.to_lowercase()) == Some(&1)
+            && out
+                .iter()
+                .filter(|d| d.connection == "Bluetooth" && d.name.eq_ignore_ascii_case(&name))
+                .count()
+                == 1;
+        if let Some(existing) = out.iter_mut().find(|d| {
+            unique_bt && d.connection == "Bluetooth" && d.name.eq_ignore_ascii_case(&name)
+        }) {
+            if level.is_some() {
+                existing.level = level;
+                existing.detail.clear();
+            }
+            existing.charging = status == Some(BatteryStatus::Charging);
+            continue;
+        }
+        out.push(Device {
+            id: format!("gamepad:{id}"),
+            name,
+            connection: if controller.IsWireless().unwrap_or(false) {
+                "Inalámbrico"
+            } else {
+                "USB / receptor"
+            },
+            level,
+            charging: status == Some(BatteryStatus::Charging),
+            stale: false,
+            detail: if level.is_none() {
+                "El mando o su receptor no informa la batería".into()
+            } else {
+                String::new()
+            },
+        });
+    }
+    Ok(())
+}
+
+/// Respuesta de estado AJAZZ 3151:5007, con report id conservado por Windows.
+fn parse_ajazz(data: &[u8]) -> Option<Level> {
+    if data.len() < 8
+        || data[0] != 5
+        || data[1..3] != [0, 0]
+        || data[3] > 100
+        || data[3..8].iter().all(|b| *b == 0)
+    {
+        return None;
+    }
+    Some(Level::Percent(data[3]))
+}
+
+fn ajazz(device: &HidDevice) -> Option<Level> {
+    for size in [65, 67] {
+        let mut request = vec![0; size];
+        request[1] = 0xf7;
+        if device.send_feature_report(&request).is_err() {
+            continue;
+        }
+        std::thread::sleep(Duration::from_millis(30));
+        let mut response = [0u8; 65];
+        response[0] = 5;
+        if let Ok(count) = device.get_feature_report(&mut response) {
+            if let Some(level) = parse_ajazz(&response[..count]) {
+                return Some(level);
+            }
+        }
+    }
+    None
+}
+
+fn compx_query(device: &HidDevice, query: u8) -> Option<[u8; 32]> {
+    // hidapi exige el report id 0 delante del informe sin numerar de 32 bytes.
+    let mut request = [0u8; 33];
+    request[1] = query;
+    device.write(&request).ok()?;
+    let deadline = Instant::now() + Duration::from_millis(400);
+    while Instant::now() < deadline {
+        let mut response = [0u8; 32];
+        let remaining = deadline
+            .saturating_duration_since(Instant::now())
+            .as_millis()
+            .max(1) as i32;
+        let count = device.read_timeout(&mut response, remaining).ok()?;
+        if count == 32 && valid_compx(&response, query) {
+            return Some(response);
+        }
+    }
+    None
+}
+
+fn valid_compx(response: &[u8], query: u8) -> bool {
+    response.len() == 32
+        && response[0] == query
+        && response[1] == 0
+        && response[2] == 1
+        && response[3] != 0
+        && response[4..31]
+            .iter()
+            .fold(0u8, |sum, b| sum.wrapping_add(*b))
+            == response[31]
+}
+
+fn compx_battery(device: &HidDevice) -> Option<Level> {
+    // La identidad puede ser una copia vieja del receptor. Exigir primero respuesta
+    // a una consulta que debe llegar al mouse (frecuencia, sin modificarla).
+    compx_query(device, 0x12)?;
+    let info = compx_query(device, 0x10)?;
+    let model = &info[4..8];
+    if !matches!(model, b"M620" | b"P630" | b"M630") || info[13] > 100 {
+        return None;
+    }
+    Some(Level::Percent(info[13]))
+}
+
+fn parse_mchose(data: &[u8]) -> Option<(Level, bool)> {
+    if data.len() < 13 || !matches!(data[0], 0x11 | 0x12) || data[1] != !0x06u8 {
+        return None;
+    }
+    let body: Vec<u8> = data[2..].iter().map(|b| !b).collect();
+    let vendor = u16::from_le_bytes([body[0], body[1]]);
+    // Bit 3: el mouse está enlazado. Una estructura válida con el enlace
+    // apagado puede contener el último porcentaje almacenado por el receptor.
+    if !matches!(vendor, 0x5253 | 0x3837) || body[8] & 0x08 == 0 || body[9] > 100 || body[10] > 1 {
+        return None;
+    }
+    Some((Level::Percent(body[9]), body[10] == 1))
+}
+
+fn mchose(device: &HidDevice, trace: bool) -> Option<(Level, bool)> {
+    for (report, size) in [(0x11, 21), (0x12, 65)] {
+        let mut request = vec![0xff; size];
+        request[0] = report;
+        request[1] = !0x06u8;
+        let sent = device.send_feature_report(&request);
+        if trace {
+            println!("MCHOSE consulta {report:02x}: {sent:?}");
+        }
+        if sent.is_err() {
+            continue;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+        for _ in 0..3 {
+            let mut response = vec![0; size];
+            response[0] = report;
+            if let Ok(count) = device.get_feature_report(&mut response) {
+                if trace {
+                    println!("MCHOSE respuesta: {:02x?}", &response[..count.min(16)]);
+                }
+                if let Some(value) = parse_mchose(&response[..count]) {
+                    return Some(value);
+                }
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+    None
+}
+
+fn receivers(out: &mut Vec<Device>, trace: bool) -> hidapi::HidResult<()> {
+    let api = HidApi::new()?;
+    let mut seen = HashSet::new();
+    for info in api.device_list() {
+        let vendor = info.vendor_id();
+        let product = info.product_id();
+        let name = info.product_string().unwrap_or("Periférico USB");
+        let known_ajazz = vendor == 0x3151
+            && product == 0x5007
+            && info.usage_page() == 0xffff
+            && info.usage() == 2;
+        let known_compx = matches!(vendor, 0x248a | 0x249a)
+            && matches!(product, 0x5c2f | 0x5b2f)
+            && info.interface_number() == 2;
+        let known_mchose = ((vendor == 0x5253 && matches!(product, 0x1020 | 0x1021))
+            || (matches!(vendor, 0x5253 | 0x3837) && name.to_lowercase().contains("k7")))
+            && info.usage_page() == 0xff01;
+        // Otras variantes se muestran sin enviarles comandos no verificados.
+        let candidate = known_ajazz
+            || known_compx
+            || known_mchose
+            || (info.usage_page() >= 0xff00
+                && (name.to_lowercase().contains("ajazz")
+                    || name.to_lowercase().contains("mchose")));
+        if !candidate {
+            continue;
+        }
+        // La colección que permite leer tiene prioridad sobre las otras del mismo receptor.
+        if !known_ajazz
+            && !known_compx
+            && !known_mchose
+            && api.device_list().any(|d| {
+                d.vendor_id() == vendor
+                    && d.product_id() == product
+                    && ((vendor == 0x3151
+                        && product == 0x5007
+                        && d.usage_page() == 0xffff
+                        && d.usage() == 2)
+                        || (known_mchose_family(vendor, product, name) && d.usage_page() == 0xff01))
+            })
+        {
+            continue;
+        }
+        let path = info.path().to_string_lossy();
+        // Las colecciones comparten el prefijo de ruta; conservar receptores idénticos separados.
+        let id = format!("hid:{}", path.to_lowercase());
+        if !seen.insert(id.clone()) {
+            continue;
+        }
+        let value = info.open_device(&api).ok().and_then(|device| {
+            if known_ajazz {
+                ajazz(&device).map(|l| (l, false))
+            } else if known_compx {
+                compx_battery(&device).map(|l| (l, false))
+            } else if known_mchose {
+                mchose(&device, trace)
+            } else {
+                None
+            }
+        });
+        out.push(Device {
+            id,
+            name: name.to_string(),
+            connection: "USB / 2.4 GHz",
+            level: value.map(|v| v.0),
+            charging: value.is_some_and(|v| v.1),
+            stale: false,
+            detail: if value.is_some() {
+                String::new()
+            } else if known_ajazz || known_compx || known_mchose {
+                "Sin lectura: apagado, dormido u ocupado".into()
+            } else {
+                "Protocolo de batería aún no compatible".into()
+            },
+        });
+    }
+    Ok(())
+}
+
+fn known_mchose_family(vendor: u16, product: u16, name: &str) -> bool {
+    (vendor == 0x5253 && matches!(product, 0x1020 | 0x1021))
+        || (matches!(vendor, 0x5253 | 0x3837) && name.to_lowercase().contains("k7"))
+}
+
+/// Diagnóstico explícito para validar hardware sin abrir otra instancia de la isla.
+pub fn diagnostics() {
+    let initialized = unsafe { RoInitialize(RO_INIT_MULTITHREADED) }.is_ok();
+    // WGI termina de enumerar los mandos de forma asíncrona.
+    let _ = RawGameController::RawGameControllers();
+    std::thread::sleep(Duration::from_millis(500));
+    let snapshot = scan_with_diagnostics(true);
+    for device in &snapshot.devices {
+        println!(
+            "{} | {} | {} | {}",
+            device.name,
+            device.connection,
+            device.status(),
+            device.detail
+        );
+    }
+    for error in snapshot.errors {
+        eprintln!("{error}");
+    }
+    if let Ok(api) = HidApi::new() {
+        println!("\nInterfaces HID (identificadores para comprobar compatibilidad):");
+        for info in api.device_list() {
+            println!(
+                "{:04x}:{:04x} usage={:04x}:{:04x} {}",
+                info.vendor_id(),
+                info.product_id(),
+                info.usage_page(),
+                info.usage(),
+                info.product_string().unwrap_or("")
+            );
+        }
+    }
+    if initialized {
+        unsafe { RoUninitialize() };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn device(level: Option<Level>, charging: bool) -> Device {
+        Device {
+            id: "mouse".into(),
+            name: "Mouse".into(),
+            connection: "USB",
+            level,
+            charging,
+            stale: false,
+            detail: String::new(),
+        }
+    }
+
+    #[test]
+    fn sleeping_mouse_keeps_an_explicit_previous_reading_without_alerting() {
+        let old = Snapshot {
+            devices: vec![device(Some(Level::Percent(18)), false)],
+            ..Snapshot::default()
+        };
+        let mut current = Snapshot {
+            devices: vec![device(None, false)],
+            ..Snapshot::default()
+        };
+        preserve_last_readings(&mut current, &old);
+        assert_eq!(current.devices[0].level, Some(Level::Percent(18)));
+        assert!(current.devices[0].status().contains("Última lectura"));
+        let mut alerts = Alerts::default();
+        assert!(alerts.update(&current.devices, true).is_empty());
+        assert_eq!(alerts.update(&old.devices, true).len(), 1);
+    }
+
+    #[test]
+    fn k7_ultra_hardware_capture_and_asleep_responses() {
+        // 5253:1021, obtenido del K7 Ultra conectado por 2.4 GHz durante la prueba.
+        let awake = [
+            0x11, 0xf9, 0xc8, 0xc7, 0xaf, 0xbe, 0xe3, 0xfa, 0xfa, 0xff, 0xf6, 0xb1, 0xff, 0xae,
+            0xff, 0xff,
+        ];
+        assert_eq!(parse_mchose(&awake), Some((Level::Percent(78), false)));
+        let mut asleep = [0xff; 21];
+        asleep[0] = 0x11;
+        asleep[1] = 0xf9;
+        assert_eq!(parse_mchose(&asleep), None);
+        let mut cached_without_link = awake;
+        cached_without_link[10] = !1u8; // Mismo 78 %, bit de enlace desactivado.
+        assert_eq!(parse_mchose(&cached_without_link), None);
+    }
+
+    #[test]
+    fn bluetooth_and_cached_receiver_do_not_appear_as_two_active_mice() {
+        let mut bluetooth = device(Some(Level::Percent(78)), false);
+        bluetooth.id = "bt:mouse".into();
+        bluetooth.name = "MCHOSE K7 Ultra".into();
+        bluetooth.connection = "Bluetooth";
+        let mut receiver = bluetooth.clone();
+        receiver.id = "hid:receiver".into();
+        receiver.connection = "USB / 2.4 GHz";
+        let previous = Snapshot {
+            devices: vec![receiver.clone()],
+            ..Snapshot::default()
+        };
+        receiver.level = None;
+        let mut current = Snapshot {
+            devices: vec![bluetooth, receiver],
+            ..Snapshot::default()
+        };
+        preserve_last_readings(&mut current, &previous);
+        assert_eq!(current.devices[1].level, Some(Level::Percent(78)));
+        assert!(current.devices[1].receiver_without_link());
+        let items = crate::tray::battery_items(&current, true);
+        let active_count = items
+            .iter()
+            .filter(|item| {
+                matches!(item,
+            crate::menu::Item::Group { label, .. } if label.starts_with("MCHOSE K7 Ultra"))
+            })
+            .count();
+        assert_eq!(active_count, 1);
+        assert!(items.iter().any(|item| matches!(item,
+            crate::menu::Item::Group { label, .. } if label == "Receptores sin enlace confirmado (1)")));
+
+        // Igual nombre y porcentaje no prueban identidad: dos enlaces activos
+        // pueden corresponder a dos unidades y deben conservarse separados.
+        current.devices[1].stale = false;
+        let items = crate::tray::battery_items(&current, true);
+        assert_eq!(
+            items
+                .iter()
+                .filter(|item| matches!(item,
+            crate::menu::Item::Group { label, .. } if label.starts_with("MCHOSE K7 Ultra")))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn compx_rejects_wrong_query_empty_reply_and_bad_checksum() {
+        let mut reply = [0u8; 32];
+        reply[0] = 0x10;
+        reply[2] = 1;
+        reply[3] = 14;
+        reply[4..8].copy_from_slice(b"M620");
+        reply[13] = 18;
+        reply[31] = reply[4..31].iter().fold(0u8, |sum, b| sum.wrapping_add(*b));
+        assert!(valid_compx(&reply, 0x10));
+        assert!(!valid_compx(&reply, 0x12));
+        reply[13] = 99;
+        assert!(!valid_compx(&reply, 0x10));
+        assert!(!valid_compx(&[0; 32], 0x10));
+    }
+
+    #[test]
+    fn low_alert_requires_valid_reading_and_rearms_after_recharge() {
+        let mut alerts = Alerts::default();
+        for level in [None, Some(Level::Percent(20)), Some(Level::Percent(100))] {
+            assert!(alerts.update(&[device(level, false)], true).is_empty());
+        }
+        let low = device(Some(Level::Percent(19)), false);
+        assert_eq!(alerts.update(&[low.clone()], true).len(), 1);
+        assert!(alerts.update(&[], true).is_empty());
+        assert!(alerts.update(&[device(None, false)], true).is_empty());
+        assert!(alerts.update(&[low.clone()], true).is_empty());
+        alerts.update(&[device(Some(Level::Percent(20)), false)], true);
+        assert!(alerts.update(&[low.clone()], true).is_empty());
+        alerts.update(&[device(Some(Level::Percent(25)), false)], true);
+        assert_eq!(alerts.update(&[low.clone()], true).len(), 1);
+        alerts.update(&[device(Some(Level::Percent(19)), true)], true);
+        assert_eq!(alerts.update(&[low], true).len(), 1);
+    }
+
+    #[test]
+    fn disabled_alerts_do_not_consume_warning_and_coarse_levels_are_honest() {
+        let mut alerts = Alerts::default();
+        let low = device(Some(Level::Low), false);
+        assert!(alerts.update(&[low.clone()], false).is_empty());
+        assert_eq!(alerts.update(&[low], true).len(), 1);
+        assert_eq!(capacity_level(1, 3), Some(Level::Low));
+        assert_eq!(capacity_level(18, 100), Some(Level::Percent(18)));
+        assert_eq!(capacity_level(1, 0), None);
+        assert_eq!(capacity_level(101, 100), None);
+        assert_eq!(capacity_level(-1, 100), None);
+    }
+
+    #[test]
+    fn ajazz_rejects_offline_and_transient_frames() {
+        assert_eq!(
+            parse_ajazz(&[5, 0, 0, 18, 1, 1, 1, 2]),
+            Some(Level::Percent(18))
+        );
+        assert_eq!(
+            parse_ajazz(&[5, 0, 0, 0, 1, 1, 1, 2]),
+            Some(Level::Percent(0))
+        );
+        for frame in [
+            &[5, 0, 0, 0, 0, 0, 0, 0][..],
+            &[5, 0xad, 4, 18, 1, 1, 1, 2],
+            &[5, 0, 0, 255, 1, 1, 1, 2],
+            &[5, 0, 0],
+        ] {
+            assert_eq!(parse_ajazz(frame), None);
+        }
+    }
+
+    #[test]
+    fn mchose_checks_response_identity_and_range() {
+        let mut frame = vec![0x11, !6u8];
+        frame.extend([0x53, 0x52, 0x31, 0, 2, 5, 7, 0, 9, 18, 1].map(|b| !b));
+        assert_eq!(parse_mchose(&frame), Some((Level::Percent(18), true)));
+        frame[11] = !101;
+        assert_eq!(parse_mchose(&frame), None);
+        frame[11] = !18;
+        frame[1] = !4;
+        assert_eq!(parse_mchose(&frame), None);
+        assert_eq!(parse_mchose(&[0x11, !6, 0, 0]), None);
+    }
+}

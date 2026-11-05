@@ -399,6 +399,11 @@ fn with_state(f: impl FnOnce(&mut State)) {
     }
 }
 
+/// Actualiza un panel abierto desde un mensaje de la ventana principal.
+pub fn replace_items(items: Vec<Item>) {
+    with_state(|state| state.update_items(items));
+}
+
 fn run(items: Vec<Item>, from_tray: bool) -> Result<Option<usize>> {
     unsafe {
         let mut anchor = POINT::default();

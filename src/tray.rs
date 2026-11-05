@@ -49,6 +49,9 @@ const CMD_HIGH_REFRESH: usize = 15;
 const CMD_TRANSLUCENT: usize = 16;
 const CMD_EXPAND_ON_HOVER: usize = 17;
 const CMD_PIN_EXPANDED: usize = 18;
+const CMD_DEVICES: usize = 19;
+const CMD_BATTERY_NOTICES: usize = 20;
+const CMD_BATTERY_REFRESH: usize = 21;
 /// Las opciones de los submenús van numeradas a partir de estas bases.
 const CMD_HIDE_DELAY: usize = 100;
 const CMD_MONITOR: usize = 200;
@@ -62,6 +65,7 @@ const CMD_BLUR_RADIUS: usize = 500;
 pub const TIMER_MINUTES: [u32; 6] = [5, 10, 15, 25, 45, 60];
 
 pub enum Command {
+    Devices,
     ToggleAutostart,
     Update,
     Exit,
@@ -255,6 +259,7 @@ pub fn build_items(state: &MenuState) -> Vec<Item> {
 
     items.push(Item::Separator);
     // La letra se pide a internet: se dice a quién, para que cada uno decida activarla.
+    items.push(action(CMD_DEVICES, "Dispositivos y batería", false));
     items.push(Item::Group {
         label: "Mostrar letra de la canción".to_string(),
         items: vec![
@@ -345,6 +350,7 @@ pub fn build_items(state: &MenuState) -> Vec<Item> {
 fn id_to_command(id: usize, state: &MenuState) -> Option<Command> {
     let pick = |base: usize, len: usize| (base..base + len).contains(&id).then(|| id - base);
     match id {
+        CMD_DEVICES => Some(Command::Devices),
         CMD_AUTOSTART => Some(Command::ToggleAutostart),
         CMD_UPDATE => Some(Command::Update),
         CMD_EXIT => Some(Command::Exit),
@@ -418,6 +424,108 @@ pub enum IslandMenuChoice {
     Output(Option<usize>),
     Center,
     TogglePinnedExpanded,
+}
+
+pub fn battery_items(snapshot: &crate::battery::Snapshot, notices: bool) -> Vec<Item> {
+    let mut items = vec![
+        Item::Label("Dispositivos y batería".into()),
+        Item::Separator,
+        Item::Action {
+            id: CMD_BATTERY_NOTICES,
+            label: "Avisar con batería baja (< 20 %)".into(),
+            checked: notices,
+        },
+        Item::Action {
+            id: CMD_BATTERY_REFRESH,
+            label: if snapshot.scanning {
+                "Consultando dispositivos…".into()
+            } else {
+                "Actualizar ahora".into()
+            },
+            checked: false,
+        },
+        Item::Separator,
+    ];
+    if snapshot.updated.is_some() && !snapshot.devices.iter().any(|d| !d.receiver_without_link()) {
+        items.push(Item::Label("Sin periféricos activos detectados".into()));
+    }
+    for device in snapshot
+        .devices
+        .iter()
+        .filter(|d| !d.receiver_without_link())
+    {
+        let mut details = vec![
+            Item::Label(device.connection.into()),
+            Item::Label(device.status()),
+        ];
+        if !device.detail.is_empty() {
+            details.push(Item::Label(device.detail.clone()));
+        }
+        items.push(Item::Group {
+            label: format!(
+                "{} · {}",
+                device.name,
+                device.level.map_or_else(
+                    || "Sin lectura".into(),
+                    |l| {
+                        if device.stale {
+                            format!("{} (anterior)", l.label())
+                        } else {
+                            l.label()
+                        }
+                    }
+                )
+            ),
+            items: details,
+        });
+    }
+    let inactive: Vec<_> = snapshot
+        .devices
+        .iter()
+        .filter(|d| d.receiver_without_link())
+        .collect();
+    if !inactive.is_empty() {
+        let mut details = vec![Item::Label("USB conectado; enlace no confirmado".into())];
+        for device in &inactive {
+            details.push(Item::Label(device.name.clone()));
+            if let Some(level) = device.level {
+                details.push(Item::Label(format!(
+                    "Última lectura por receptor: {}",
+                    level.label()
+                )));
+            }
+            if !device.detail.is_empty() {
+                details.push(Item::Label(device.detail.clone()));
+            }
+        }
+        details.push(Item::Label("Estas lecturas no generan avisos".into()));
+        items.push(Item::Group {
+            label: format!("Receptores sin enlace confirmado ({})", inactive.len()),
+            items: details,
+        });
+    }
+    if !snapshot.errors.is_empty() {
+        items.push(Item::Group {
+            label: "No se pudo consultar alguna fuente".into(),
+            items: snapshot.errors.iter().cloned().map(Item::Label).collect(),
+        });
+    }
+    items
+}
+
+pub fn show_battery_menu(mut on_action: impl FnMut(bool)) {
+    let mut initial = Vec::new();
+    crate::with_app(|app| initial = app.battery_menu_items());
+    menu::show_tray(initial, |id| {
+        match id {
+            CMD_BATTERY_NOTICES => on_action(true),
+            CMD_BATTERY_REFRESH => on_action(false),
+            _ => return menu::MenuAction::Close,
+        }
+        let mut items = Vec::new();
+        crate::with_app(|app| items = app.battery_menu_items());
+        menu::MenuAction::KeepOpen(items)
+    });
 }
 
 /// Menú contextual sobre la isla: opciones de salida de audio y centrar en la pantalla.

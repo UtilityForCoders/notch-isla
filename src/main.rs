@@ -5,6 +5,7 @@ mod appicon;
 mod audio;
 mod autostart;
 mod backdrop;
+mod battery;
 mod frame_wait;
 mod fullscreen;
 mod hotkey;
@@ -224,6 +225,10 @@ fn main() -> Result<()> {
     unsafe {
         // Copia temporal lanzada para actualizar: espera al instalador y vuelve a abrir la isla.
         let args: Vec<String> = std::env::args().collect();
+        if args.get(1).map(String::as_str) == Some("--battery-diagnostics") {
+            battery::diagnostics();
+            return Ok(());
+        }
         if args.get(1).map(String::as_str) == Some(update::UPDATER_FLAG) {
             update::run_updater(&args[2..]);
             return Ok(());
@@ -289,6 +294,7 @@ fn main() -> Result<()> {
         with_app(|app| {
             app.audio = AudioWatch::new(hwnd).ok();
             app.audio_device = app.audio.as_ref().and_then(AudioWatch::device_name);
+            app.battery = Some(battery::Monitor::start(hwnd));
         });
         // Si se acaba de instalar una actualización desde la isla, se avisa cómo salió.
         if let Some((ok, version)) = update::take_install_result() {
@@ -313,6 +319,30 @@ fn main() -> Result<()> {
 
 thread_local! {
     static APP: RefCell<Option<App>> = const { RefCell::new(None) };
+}
+
+fn show_battery_panel() {
+    with_app(|app| {
+        app.battery_menu_open = true;
+        if let Some(monitor) = &app.battery {
+            monitor.refresh();
+        }
+    });
+    tray::show_battery_menu(|toggle| {
+        with_app(|app| {
+            if toggle {
+                app.settings.battery_notices = !app.settings.battery_notices;
+                app.settings.save();
+                app.on_battery();
+            } else if let Some(monitor) = &app.battery {
+                monitor.refresh();
+            }
+        });
+    });
+    with_app(|app| {
+        app.battery_menu_open = false;
+        app.show_next_battery_alert();
+    });
 }
 
 /// Ejecuta `f` con el estado de la app si está disponible (evita pánicos por reentrada).
@@ -521,6 +551,10 @@ struct App {
     last_notice: Option<ActiveNotice>,
     /// Escucha la salida de audio; `None` si Core Audio no está disponible.
     audio: Option<AudioWatch>,
+    battery: Option<battery::Monitor>,
+    battery_alerts: battery::Alerts,
+    battery_pending: std::collections::VecDeque<battery::Device>,
+    battery_menu_open: bool,
     /// Nombre de la salida de audio actual, para avisar solo cuando de verdad cambia.
     audio_device: Option<String>,
     /// Temporizador en marcha: cuándo termina y de cuántos minutos es.
@@ -599,6 +633,10 @@ impl App {
             notice: None,
             last_notice: None,
             audio: None,
+            battery: None,
+            battery_alerts: battery::Alerts::default(),
+            battery_pending: std::collections::VecDeque::new(),
+            battery_menu_open: false,
             audio_device: None,
             countdown: None,
             installing: None,
@@ -697,6 +735,74 @@ impl App {
             let name = name.unwrap_or_default();
             self.show_notice(view, "Salida de audio", &name, NOTICE_MS);
         }
+    }
+
+    fn battery_menu_items(&self) -> Vec<menu::Item> {
+        let snapshot = self
+            .battery
+            .as_ref()
+            .map(battery::Monitor::snapshot)
+            .unwrap_or_default();
+        tray::battery_items(&snapshot, self.settings.battery_notices)
+    }
+
+    fn on_battery(&mut self) {
+        let Some(monitor) = &self.battery else {
+            return;
+        };
+        let snapshot = monitor.snapshot();
+        let mut pending_notices = std::collections::VecDeque::new();
+        for pending in self.battery_pending.drain(..) {
+            if let Some(current) = snapshot.devices.iter().find(|d| {
+                d.id == pending.id
+                    && !d.stale
+                    && !d.charging
+                    && d.level.is_some_and(|l| match l {
+                        battery::Level::Percent(p) => p < battery::LOW_PERCENT,
+                        battery::Level::Low => true,
+                        _ => false,
+                    })
+            }) {
+                pending_notices.push_back(current.clone());
+            } else {
+                self.battery_alerts.retry_unshown(&pending.id);
+            }
+        }
+        self.battery_pending = pending_notices;
+        let alerts = self
+            .battery_alerts
+            .update(&snapshot.devices, self.settings.battery_notices);
+        self.battery_pending.extend(alerts);
+        self.show_next_battery_alert();
+    }
+
+    fn show_next_battery_alert(&mut self) {
+        if !self.settings.battery_notices {
+            for pending in self.battery_pending.drain(..) {
+                self.battery_alerts.retry_unshown(&pending.id);
+            }
+            return;
+        }
+        if self.notice.is_some()
+            || self.fullscreen
+            || self.installing.is_some()
+            || self.battery_menu_open
+        {
+            return;
+        }
+        let Some(device) = self.battery_pending.pop_front() else {
+            return;
+        };
+        let subtitle = format!("{} · {}", device.name, device.status());
+        self.show_notice(
+            Notice {
+                icon: NoticeIcon::Battery,
+                color: ORANGE,
+            },
+            "Batería baja",
+            &subtitle,
+            6000,
+        );
     }
 
     /// Pone en marcha el temporizador de la bandeja (reemplaza al anterior).
@@ -2767,6 +2873,19 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             with_app(|app| app.on_audio_device());
             LRESULT(0)
         }
+        battery::WM_BATTERY => {
+            let mut items = None;
+            with_app(|app| {
+                app.on_battery();
+                if app.battery_menu_open {
+                    items = Some(app.battery_menu_items());
+                }
+            });
+            if let Some(items) = items {
+                menu::replace_items(items);
+            }
+            LRESULT(0)
+        }
         WM_HOTKEY if hotkey::is_ours(wparam) => {
             with_app(|app| app.toggle_hidden());
             LRESULT(0)
@@ -2788,7 +2907,10 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             LRESULT(0)
         }
         WM_TIMER if wparam.0 == FULLSCREEN_TIMER => {
-            with_app(|app| app.poll_fullscreen());
+            with_app(|app| {
+                app.poll_fullscreen();
+                app.show_next_battery_alert();
+            });
             LRESULT(0)
         }
         media::WM_MEDIA => {
@@ -2917,7 +3039,12 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                     timer_left,
                 };
                 use tray::Command;
+                let mut show_devices = false;
                 tray::show_menu(state, |cmd, settings| match cmd {
+                    Command::Devices => {
+                        show_devices = true;
+                        false
+                    }
                     Command::ToggleAutostart => {
                         autostart::set(!autostart::is_enabled());
                         true
@@ -3034,6 +3161,9 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                         true
                     }
                 });
+                if show_devices {
+                    show_battery_panel();
+                }
             }
             LRESULT(0)
         }

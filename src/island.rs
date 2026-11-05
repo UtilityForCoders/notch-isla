@@ -244,6 +244,7 @@ pub struct LyricsArea {
 /// Ícono de un aviso del sistema.
 #[derive(Clone, Copy, PartialEq)]
 pub enum NoticeIcon {
+    Battery,
     /// Salida de audio (audífonos, parlantes).
     Audio,
     Timer,
@@ -809,6 +810,31 @@ fn draw_notice_icon(
 ) {
     let line = 1.8 * s;
     match icon {
+        NoticeIcon::Battery => {
+            if let Some(body) =
+                rounded_rect_path(cx - 10.0 * s, cy - 6.0 * s, 18.0 * s, 12.0 * s, 2.0 * s)
+            {
+                stroke_path(pixmap, paint, &body, line);
+            }
+            fill_rounded_rect(
+                pixmap,
+                paint,
+                cx + 9.0 * s,
+                cy - 2.5 * s,
+                2.0 * s,
+                5.0 * s,
+                s,
+            );
+            fill_rounded_rect(
+                pixmap,
+                paint,
+                cx - 7.0 * s,
+                cy - 3.0 * s,
+                3.0 * s,
+                6.0 * s,
+                s,
+            );
+        }
         NoticeIcon::Audio => {
             let mut pb = PathBuilder::new();
             pb.move_to(cx - 8.0 * s, cy + 3.0 * s);
