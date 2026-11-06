@@ -67,8 +67,8 @@ confirmado**, con su porcentaje como detalle histórico. En MCHOSE también
 se comprueba el bit de enlace del informe, para rechazar un porcentaje
 almacenado sin mouse enlazado.
 Al despertar el mouse, usa **Actualizar ahora** para obtener el nivel de nuevo.
-La lista incluye los dispositivos Bluetooth conectados y los periféricos USB
-reconocidos; no pretende listar todos los dispositivos del administrador de Windows.
+La lista incluye los dispositivos Bluetooth emparejados y conectados a esta PC,
+además de los periféricos USB reconocidos.
 
 Cambiar un mouse de 2.4 GHz a Bluetooth no proporciona necesariamente un
 identificador común. En la unidad K7 Ultra probada Windows asigna diferentes
