@@ -24,7 +24,7 @@ menú general también pide una actualización. El grupo recibe las nuevas lectu
 mientras permanece abierto.
 
 El aviso de batería baja está activado por defecto y se puede desactivar en ese
-apartado. Un porcentaje válido menor de 20 dispara el aviso; exactamente 20 no.
+apartado. Una lectura actual de 20 % o menos dispara el aviso.
 Los mandos que solo comunican niveles aproximados avisan con el nivel **Baja**,
 sin atribuirle un porcentaje. No se avisa cargando ni usando lecturas anteriores.
 Cada dispositivo avisa una vez por descarga durante la sesión de la app; vuelve
@@ -95,7 +95,8 @@ Un teléfono puede aparecer como conectado aunque su enlace no exponga la
 batería directamente. **Actualizar ahora** vuelve a consultar las fuentes
 disponibles, y el valor que guarda Windows puede seguir igual. Los porcentajes
 de caché se muestran como referencia y quedan excluidos de los avisos de
-batería baja.
+batería baja. Se ignora el 0 % de caché y se muestra una lectura anterior si está
+disponible. Una lectura directa de 0 % sí puede generar un aviso.
 
 Los receptores AJAZZ/MCHOSE reconocidos sin protocolo implementado se muestran
 sin enviarles consultas específicas. No se cambian DPI, botones, iluminación,

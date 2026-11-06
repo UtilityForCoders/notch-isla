@@ -866,16 +866,11 @@ impl App {
         );
         let mut pending_notices = std::collections::VecDeque::new();
         for pending in self.battery_pending.drain(..) {
-            if let Some(current) = snapshot.devices.iter().find(|d| {
-                d.id == pending.id
-                    && !d.stale
-                    && !d.charging
-                    && d.level.is_some_and(|l| match l {
-                        battery::Level::Percent(p) => p < battery::LOW_PERCENT,
-                        battery::Level::Low => true,
-                        _ => false,
-                    })
-            }) {
+            if let Some(current) = snapshot
+                .devices
+                .iter()
+                .find(|device| device.id == pending.id && device.has_low_battery())
+            {
                 pending_notices.push_back(current.clone());
             } else {
                 self.battery_alerts.retry_unshown(&pending.id);

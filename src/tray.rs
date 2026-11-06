@@ -449,7 +449,10 @@ pub fn battery_items(
         },
         Item::Action {
             id: CMD_BATTERY_NOTICES,
-            label: "Avisar con batería baja (< 20 %)".into(),
+            label: format!(
+                "Avisar con batería baja (≤ {} %)",
+                crate::battery::LOW_PERCENT
+            ),
             checked: notices,
         },
         Item::Action {
