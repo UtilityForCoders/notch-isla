@@ -607,6 +607,18 @@ fn bluetooth(out: &mut Vec<Device>, trace: bool) -> windows::core::Result<()> {
             println!("Bluetooth: interfaces LE={le}: {}", devices.Size()?);
         }
         for info in &devices {
+            // El selector de conexión no exige emparejamiento. Compruébalo antes
+            // de abrir el dispositivo o consultar su batería.
+            if !info
+                .Pairing()
+                .and_then(|pairing| pairing.IsPaired())
+                .unwrap_or(false)
+            {
+                if trace {
+                    println!("Bluetooth: candidato omitido sin emparejamiento confirmado");
+                }
+                continue;
+            }
             let id = info.Id()?;
             let (connected, native_name, address, kind, direct_level) = if le {
                 BluetoothLEDevice::FromIdAsync(&id)
