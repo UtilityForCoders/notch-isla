@@ -51,7 +51,7 @@ impl Level {
     }
 
     fn low(self) -> bool {
-        matches!(self, Self::Percent(p) if p < LOW_PERCENT) || self == Self::Low
+        matches!(self, Self::Percent(p) if p <= LOW_PERCENT) || self == Self::Low
     }
 
     fn recharged(self) -> bool {
@@ -67,7 +67,9 @@ pub struct Device {
     pub connection: &'static str,
     pub level: Option<Level>,
     pub charging: bool,
+    /// Valor retenido de un sondeo anterior o enlace sin confirmar.
     pub stale: bool,
+    /// El porcentaje viene de la propiedad PnP de Windows, no de una lectura GATT.
     pub windows_cached: bool,
     /// Un receptor presente no implica que su periférico esté encendido.
     pub detail: String,
@@ -165,17 +167,19 @@ impl Device {
         self.connection == "USB / 2.4 GHz" && (self.stale || self.level.is_none())
     }
 
+    pub fn has_low_battery(&self) -> bool {
+        !self.stale && !self.charging && self.level.is_some_and(Level::low)
+    }
+
     pub fn status(&self) -> String {
         let mut text = self
             .level
             .map_or_else(|| "Batería no disponible".into(), Level::label);
-        if self.windows_cached {
-            text.push_str(" · Caché de Windows");
-        } else if self.stale {
+        if self.stale {
             text.push_str(" · Última lectura");
         } else if self.charging {
             text.push_str(" · Cargando");
-        } else if self.level.is_some_and(Level::low) {
+        } else if self.has_low_battery() {
             text.push_str(" · Baja");
         }
         text
@@ -187,9 +191,11 @@ impl Device {
             self.stale = false;
             self.windows_cached = false;
             self.detail.clear();
-        } else if let Some(level) = cached.filter(|_| self.level.is_none() || self.windows_cached) {
+        } else if let Some(level) = cached.filter(|&level| {
+            level != Level::Percent(0) && (self.level.is_none() || self.windows_cached)
+        }) {
             self.level = Some(level);
-            self.stale = true;
+            self.stale = false;
             self.windows_cached = true;
             self.detail.clear();
         }
@@ -437,7 +443,7 @@ impl Drop for Monitor {
 }
 
 /// Se conserva el aviso durante desconexiones y lecturas fallidas. Solo una recarga
-/// comprobada lo rearma; la histéresis evita avisos por oscilaciones de 19 a 20 %.
+/// comprobada lo rearma; la histéresis evita avisos por oscilaciones alrededor del umbral.
 #[derive(Default)]
 pub struct Alerts {
     warned: HashSet<String>,
@@ -456,10 +462,7 @@ impl Alerts {
             }
             if device.charging || device.level.is_some_and(Level::recharged) {
                 self.warned.remove(&device.id);
-            } else if enabled
-                && device.level.is_some_and(Level::low)
-                && self.warned.insert(device.id.clone())
-            {
+            } else if enabled && device.has_low_battery() && self.warned.insert(device.id.clone()) {
                 alerts.push(device.clone());
             }
         }
@@ -1060,11 +1063,16 @@ pub fn diagnostics() {
     let snapshot = scan_with_diagnostics(true);
     for device in &snapshot.devices {
         println!(
-            "{} | {} | {} | {} | {}",
+            "{} | {} | {} | {}{} | {}",
             device.name,
             device.kind.label(),
             device.connection,
             device.status(),
+            if device.windows_cached {
+                " · Caché de Windows"
+            } else {
+                ""
+            },
             device.detail
         );
     }
@@ -1358,12 +1366,12 @@ mod tests {
     }
 
     #[test]
-    fn bluetooth_uses_direct_level_and_never_alerts_from_windows_cache() {
+    fn bluetooth_prefers_a_direct_level_when_both_sources_report() {
         let mut phone = connected_device("bt:phone", false);
         let windows = Some(Level::Percent(80));
         phone.update_bluetooth_level(None, windows);
-        assert!(phone.windows_cached && phone.stale);
-        assert!(phone.status().contains("Caché de Windows"));
+        assert!(phone.windows_cached && !phone.stale);
+        assert_eq!(phone.status(), "80 %");
 
         let direct = Some(Level::Percent(75));
         phone.update_bluetooth_level(direct, windows);
@@ -1378,9 +1386,6 @@ mod tests {
             devices: vec![cached],
             ..Snapshot::default()
         };
-        let mut alerts = Alerts::default();
-        assert!(alerts.update(&current.devices, true).is_empty());
-
         let previous = Snapshot {
             devices: vec![phone],
             ..Snapshot::default()
@@ -1389,8 +1394,50 @@ mod tests {
         let retained = &mut current.devices[0];
         assert_eq!(retained.level, direct);
         assert!(retained.stale && !retained.windows_cached);
-        retained.update_bluetooth_level(Some(Level::Percent(15)), windows);
+        let mut alerts = Alerts::default();
+        assert!(alerts.update(&current.devices, true).is_empty());
+        let retained = &mut current.devices[0];
+        retained.update_bluetooth_level(Some(Level::Percent(20)), windows);
         assert_eq!(alerts.update(&current.devices, true).len(), 1);
+    }
+
+    #[test]
+    fn connected_bluetooth_alerts_at_twenty_from_windows_and_ignores_retained_values() {
+        let mut phone = connected_device("bt:phone", false);
+        phone.update_bluetooth_level(None, Some(Level::Percent(20)));
+        let previous = Snapshot {
+            devices: vec![phone.clone()],
+            ..Snapshot::default()
+        };
+        let mut current = Snapshot {
+            devices: vec![connected_device("bt:phone", false)],
+            ..Snapshot::default()
+        };
+        preserve_last_readings(&mut current, &previous);
+
+        let mut alerts = Alerts::default();
+        assert!(alerts.update(&current.devices, true).is_empty());
+        assert_eq!(alerts.update(std::slice::from_ref(&phone), true).len(), 1);
+        assert!(alerts.update(std::slice::from_ref(&phone), true).is_empty());
+        phone.update_bluetooth_level(None, Some(Level::Percent(25)));
+        assert!(alerts.update(std::slice::from_ref(&phone), true).is_empty());
+        phone.update_bluetooth_level(None, Some(Level::Percent(20)));
+        assert_eq!(alerts.update(&[phone], true).len(), 1);
+    }
+
+    #[test]
+    fn bluetooth_zero_requires_a_direct_reading() {
+        let mut phone = connected_device("bt:phone", false);
+        let zero = Some(Level::Percent(0));
+        phone.update_bluetooth_level(None, zero);
+        assert_eq!(phone.level, None);
+        assert_eq!(phone.status(), "Batería no disponible");
+        let mut alerts = Alerts::default();
+        assert!(alerts.update(std::slice::from_ref(&phone), true).is_empty());
+
+        phone.update_bluetooth_level(zero, zero);
+        assert_eq!(phone.level, zero);
+        assert_eq!(alerts.update(&[phone], true).len(), 1);
     }
 
     #[test]
@@ -1483,15 +1530,21 @@ mod tests {
     #[test]
     fn low_alert_requires_valid_reading_and_rearms_after_recharge() {
         let mut alerts = Alerts::default();
-        for level in [None, Some(Level::Percent(20)), Some(Level::Percent(100))] {
+        for level in [None, Some(Level::Percent(21)), Some(Level::Percent(100))] {
             assert!(alerts.update(&[device(level, false)], true).is_empty());
         }
+        let boundary = device(Some(Level::Percent(20)), false);
         let low = device(Some(Level::Percent(19)), false);
-        assert_eq!(alerts.update(std::slice::from_ref(&low), true).len(), 1);
+        assert_eq!(
+            alerts.update(std::slice::from_ref(&boundary), true).len(),
+            1
+        );
         assert!(alerts.update(&[], true).is_empty());
         assert!(alerts.update(&[device(None, false)], true).is_empty());
         assert!(alerts.update(std::slice::from_ref(&low), true).is_empty());
-        alerts.update(&[device(Some(Level::Percent(20)), false)], true);
+        assert!(alerts
+            .update(&[device(Some(Level::Percent(21)), false)], true)
+            .is_empty());
         assert!(alerts.update(std::slice::from_ref(&low), true).is_empty());
         alerts.update(&[device(Some(Level::Percent(25)), false)], true);
         assert_eq!(alerts.update(std::slice::from_ref(&low), true).len(), 1);
