@@ -486,3 +486,115 @@ fn save_offer(downloads: &Path, stream: &mut impl Read, offer: &Offer) -> Result
     std::fs::rename(directory.path(), &destination)?;
     Ok(destination)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc;
+
+    #[test]
+    #[ignore = "requiere una interfaz IPv4 local y tráfico mDNS permitido"]
+    fn descubre_y_envia_en_la_red_local() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let source = tempfile::tempdir()?;
+        let photo = source.path().join("foto.png");
+        let document = source.path().join("archivo.bin");
+        std::fs::write(&photo, [0x89, b'P', b'N', b'G'])?;
+        std::fs::write(&document, [0, 1, 2, 255])?;
+        let downloads = directory.path().to_owned();
+        let (stop, cancel) = mpsc::channel();
+        let (ready, code) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            receive(downloads, cancel, |event| match event {
+                ReceiveEvent::Ready(value) => ready.send(value).unwrap(),
+                ReceiveEvent::Offer { decision, .. } => decision.send(true).unwrap(),
+            })
+        });
+        let code = code.recv_timeout(IO_TIME)?;
+        let result = (|| -> Result<()> {
+            let peer = discover()?
+                .into_iter()
+                .find(|peer| peer.code == code)
+                .ok_or("No se descubrió el receptor de prueba.")?;
+            send(peer, Payload::Files(vec![photo, document]))
+        })();
+        let _ = stop.send(());
+        let saved = worker.join().unwrap();
+        result?;
+        let path = saved?.unwrap();
+        assert_eq!(
+            std::fs::read(path.join("01 - foto.png"))?,
+            [0x89, b'P', b'N', b'G']
+        );
+        assert_eq!(
+            std::fs::read(path.join("02 - archivo.bin"))?,
+            [0, 1, 2, 255]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn solo_guarda_el_envio_aceptado_y_autentica_el_certificado() -> Result<()> {
+        for (trusted, accepted) in [(true, true), (true, false), (false, true)] {
+            let directory = tempfile::tempdir()?;
+            let downloads = directory.path().to_owned();
+            let (certificate, config) = receiver_identity()?;
+            let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
+            let std::net::SocketAddr::V4(address) = listener.local_addr()? else {
+                unreachable!()
+            };
+            let server = std::thread::spawn(move || -> Result<_> {
+                let (socket, _) = listener.accept()?;
+                let mut stream =
+                    StreamOwned::new(ServerConnection::new(config)?, Socket::new(socket, IO_TIME));
+                let offer = read_offer(&mut stream)?;
+                let (_stop, cancel) = mpsc::channel();
+                finish_receive(&downloads, &mut stream, offer, &cancel, |event| {
+                    if let ReceiveEvent::Offer { decision, .. } = event {
+                        decision.send(accepted).unwrap();
+                    }
+                })
+            });
+            let certificate = if trusted {
+                certificate
+            } else {
+                receiver_identity()?.0
+            };
+            let peer = Peer {
+                name: "Receptor de prueba".into(),
+                code: certificate_code(&certificate),
+                addresses: vec![address],
+                certificate,
+            };
+            let result = send(peer, Payload::Text("hola desde la isla 👋".into()));
+            let saved = server.join().unwrap();
+            if trusted && accepted {
+                result?;
+                let path = saved?.unwrap().join("01 - Mensaje.txt");
+                assert_eq!(std::fs::read_to_string(path)?, "hola desde la isla 👋");
+            } else {
+                assert!(result.is_err());
+                assert!(saved.is_err() || saved?.is_none());
+                assert_eq!(directory.path().read_dir()?.count(), 0);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn elimina_los_archivos_parciales_si_el_emisor_se_desconecta() -> Result<()> {
+        let downloads = tempfile::tempdir()?;
+        let offer = Offer {
+            version: PROTOCOL,
+            sender: "Prueba".into(),
+            entries: vec![Entry {
+                name: "../foto.png".into(),
+                bytes: 8,
+            }],
+        };
+        let mut partial = &b"foto"[..];
+        assert!(save_offer(downloads.path(), &mut partial, &offer).is_err());
+        assert_eq!(downloads.path().read_dir()?.count(), 0);
+        Ok(())
+    }
+}
