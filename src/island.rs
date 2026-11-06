@@ -137,6 +137,8 @@ const UPDATE_COLOR: [u8; 3] = [10, 132, 255];
 /// Radio del punto y de la zona que acepta el clic, en píxeles lógicos.
 const UPDATE_DOT_R: f32 = 3.5;
 const UPDATE_HIT_R: f32 = 9.0;
+const BATTERY_DOT_R: f32 = 2.5;
+const BATTERY_COLOR: [u8; 4] = [255, 159, 10, 190];
 
 /// Centro del punto de actualización: en la isla expandida, dentro de la esquina superior
 /// derecha; en la contraída, montado sobre esa esquina como la marca de una notificación.
@@ -144,6 +146,19 @@ fn update_dot(g: &Geometry, p: f32) -> (f32, f32) {
     let s = g.scale;
     let lerp = |a: f32, b: f32| a + (b - a) * p.clamp(0.0, 1.0);
     (g.x1() - lerp(9.0, 14.0) * s, g.y0 + lerp(4.0, 12.0) * s)
+}
+
+/// Puede quedar visible por sí solo cuando la isla se oculta sin música.
+pub fn draw_edge_battery_dot(pixmap: &mut Pixmap, scale: f32) {
+    let x = (pixmap.width() as f32 - edge_strip_width(scale)) / 2.0;
+    let r = BATTERY_DOT_R * scale;
+    let [red, green, blue, alpha] = BATTERY_COLOR;
+    let mut paint = Paint {
+        anti_alias: true,
+        ..Default::default()
+    };
+    paint.set_color_rgba8(red, green, blue, alpha);
+    fill_circle(pixmap, &paint, x - r - 4.0 * scale, r + scale, r);
 }
 
 /// Estado de la reproducción; `None` en `draw` = no hay música (sin botones ni indicador).
@@ -440,11 +455,12 @@ pub fn bounds(
     (x0 - margin, g.y0 - margin, x1 + margin, y1 + margin)
 }
 
-/// Como `bounds`, para la línea del borde superior y su punto de actualización.
-pub fn edge_strip_bounds(max_w: f32, scale: f32) -> (f32, f32, f32, f32) {
+/// Como `bounds`, para la línea del borde superior y sus indicadores.
+pub fn edge_strip_bounds(max_w: f32, scale: f32, battery_low: bool) -> (f32, f32, f32, f32) {
     let w = edge_strip_width(scale);
     let x = (max_w - w) / 2.0;
-    (x - 4.0 * scale, 0.0, x + w + 20.0 * scale, 12.0 * scale)
+    let left = if battery_low { 12.0 } else { 4.0 };
+    (x - left * scale, 0.0, x + w + 20.0 * scale, 12.0 * scale)
 }
 
 /// Borde inferior en píxeles físicos; debajo se coloca el proyector de la letra.
@@ -555,6 +571,7 @@ pub fn draw(
     presence: f32,
     shape: (f32, f32),
     controls: Option<Controls>,
+    battery_low: bool,
     notice: Option<(&Notice, f32)>,
     cover: Option<&Pixmap>,
     app_icon: Option<&Pixmap>,
@@ -621,6 +638,12 @@ pub fn draw(
         let [ur, ug, ub] = UPDATE_COLOR;
         paint.set_color_rgba8(ur, ug, ub, 255);
         fill_circle(pixmap, &paint, dx, dy, r);
+    }
+    if battery_low {
+        let (dx, dy) = update_dot(&g, p);
+        let [red, green, blue, alpha] = BATTERY_COLOR;
+        paint.set_color_rgba8(red, green, blue, alpha);
+        fill_circle(pixmap, &paint, g.x0 + g.x1() - dx, dy, BATTERY_DOT_R * s);
     }
 
     // Indicador de la isla contraída: mini carátula y barras de audio centradas en la píldora flotante
@@ -1595,6 +1618,7 @@ mod tests {
                 1.0,
                 (0.0, 0.0),
                 Some(controls()),
+                false,
                 None,
                 None,
                 None,
@@ -1616,6 +1640,29 @@ mod tests {
         println!("contraida: {collapsed:.3} ms, expandida: {expanded:.3} ms");
         assert!(collapsed < 0.5 * slack, "contraida: {collapsed:.3} ms");
         assert!(expanded < 2.0 * slack, "expandida: {expanded:.3} ms");
+    }
+
+    #[test]
+    fn punto_de_bateria_queda_a_la_izquierda_y_dentro_de_la_franja() {
+        let scale = 1.25;
+        let (w, h) = window_size();
+        let mut pixmap = Pixmap::new((w * scale).ceil() as u32, (h * scale).ceil() as u32).unwrap();
+        let width = pixmap.width() as f32;
+        let (left, top, right, bottom) = edge_strip_bounds(width, scale, true);
+        draw_edge_battery_dot(&mut pixmap, scale);
+        let mut visible = false;
+        for (index, px) in pixmap.pixels().iter().enumerate() {
+            if px.alpha() == 0 {
+                continue;
+            }
+            visible = true;
+            let x = (index as u32 % pixmap.width()) as f32;
+            let y = (index as u32 / pixmap.width()) as f32;
+            assert!(x >= left.floor() && x < right.ceil() && y >= top && y < bottom.ceil());
+            assert!(x < (width - edge_strip_width(scale)) / 2.0);
+            assert!(px.red() > px.green() && px.green() > px.blue());
+        }
+        assert!(visible);
     }
 
     /// En cada paso de la animación, todo lo que se pinta cae dentro de `bounds`: si no, esa
@@ -1646,6 +1693,7 @@ mod tests {
                         presence,
                         shape,
                         Some(c),
+                        true,
                         notice,
                         None,
                         None,

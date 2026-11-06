@@ -376,7 +376,15 @@ fn isla_con_desenfoque_sigue_ocultandose_y_recibiendo_clics() {
             let notice = app.notice.as_ref().unwrap();
             assert_eq!(notice.title, "Batería baja");
             assert_eq!(notice.subtitle, "Teléfono de prueba · 20 % · Baja");
+            let media = app.media.take();
+            app.battery_low = true;
             app.end_notice();
+            assert!(app.shown && !app.visible && app.edge_strip());
+            app.battery_low = false;
+            app.update_visibility();
+            assert!(!app.shown && !app.edge_strip());
+            app.media = media;
+            app.update_visibility();
             app.settings.battery_notices = battery_notices;
             app.settings.notices = notices;
             app.settings.connection_notices = connections;

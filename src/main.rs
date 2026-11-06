@@ -541,6 +541,7 @@ struct App {
     /// Escucha la salida de audio; `None` si Core Audio no está disponible.
     audio: Option<AudioWatch>,
     battery: Option<battery::Monitor>,
+    battery_low: bool,
     battery_alerts: battery::Alerts,
     battery_pending: std::collections::VecDeque<battery::Device>,
     connections: battery::Connections,
@@ -635,6 +636,7 @@ impl App {
             notice_card: None,
             audio: None,
             battery: None,
+            battery_low: false,
             battery_alerts: battery::Alerts::default(),
             battery_pending: std::collections::VecDeque::new(),
             connections: battery::Connections::default(),
@@ -852,6 +854,12 @@ impl App {
             return;
         };
         let snapshot = monitor.snapshot();
+        let battery_low = self.settings.battery_notices
+            && snapshot
+                .devices
+                .iter()
+                .any(|device| snapshot.confirmed_link(device) && device.has_low_battery());
+        let marker_changed = std::mem::replace(&mut self.battery_low, battery_low) != battery_low;
         self.connection_pending = self
             .connection_pending
             .drain(..)
@@ -885,6 +893,12 @@ impl App {
             .update(&snapshot.devices, self.settings.battery_notices);
         self.battery_pending.extend(alerts);
         self.show_next_notice();
+        if marker_changed {
+            self.update_visibility();
+            if self.shown {
+                self.redraw();
+            }
+        }
     }
 
     fn show_next_notice(&mut self) {
@@ -1346,13 +1360,15 @@ impl App {
         self.start_animation();
     }
 
-    /// Oculta, queda la franja del borde superior (hay música, pero la isla se ocultó sola).
+    /// En el borde queda la franja de música o solo el punto de batería baja.
     fn edge_strip(&self) -> bool {
-        // Mientras un aviso ocupa la isla, la línea no se dibuja encima.
-        self.idle_hidden
-            && self.media.is_some()
-            && self.notice.is_none()
+        self.notice.is_none()
             && !self.hidden_by_fullscreen()
+            && if self.media.is_some() {
+                self.idle_hidden
+            } else {
+                self.battery_low
+            }
     }
 
     /// (Re)inicia la cuenta para ocultarse; se cancela mientras el mouse esté encima.
@@ -1888,7 +1904,7 @@ impl App {
         if media.is_some() {
             self.last_media = media.clone();
         } else {
-            // Sin música no hay franja; cuando vuelva a sonar algo, la isla aparece un momento.
+            // Cuando vuelva a sonar algo, la isla aparece un momento.
             self.idle_hidden = false;
         }
         self.media = media;
@@ -2164,7 +2180,7 @@ impl App {
         );
         if strip {
             drawn = drawn.union(Area::new(
-                island::edge_strip_bounds(sw as f32, self.scale),
+                island::edge_strip_bounds(sw as f32, self.scale, self.battery_low),
                 sw,
                 sh,
             ));
@@ -2208,6 +2224,7 @@ impl App {
             self.presence.value,
             shape,
             controls,
+            self.battery_low,
             notice.map(|n| (&n.view, notice_text_w)),
             cover.map(|c| c.image.as_ref()),
             media
@@ -2223,6 +2240,9 @@ impl App {
         // Solo se repinta si la letra se ve.
         let lyric_painting = lyric_painting && lyrics_area.is_some();
         let mut edge_ms = None;
+        if strip && self.battery_low {
+            island::draw_edge_battery_dot(&mut self.surface.pixmap, self.scale);
+        }
         if let (true, Some(m)) = (strip, self.media.as_ref()) {
             let accent = m.cover.as_ref().map_or([255, 255, 255], |c| c.accent);
             let progress = m.timeline.map(|t| t.progress(m.playing));
@@ -3828,6 +3848,7 @@ mod tests {
                     levels: None,
                     lyrics_active: true,
                 }),
+                false,
                 None,
                 None,
                 None,
