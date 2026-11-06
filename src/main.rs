@@ -922,7 +922,7 @@ impl App {
         let Some(device) = self.battery_pending.pop_front() else {
             if let Some(device) = self.connection_pending.pop_front() {
                 let mut subtitle = format!("{} · {}", device.name, device.connection);
-                if !device.stale {
+                if !device.stale && !device.windows_cached {
                     if let Some(level) = device.level {
                         subtitle.push_str(&format!(" · {}", level.label()));
                     }

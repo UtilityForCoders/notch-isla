@@ -83,8 +83,8 @@ identidad común; tampoco comparte entre transportes el historial de avisos.
 
 | Ruta | Implementación y estado |
 |---|---|
-| Bluetooth clásico | Conexión y nombre mediante WinRT. El valor del nodo PnP se identifica como **caché de Windows**. |
-| Bluetooth LE | Si el dispositivo expone el servicio de batería BAS `180F`, la app intenta leer directamente la característica `2A19`. Si la consulta falla, muestra una lectura directa anterior o el valor de Windows identificado como caché. |
+| Bluetooth clásico | Conexión y nombre mediante WinRT. El nivel se obtiene de la propiedad de batería del nodo PnP de Windows. |
+| Bluetooth LE | Si el dispositivo expone el servicio de batería BAS `180F`, la app intenta leer directamente la característica `2A19`. Si la consulta falla, muestra una lectura directa anterior o el valor de Windows. |
 | MCHOSE K7 Ultra | **Probado físicamente por 2.4 GHz el 4 de noviembre de 2026**. Receptor `5253:1021`, colección `FF01:0001`, consulta `06` en feature report `11`. Lectura observada: **78 %**, sin cargar. También se comprobaron respuestas sin datos al dormir. |
 | MCHOSE de la misma familia | Receptor `5253:1020` y variantes K7 identificadas. Consulta de estado invertida en report `11`, con alternativa `12`. Pendientes de prueba en otros modelos. |
 | AJAZZ AJ159 / Pro, familia CompX | Receptores `248A/249A:5C2F` y `248A:5B2F`, interfaz 2. Consulta de frecuencia para comprobar que el mouse responde y luego identidad `10`, batería en byte 13. Se exige respuesta válida, checksum y modelo `M620/P630/M630`. Implementado; **pendiente de prueba física** en el AJ159 Pro. |
@@ -93,10 +93,11 @@ identidad común; tampoco comparte entre transportes el historial de avisos.
 
 Un teléfono puede aparecer como conectado aunque su enlace no exponga la
 batería directamente. **Actualizar ahora** vuelve a consultar las fuentes
-disponibles, y el valor que guarda Windows puede seguir igual. Los porcentajes
-de caché se muestran como referencia y quedan excluidos de los avisos de
-batería baja. Se ignora el 0 % de caché y se muestra una lectura anterior si está
-disponible. Una lectura directa de 0 % sí puede generar un aviso.
+disponibles, y el valor que guarda Windows puede seguir igual. Si el dispositivo
+sigue conectado y Windows reporta un porcentaje entre 1 % y 20 %, la app puede
+avisar. La procedencia del valor se indica en el diagnóstico de consola. Un
+valor retenido de un sondeo anterior queda fuera del aviso. Se ignora el 0 %
+de caché. Una lectura directa de 0 % sí puede generar un aviso.
 
 Los receptores AJAZZ/MCHOSE reconocidos sin protocolo implementado se muestran
 sin enviarles consultas específicas. No se cambian DPI, botones, iluminación,
