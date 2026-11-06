@@ -52,6 +52,7 @@ const CMD_PIN_EXPANDED: usize = 18;
 const CMD_BATTERY_NOTICES: usize = 20;
 const CMD_BATTERY_REFRESH: usize = 21;
 const CMD_CONNECTION_NOTICES: usize = 22;
+const CMD_SHARE: usize = 23;
 /// Las opciones de los submenús van numeradas a partir de estas bases.
 const CMD_HIDE_DELAY: usize = 100;
 const CMD_MONITOR: usize = 200;
@@ -65,6 +66,7 @@ const CMD_BLUR_RADIUS: usize = 500;
 pub const TIMER_MINUTES: [u32; 6] = [5, 10, 15, 25, 45, 60];
 
 pub enum Command {
+    Share,
     ToggleBatteryNotices,
     ToggleConnectionNotices,
     RefreshBattery,
@@ -348,6 +350,7 @@ pub fn build_items(state: &MenuState) -> Vec<Item> {
     });
     items.push(Item::Separator);
     // Con una versión nueva ya encontrada, la opción de arriba la instala; esta igual consulta.
+    items.push(action(CMD_SHARE, "Compartir cerca…", false));
     items.push(action(CMD_CHECK_UPDATES, "Buscar actualizaciones", false));
     items.push(action(CMD_EXIT, "Salir", false));
     items
@@ -368,6 +371,7 @@ fn id_to_command(id: usize, state: &MenuState) -> Option<Command> {
         CMD_LYRICS => Some(Command::ToggleLyricsIsland),
         CMD_LYRICS_PROJECTOR => Some(Command::ToggleLyricsProjector),
         CMD_REAL_BARS => Some(Command::ToggleRealBars),
+        CMD_SHARE => Some(Command::Share),
         CMD_CHECK_UPDATES => Some(Command::CheckUpdates),
         CMD_CENTER => Some(Command::Center),
         CMD_HIGH_REFRESH => Some(Command::ToggleHighRefresh),
@@ -429,6 +433,7 @@ where
 }
 
 pub enum IslandMenuChoice {
+    Share,
     Output(Option<usize>),
     Center,
     TogglePinnedExpanded,
@@ -553,7 +558,14 @@ pub fn show_island_menu(
     is_centered: bool,
     pinned_expanded: bool,
 ) -> Option<IslandMenuChoice> {
-    let mut items = Vec::new();
+    let mut items = vec![
+        Item::Action {
+            id: CMD_SHARE,
+            label: "Compartir cerca…".to_string(),
+            checked: false,
+        },
+        Item::Separator,
+    ];
     items.push(Item::Action {
         id: CMD_PIN_EXPANDED,
         label: "Fijar versión extendida".to_string(),
@@ -587,6 +599,7 @@ pub fn show_island_menu(
         checked: is_centered,
     });
     match menu::show(items)? {
+        CMD_SHARE => Some(IslandMenuChoice::Share),
         CMD_PIN_EXPANDED => Some(IslandMenuChoice::TogglePinnedExpanded),
         CMD_CENTER => Some(IslandMenuChoice::Center),
         CMD_OUTPUT_DEFAULT => Some(IslandMenuChoice::Output(None)),
