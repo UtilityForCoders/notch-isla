@@ -358,6 +358,26 @@ fn isla_con_desenfoque_sigue_ocultandose_y_recibiendo_clics() {
                 assert!(app.audio_notice_pending.is_none() && app.connection_pending.is_empty());
                 app.clear_notice_card();
             }
+            let battery_notices = app.settings.battery_notices;
+            app.settings.battery_notices = true;
+            let low_phone = battery::Device {
+                level: Some(battery::Level::Percent(20)),
+                name: "Teléfono de prueba".into(),
+                windows_cached: true,
+                ..headset.clone()
+            };
+            audio(app);
+            app.battery_pending
+                .extend(app.battery_alerts.update(&[low_phone], true));
+            app.show_next_notice();
+            assert_eq!(app.battery_pending.len(), 1);
+            app.clear_notice_card();
+            app.show_next_notice();
+            let notice = app.notice.as_ref().unwrap();
+            assert_eq!(notice.title, "Batería baja");
+            assert_eq!(notice.subtitle, "Teléfono de prueba · 20 % · Baja");
+            app.end_notice();
+            app.settings.battery_notices = battery_notices;
             app.settings.notices = notices;
             app.settings.connection_notices = connections;
         });
