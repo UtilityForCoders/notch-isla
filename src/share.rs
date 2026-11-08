@@ -27,6 +27,7 @@ const APPROVAL_TIME: Duration = Duration::from_secs(60);
 const IO_TIME: Duration = Duration::from_secs(10);
 const TRANSFER_TIME: Duration = Duration::from_secs(600);
 pub const MAX_ITEMS: usize = 20;
+pub const MAX_IMAGE: u64 = 32 * 1024 * 1024;
 pub const MAX_TEXT: usize = 256 * 1024;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
