@@ -1,8 +1,11 @@
 //! Ventana de recepción: contenido temporal y copia explícita al portapapeles.
 use std::path::Path;
-use windows::core::{w, Result, BOOL, HSTRING};
+use windows::core::{w, Result, BOOL, HSTRING, PCWSTR};
 use windows::Win32::Foundation::*;
-use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_USE_IMMERSIVE_DARK_MODE};
+use windows::Win32::Graphics::Dwm::{
+    DwmSetWindowAttribute, DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE,
+    DWMWCP_ROUND,
+};
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::Graphics::Imaging::*;
 use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
@@ -12,6 +15,8 @@ use windows::Win32::System::Memory::*;
 use windows::Win32::UI::Controls::{SetWindowTheme, DRAWITEMSTRUCT, ODS_FOCUS};
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::WindowsAndMessaging::*;
+
+const HEADER_HEIGHT: i32 = 68;
 
 struct Image {
     pixels: Vec<u8>,
@@ -29,6 +34,7 @@ struct Panel<'a> {
     scale: f32,
     brush: HBRUSH,
     font: HFONT,
+    icon: HICON,
 }
 
 pub fn text(owner: HWND, sender: &str, text: &str) -> Result<()> {
@@ -110,12 +116,15 @@ fn show(
 ) -> Result<bool> {
     unsafe {
         let instance = GetModuleHandleW(None)?;
+        // Recurso compartido del ejecutable: el mismo assets/icon.ico de la bandeja.
+        let icon = LoadIconW(Some(instance.into()), PCWSTR(1usize as *const u16))?;
         let class = w!("NotchIslaSharePreview");
         let _ = RegisterClassW(&WNDCLASSW {
             lpfnWndProc: Some(proc),
             hInstance: instance.into(),
             lpszClassName: class,
             hCursor: LoadCursorW(None, IDC_ARROW)?,
+            hIcon: icon,
             ..Default::default()
         });
         let hwnd = CreateWindowExW(
@@ -126,7 +135,7 @@ fn show(
             CW_USEDEFAULT,
             CW_USEDEFAULT,
             560,
-            500,
+            540,
             Some(owner),
             None,
             Some(instance.into()),
@@ -162,6 +171,7 @@ fn show(
             scale,
             brush,
             font,
+            icon,
         };
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, (&mut panel as *mut Panel<'_>) as isize);
         let dark = BOOL(1);
@@ -170,6 +180,25 @@ fn show(
             DWMWA_USE_IMMERSIVE_DARK_MODE,
             &dark as *const _ as _,
             std::mem::size_of_val(&dark) as u32,
+        );
+        let corners = DWMWCP_ROUND;
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_WINDOW_CORNER_PREFERENCE,
+            &corners as *const _ as _,
+            std::mem::size_of_val(&corners) as u32,
+        );
+        SendMessageW(
+            hwnd,
+            WM_SETICON,
+            Some(WPARAM(ICON_SMALL as usize)),
+            Some(LPARAM(icon.0 as isize)),
+        );
+        SendMessageW(
+            hwnd,
+            WM_SETICON,
+            Some(WPARAM(ICON_BIG as usize)),
+            Some(LPARAM(icon.0 as isize)),
         );
         let mut monitor = MONITORINFO {
             cbSize: std::mem::size_of::<MONITORINFO>() as u32,
@@ -180,7 +209,7 @@ fn show(
             &mut monitor,
         );
         let width = n(560).min(monitor.rcWork.right - monitor.rcWork.left);
-        let height = n(500).min(monitor.rcWork.bottom - monitor.rcWork.top);
+        let height = n(540).min(monitor.rcWork.bottom - monitor.rcWork.top);
         SetWindowPos(
             hwnd,
             None,
@@ -201,9 +230,9 @@ fn show(
                     | WS_VSCROLL
                     | WINDOW_STYLE((ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL) as u32),
                 n(24),
-                n(92),
+                n(92 + HEADER_HEIGHT),
                 width - n(64),
-                height - n(218),
+                height - n(254),
                 Some(hwnd),
                 None,
                 Some(instance.into()),
@@ -235,7 +264,7 @@ fn show(
                 &HSTRING::from(label),
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE(BS_OWNERDRAW as u32),
                 n(x),
-                height - n(101),
+                height - n(69),
                 n(if id == 1 { 228 } else { 120 }),
                 n(40),
                 Some(hwnd),
@@ -250,6 +279,26 @@ fn show(
                 Some(LPARAM(1)),
             );
         }
+        let close = CreateWindowExW(
+            WINDOW_EX_STYLE(0),
+            w!("BUTTON"),
+            w!("×"),
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE(BS_OWNERDRAW as u32),
+            width - n(56),
+            n(16),
+            n(36),
+            n(36),
+            Some(hwnd),
+            Some(HMENU(3usize as _)),
+            Some(instance.into()),
+            None,
+        )?;
+        SendMessageW(
+            close,
+            WM_SETFONT,
+            Some(WPARAM(font.0 as usize)),
+            Some(LPARAM(1)),
+        );
         let _ = ShowWindow(hwnd, SW_SHOW);
         let _ = SetForegroundWindow(hwnd);
         // La confirmación vence junto con la solicitud de red.
@@ -286,6 +335,10 @@ fn show(
 }
 
 unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    // Retira la barra estándar; la cabecera propia ocupa el área cliente.
+    if msg == WM_NCCALCSIZE {
+        return LRESULT(0);
+    }
     let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut Panel<'_>;
     if ptr.is_null() {
         return DefWindowProcW(hwnd, msg, wp, lp);
@@ -293,6 +346,17 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
     let panel = &mut *ptr;
     let n = |v: i32| (v as f32 * panel.scale).round() as i32;
     match msg {
+        WM_NCHITTEST => {
+            let mut rect = RECT::default();
+            let _ = GetWindowRect(hwnd, &mut rect);
+            let x = (lp.0 as u32 & 0xffff) as i16 as i32 - rect.left;
+            let y = ((lp.0 as u32 >> 16) & 0xffff) as i16 as i32 - rect.top;
+            if y >= 0 && y < n(HEADER_HEIGHT) && x >= 0 && x < rect.right - rect.left - n(64) {
+                LRESULT(HTCAPTION as isize)
+            } else {
+                LRESULT(HTCLIENT as isize)
+            }
+        }
         WM_CLOSE | WM_TIMER => {
             panel.done = true;
             LRESULT(0)
@@ -326,7 +390,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                         let _ = InvalidateRect(Some(button), None, true);
                     }
                 }
-                2 => panel.done = true,
+                2 | 3 => panel.done = true,
                 _ => {}
             }
             LRESULT(0)
@@ -340,7 +404,13 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
         WM_DRAWITEM => {
             let item = &*(lp.0 as *const DRAWITEMSTRUCT);
             let primary = item.CtlID == 1;
-            let brush = CreateSolidBrush(COLORREF(if primary { 0xf2b56b } else { 0x333333 }));
+            let brush = CreateSolidBrush(COLORREF(if primary {
+                0xf2b56b
+            } else if item.CtlID == 3 {
+                0x191919
+            } else {
+                0x333333
+            }));
             FillRect(item.hDC, &item.rcItem, panel.brush);
             let old_brush = SelectObject(item.hDC, brush.into());
             let old_pen = SelectObject(item.hDC, GetStockObject(NULL_PEN));
@@ -384,6 +454,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             let _ = GetClientRect(hwnd, &mut client);
             FillRect(dc, &client, panel.brush);
             SetBkMode(dc, TRANSPARENT);
+            paint_header(dc, panel, &client);
             SelectObject(dc, panel.font.into());
             let heading = CreateFontW(
                 -n(22),
@@ -406,9 +477,9 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                 SetTextColor(dc, COLORREF(color));
                 let mut rect = RECT {
                     left: n(24),
-                    top: n(top),
+                    top: n(top + HEADER_HEIGHT),
                     right: client.right - n(24),
-                    bottom: n(top + 26),
+                    bottom: n(top + HEADER_HEIGHT + 26),
                 };
                 let mut text: Vec<u16> = text.encode_utf16().collect();
                 DrawTextW(
@@ -422,7 +493,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             let _ = DeleteObject(heading.into());
             if let Some(image) = &panel.image {
                 let aw = (client.right - n(48)).max(1);
-                let ah = (client.bottom - n(180)).max(1);
+                let ah = (client.bottom - n(248)).max(1);
                 let scale = (aw as f32 / image.width as f32)
                     .min(ah as f32 / image.height as f32)
                     .min(1.0);
@@ -435,7 +506,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                 StretchDIBits(
                     dc,
                     (client.right - w) / 2,
-                    n(92) + (ah - h) / 2,
+                    n(92 + HEADER_HEIGHT) + (ah - h) / 2,
                     w,
                     h,
                     0,
@@ -453,6 +524,86 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
         }
         _ => DefWindowProcW(hwnd, msg, wp, lp),
     }
+}
+
+/// Marca, subtítulo espaciado y una línea de acento discreta.
+unsafe fn paint_header(dc: HDC, panel: &Panel<'_>, client: &RECT) {
+    let n = |v: i32| (v as f32 * panel.scale).round() as i32;
+    let _ = DrawIconEx(
+        dc,
+        n(24),
+        n(18),
+        panel.icon,
+        n(32),
+        n(32),
+        0,
+        None,
+        DI_NORMAL,
+    );
+    for (label, size, weight, top, color, spacing) in [
+        ("Notch Isla", 18, 600, 12, 0xf5f5f5, 0),
+        ("COMPARTIR CERCA", 10, 500, 38, 0xf2b56b, 1),
+    ] {
+        let font = CreateFontW(
+            -n(size),
+            0,
+            0,
+            0,
+            weight,
+            0,
+            0,
+            0,
+            DEFAULT_CHARSET,
+            OUT_DEFAULT_PRECIS,
+            CLIP_DEFAULT_PRECIS,
+            CLEARTYPE_QUALITY,
+            0,
+            w!("Segoe UI"),
+        );
+        let previous = SelectObject(dc, font.into());
+        let previous_spacing = SetTextCharacterExtra(dc, n(spacing));
+        SetTextColor(dc, COLORREF(color));
+        let mut rect = RECT {
+            left: n(70),
+            top: n(top),
+            right: client.right - n(72),
+            bottom: n(top + size + 6),
+        };
+        let mut text: Vec<u16> = label.encode_utf16().collect();
+        DrawTextW(
+            dc,
+            &mut text,
+            &mut rect,
+            DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX,
+        );
+        SetTextCharacterExtra(dc, previous_spacing);
+        SelectObject(dc, previous);
+        let _ = DeleteObject(font.into());
+    }
+    let separator = CreateSolidBrush(COLORREF(0x303030));
+    FillRect(
+        dc,
+        &RECT {
+            left: n(24),
+            top: n(HEADER_HEIGHT - 1),
+            right: client.right - n(24),
+            bottom: n(HEADER_HEIGHT),
+        },
+        separator,
+    );
+    let _ = DeleteObject(separator.into());
+    let accent = CreateSolidBrush(COLORREF(0xf2b56b));
+    FillRect(
+        dc,
+        &RECT {
+            left: n(24),
+            top: n(HEADER_HEIGHT - 1),
+            right: n(70),
+            bottom: n(HEADER_HEIGHT),
+        },
+        accent,
+    );
+    let _ = DeleteObject(accent.into());
 }
 
 fn bitmap_info(image: &Image) -> BITMAPINFO {
