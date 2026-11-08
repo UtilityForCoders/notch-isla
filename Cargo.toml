@@ -37,6 +37,9 @@ features = [
     "Devices_Bluetooth",
     "Devices_Bluetooth_GenericAttributeProfile",
     "Devices_Power",
+    # Batería HID estándar (Battery Strength) leída con los informes que declara el dispositivo.
+    "Win32_Devices_HumanInterfaceDevice",
+    "Win32_Storage_FileSystem",
     "Gaming_Input",
     "UI_Composition",
     "UI_Composition_Desktop",

@@ -2,6 +2,9 @@
 //! cada 5 s con avisos de conexión, o cada 30 s si están desactivados.
 //! Solo se envían consultas de estado a receptores con protocolo identificado.
 
+mod hidpp;
+mod standard;
+
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
@@ -840,7 +843,7 @@ fn controllers(out: &mut Vec<Device>) -> windows::core::Result<()> {
     Ok(())
 }
 
-/// Respuesta de estado AJAZZ 3151:5007, con report id conservado por Windows.
+/// Respuesta de estado AJAZZ 3151:5007/402D, con report id conservado por Windows.
 fn parse_ajazz(data: &[u8]) -> Option<Level> {
     if data.len() < 8
         || data[0] != 5
@@ -853,17 +856,28 @@ fn parse_ajazz(data: &[u8]) -> Option<Level> {
     Some(Level::Percent(data[3]))
 }
 
-fn ajazz(device: &HidDevice) -> Option<Level> {
+fn ajazz(device: &HidDevice, trace: bool) -> Option<Level> {
     for size in [65, 67] {
         let mut request = vec![0; size];
         request[1] = 0xf7;
-        if device.send_feature_report(&request).is_err() {
+        let sent = device.send_feature_report(&request);
+        if trace {
+            println!("AJAZZ consulta F7 ({size} bytes): {sent:?}");
+        }
+        if sent.is_err() {
             continue;
         }
         std::thread::sleep(Duration::from_millis(30));
         let mut response = [0u8; 65];
         response[0] = 5;
-        if let Ok(count) = device.get_feature_report(&mut response) {
+        let read = device.get_feature_report(&mut response);
+        if trace {
+            match &read {
+                Ok(count) => println!("AJAZZ respuesta: {:02x?}", &response[..(*count).min(16)]),
+                Err(e) => println!("AJAZZ respuesta: {e:?}"),
+            }
+        }
+        if let Ok(count) = read {
             if let Some(level) = parse_ajazz(&response[..count]) {
                 return Some(level);
             }
@@ -964,14 +978,13 @@ fn mchose(device: &HidDevice, trace: bool) -> Option<(Level, bool)> {
 fn receivers(out: &mut Vec<Device>, trace: bool) -> hidapi::HidResult<()> {
     let api = HidApi::new()?;
     let mut seen = HashSet::new();
+    let mut handled = HashSet::new();
     for info in api.device_list() {
         let vendor = info.vendor_id();
         let product = info.product_id();
         let name = info.product_string().unwrap_or("Periférico USB");
-        let known_ajazz = vendor == 0x3151
-            && product == 0x5007
-            && info.usage_page() == 0xffff
-            && info.usage() == 2;
+        let ajazz_family = known_ajazz_apex(vendor, product, usages(&api, vendor, product));
+        let known_ajazz = ajazz_family && info.usage_page() == 0xffff && info.usage() == 2;
         let known_compx = matches!(vendor, 0x248a | 0x249a)
             && matches!(product, 0x5c2f | 0x5b2f)
             && info.interface_number() == 2;
@@ -995,10 +1008,7 @@ fn receivers(out: &mut Vec<Device>, trace: bool) -> hidapi::HidResult<()> {
             && api.device_list().any(|d| {
                 d.vendor_id() == vendor
                     && d.product_id() == product
-                    && ((vendor == 0x3151
-                        && product == 0x5007
-                        && d.usage_page() == 0xffff
-                        && d.usage() == 2)
+                    && ((ajazz_family && d.usage_page() == 0xffff && d.usage() == 2)
                         || (known_mchose_family(vendor, product, name) && d.usage_page() == 0xff01))
             })
         {
@@ -1012,7 +1022,7 @@ fn receivers(out: &mut Vec<Device>, trace: bool) -> hidapi::HidResult<()> {
         }
         let value = info.open_device(&api).ok().and_then(|device| {
             if known_ajazz {
-                ajazz(&device).map(|l| (l, false))
+                ajazz(&device, trace).map(|l| (l, false))
             } else if known_compx {
                 compx_battery(&device).map(|l| (l, false))
             } else if known_mchose {
@@ -1029,11 +1039,7 @@ fn receivers(out: &mut Vec<Device>, trace: bool) -> hidapi::HidResult<()> {
             kind: if known_ajazz || known_compx || known_mchose {
                 DeviceKind::Mouse
             } else {
-                kind_from_hid_usages(
-                    api.device_list()
-                        .filter(|d| d.vendor_id() == vendor && d.product_id() == product)
-                        .map(|d| (d.usage_page(), d.usage())),
-                )
+                kind_from_hid_usages(usages(&api, vendor, product))
             },
             connection: "USB / 2.4 GHz",
             level: value.map(|v| v.0),
@@ -1048,8 +1054,78 @@ fn receivers(out: &mut Vec<Device>, trace: bool) -> hidapi::HidResult<()> {
                 "Protocolo de batería aún no compatible".into()
             },
         });
+        handled.insert((vendor, product));
     }
+    handled.extend(hidpp::scan(&api, out, trace));
+    standard_battery(&api, out, &handled, trace);
     Ok(())
+}
+
+fn usages(api: &HidApi, vendor: u16, product: u16) -> impl Iterator<Item = (u16, u16)> + '_ {
+    api.device_list()
+        .filter(move |d| d.vendor_id() == vendor && d.product_id() == product)
+        .map(|d| (d.usage_page(), d.usage()))
+}
+
+/// Cualquier otro periférico USB que declare Battery Strength en su descriptor HID.
+/// Solo se piden los informes declarados; ningún comando de fabricante.
+fn standard_battery(
+    api: &HidApi,
+    out: &mut Vec<Device>,
+    handled: &HashSet<(u16, u16)>,
+    trace: bool,
+) {
+    let mut seen = HashSet::new();
+    for info in api.device_list() {
+        let (vendor, product) = (info.vendor_id(), info.product_id());
+        let path = info.path().to_string_lossy().to_string();
+        if handled.contains(&(vendor, product)) || hidpp::bluetooth_path(&path) {
+            continue;
+        }
+        let key = hidpp::interface_key(&path);
+        if seen.contains(&key) {
+            continue;
+        }
+        let level = match standard::battery_strength(&path) {
+            standard::Strength::Undeclared => continue,
+            standard::Strength::NoReading => None,
+            standard::Strength::Percent(p) => Some(Level::Percent(p)),
+        };
+        seen.insert(key.clone());
+        if trace {
+            println!("HID estándar {vendor:04x}:{product:04x}: {level:?}");
+        }
+        out.push(Device {
+            id: format!("hidstd:{key}"),
+            name: info
+                .product_string()
+                .unwrap_or("Periférico USB")
+                .to_string(),
+            kind: kind_from_hid_usages(usages(api, vendor, product)),
+            connection: "USB / 2.4 GHz",
+            level,
+            charging: false,
+            stale: false,
+            windows_cached: false,
+            detail: if level.is_some() {
+                String::new()
+            } else {
+                "Sin lectura: apagado, dormido u ocupado".into()
+            },
+        });
+    }
+}
+
+/// Receptores AJAZZ con la consulta F7 en la colección `FFFF:0002`. Además de
+/// los modelos probados (`5007`, `402D`), se acepta otro producto del mismo
+/// fabricante solo si expone un mouse; los teclados con esa colección no reciben
+/// la consulta. La respuesta se valida antes de aceptarla.
+fn known_ajazz_apex(
+    vendor: u16,
+    product: u16,
+    mut usages: impl Iterator<Item = (u16, u16)>,
+) -> bool {
+    vendor == 0x3151 && (matches!(product, 0x5007 | 0x402d) || usages.any(|u| u == (1, 2)))
 }
 
 fn known_mchose_family(vendor: u16, product: u16, name: &str) -> bool {
@@ -1574,6 +1650,23 @@ mod tests {
             parse_ajazz(&[5, 0, 0, 18, 1, 1, 1, 2]),
             Some(Level::Percent(18))
         );
+        // Respuesta real del dongle AJAZZ 2.4G 8K (3151:402D).
+        assert_eq!(
+            parse_ajazz(&[5, 0, 0, 0x53, 1, 0, 1, 2, 0, 0]),
+            Some(Level::Percent(83))
+        );
+        assert!(known_ajazz_apex(0x3151, 0x402d, std::iter::empty()));
+        assert!(known_ajazz_apex(
+            0x3151,
+            0x4000,
+            [(0xffff, 2), (1, 2)].into_iter()
+        ));
+        assert!(!known_ajazz_apex(
+            0x3151,
+            0x4000,
+            [(0xffff, 2), (1, 6)].into_iter()
+        ));
+        assert!(!known_ajazz_apex(0x258a, 0x402d, [(1, 2)].into_iter()));
         assert_eq!(
             parse_ajazz(&[5, 0, 0, 0, 1, 1, 1, 2]),
             Some(Level::Percent(0))

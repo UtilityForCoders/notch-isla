@@ -92,7 +92,10 @@ identidad común; tampoco comparte entre transportes el historial de avisos.
 | MCHOSE K7 Ultra | **Probado físicamente por 2.4 GHz el 4 de noviembre de 2026**. Receptor `5253:1021`, colección `FF01:0001`, consulta `06` en feature report `11`. Lectura observada: **78 %**, sin cargar. También se comprobaron respuestas sin datos al dormir. |
 | MCHOSE de la misma familia | Receptor `5253:1020` y variantes K7 identificadas. Consulta de estado invertida en report `11`, con alternativa `12`. Pendientes de prueba en otros modelos. |
 | AJAZZ AJ159 / Pro, familia CompX | Receptores `248A/249A:5C2F` y `248A:5B2F`, interfaz 2. Consulta de frecuencia para comprobar que el mouse responde y luego identidad `10`, batería en byte 13. Se exige respuesta válida, checksum y modelo `M620/P630/M630`. Implementado; **pendiente de prueba física** en el AJ159 Pro. |
-| AJAZZ receptor APEX 8K | `3151:5007`, colección `FFFF:0002`. Consulta `F7` y lectura del informe `05`. No se confunde con el protocolo CompX. Pendiente de prueba física. |
+| AJAZZ receptor APEX 8K | `3151:5007` y dongle **AJAZZ 2.4G 8K** `3151:402D`, colección `FFFF:0002`. Consulta `F7` y lectura del informe `05`. No se confunde con el protocolo CompX. El `402D` se **probó físicamente el 8 de noviembre de 2026**: lectura de **83 %**; el `5007` sigue pendiente de prueba física. |
+| AJAZZ, otros receptores `3151` | Cualquier producto `3151` con la colección `FFFF:0002` **y** una colección de mouse recibe la misma consulta `F7`. Los productos de ese fabricante sin mouse (teclados) no la reciben. Una respuesta que no tenga el formato esperado se descarta. |
+| Logitech HID++ 2.0 | Receptores Unifying, Lightspeed y Bolt, y dispositivos por cable, en la colección `FF00:0002` (y `FF00:0001` para los errores cortos). Se consulta la versión del protocolo en el índice `FF`: si responde HID++ 2.0 es un dispositivo directo; si no, es un receptor y se consultan los índices 1 a 6. De cada periférico se leen el nombre y el tipo (`0x0005`) y la batería con `0x1004` Unified Battery, `0x1000` Battery Status o `0x1001` Battery Voltage. Con voltaje, el porcentaje se estima con la curva de descarga de una celda de litio. Las respuestas se filtran por índice, función e identificador de software para no mezclarlas con G HUB u Options+. Los dispositivos Bluetooth siguen en la ruta de Bluetooth. **Pendiente de prueba física**. |
+| HID estándar | Cualquier otro periférico USB que declare **Battery Strength** (`0x06:0x20`) en su descriptor. Solo se piden los informes de entrada o de característica que el propio descriptor declara, y el valor se escala con su rango lógico. Muchos mouse gamer no lo declaran: entonces no aparecen por esta vía. |
 | GameSir G7 Pro y MANBA One V1 | Informe de `Windows.Gaming.Input.RawGameController`. Si Windows no entrega capacidades de batería, aparece **no disponible**. Los informes con cuatro niveles se presentan como aproximados. **Pendientes de prueba física**; no se garantiza que el MANBA comunique batería por su receptor. |
 
 Un teléfono puede aparecer como conectado aunque su enlace no exponga la
@@ -104,7 +107,11 @@ valor retenido de un sondeo anterior queda fuera del aviso. Se ignora el 0 %
 de caché. Una lectura directa de 0 % sí puede generar un aviso.
 
 Los receptores AJAZZ/MCHOSE reconocidos sin protocolo implementado se muestran
-sin enviarles consultas específicas. No se cambian DPI, botones, iluminación,
+sin enviarles consultas específicas. No existe un protocolo universal para la
+batería de los receptores de 2.4 GHz: cada fabricante usa el suyo, y enviar los
+comandos de una marca a otra puede tener efectos no deseados. Por eso solo se
+consulta a los fabricantes con protocolo identificado, y al resto únicamente por
+el uso estándar de HID. No se cambian DPI, botones, iluminación,
 perfiles ni firmware. Las consultas ocurren fuera del hilo de la interfaz y las
 operaciones asíncronas de Windows tienen un límite de espera.
 
@@ -135,6 +142,7 @@ unidad física disponible estaba al 78 %.
 - [Microsoft: RawGameController.TryGetBatteryReport](https://learn.microsoft.com/en-us/uwp/api/windows.gaming.input.rawgamecontroller.trygetbatteryreport).
 - [MCHOSE: descripción independiente del protocolo](https://github.com/alexfrih/mchose-linux/blob/main/PROTOCOL.md).
 - [AJAZZ CompX: formato de los informes y batería](https://github.com/Geovane2dd/Ajazzy/blob/main/protocol/hid.h).
+- [Logitech HID++ 2.0: funciones de batería (Solaar)](https://github.com/pwr-Solaar/Solaar/blob/master/lib/logitech_receiver/hidpp20.py).
 - [AJAZZ APEX: consulta de batería F7](https://github.com/Aiacos/ajazz-control-center/blob/develop/docs/protocols/mouse/aj_series_battery.md).
 
 La implementación local se basa en los formatos de comunicación documentados;
