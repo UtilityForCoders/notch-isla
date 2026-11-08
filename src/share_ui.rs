@@ -18,8 +18,7 @@ use windows::Win32::UI::Shell::{
     FOS_PATHMUSTEXIST, HDROP, KF_FLAG_DEFAULT, SIGDN_FILESYSPATH,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    MessageBoxW, PostMessageW, IDYES, MB_DEFBUTTON2, MB_ICONINFORMATION, MB_ICONQUESTION, MB_OK,
-    MB_SETFOREGROUND, MB_YESNO, WM_APP,
+    MessageBoxW, PostMessageW, MB_ICONINFORMATION, MB_OK, MB_SETFOREGROUND, WM_APP,
 };
 
 use crate::island::{Notice, NoticeIcon};
@@ -34,7 +33,7 @@ enum Event {
     Devices(Payload, std::result::Result<Vec<Peer>, String>),
     Sent(std::result::Result<(), String>),
     Receive(ReceiveEvent),
-    Finished(std::result::Result<Option<PathBuf>, String>),
+    Finished(std::result::Result<Option<share::Received>, String>),
 }
 
 struct Ui {
@@ -93,7 +92,7 @@ pub fn open(hwnd: HWND) {
     let mut items = vec![
         Item::Label(TITLE.into()),
         action(1, "Elegir fotos o archivos…"),
-        action(2, "Enviar texto copiado"),
+        action(2, "Enviar texto o imagen copiada"),
         Item::Separator,
     ];
     if accepting {
@@ -112,9 +111,12 @@ pub fn open(hwnd: HWND) {
             Ok(None) => {}
             Err(_) => notify("No se pudo abrir el selector de archivos."),
         },
-        Some(2) => match clipboard_text(hwnd) {
-            Some(text) => start_send(hwnd, Payload::Text(text)),
-            None => notify("Copia un texto de hasta 256 KB y vuelve a intentar."),
+        Some(2) => match crate::share_preview::clipboard_image(hwnd)
+            .map(Payload::Image)
+            .or_else(|| clipboard_text(hwnd).map(Payload::Text))
+        {
+            Some(payload) => start_send(hwnd, payload),
+            None => notify("Copia texto (hasta 256 KB) o una imagen (hasta 32 MB)."),
         },
         Some(3) if receiving => stop(),
         Some(3) => start_receive(hwnd),
@@ -268,6 +270,7 @@ fn choose_device(hwnd: HWND, payload: Payload, peers: Vec<Peer>) -> bool {
         return false;
     }
     let description = match &payload {
+        Payload::Image(_) => "Imagen copiada".into(),
         Payload::Text(text) => format!("Texto · {} caracteres", text.chars().count()),
         Payload::Files(files) if files.len() == 1 => files[0].file_name().map_or_else(
             || "1 archivo".into(),
@@ -330,17 +333,7 @@ pub fn on_event(hwnd: HWND) {
                     ui.accepting = true;
                     ui.receive_code.clone().unwrap_or_default()
                 });
-                let question = HSTRING::from(format!(
-                    "{description}\n\nCódigo de este equipo: {code}\n¿Guardar el envío en Descargas?"
-                ));
-                let accepted = unsafe {
-                    MessageBoxW(
-                        None,
-                        &question,
-                        w!("Envío cercano · Notch Isla"),
-                        MB_YESNO | MB_DEFBUTTON2 | MB_ICONQUESTION | MB_SETFOREGROUND,
-                    )
-                } == IDYES;
+                let accepted = crate::share_preview::confirm(hwnd, &description, &code);
                 let _ = decision.send(accepted);
                 UI.with_borrow_mut(|ui| ui.accepting = false);
             }
@@ -350,7 +343,22 @@ pub fn on_event(hwnd: HWND) {
                     ui.receive_code = None;
                 });
                 match result {
-                    Ok(Some(path)) => {
+                    Ok(Some(share::Received::Text { sender, text })) => {
+                        if let Err(error) = crate::share_preview::text(hwnd, &sender, &text) {
+                            notify(&format!("No se pudo mostrar el texto. {error}"));
+                        }
+                    }
+                    Ok(Some(share::Received::Image {
+                        sender,
+                        directory,
+                        path,
+                    })) => {
+                        if let Err(error) = crate::share_preview::image(hwnd, &sender, &path) {
+                            notify(&format!("No se pudo mostrar la imagen. {error}"));
+                        }
+                        drop(directory);
+                    }
+                    Ok(Some(share::Received::Files(path))) => {
                         let message = HSTRING::from(format!("Guardado en:\n{}", path.display()));
                         unsafe {
                             MessageBoxW(

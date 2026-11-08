@@ -35,6 +35,35 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>
 pub enum Payload {
     Files(Vec<PathBuf>),
     Text(String),
+    Image(Vec<u8>),
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContentKind {
+    #[default]
+    Files,
+    Text,
+    Image,
+}
+
+pub enum Received {
+    Files(PathBuf),
+    Text {
+        sender: String,
+        text: String,
+    },
+    Image {
+        sender: String,
+        directory: tempfile::TempDir,
+        path: PathBuf,
+    },
+}
+
+pub fn is_image(path: &Path) -> bool {
+    path.extension().and_then(|s| s.to_str()).is_some_and(|s| {
+        ["png", "jpg", "jpeg", "bmp", "gif", "webp"].contains(&s.to_ascii_lowercase().as_str())
+    })
 }
 
 pub struct Peer {
@@ -110,6 +139,8 @@ struct Offer {
     version: u8,
     sender: String,
     entries: Vec<Entry>,
+    #[serde(default)]
+    kind: ContentKind,
 }
 
 fn local_name() -> String {
@@ -213,6 +244,15 @@ impl Offer {
         if size.is_none_or(|size| size > MAX_BYTES) {
             return Err("El envío supera 1 GB.".into());
         }
+        match self.kind {
+            ContentKind::Text if self.entries.len() != 1 || size.unwrap() > MAX_TEXT as u64 => {
+                return Err("El texto supera el límite permitido.".into())
+            }
+            ContentKind::Image if self.entries.len() != 1 || size.unwrap() > MAX_IMAGE => {
+                return Err("La imagen supera 32 MB.".into())
+            }
+            _ => {}
+        }
         Ok(())
     }
 
@@ -275,6 +315,18 @@ fn copy_exact(source: impl Read, dest: &mut impl Write, size: u64) -> Result<()>
 pub fn send(peer: Peer, payload: Payload) -> Result<()> {
     let mut entries = Vec::new();
     let mut sources: Vec<Box<dyn Read>> = Vec::new();
+    let kind = match &payload {
+        Payload::Text(_) => ContentKind::Text,
+        Payload::Image(_) => ContentKind::Image,
+        Payload::Files(paths)
+            if paths.len() == 1
+                && is_image(&paths[0])
+                && std::fs::metadata(&paths[0])?.len() <= MAX_IMAGE =>
+        {
+            ContentKind::Image
+        }
+        _ => ContentKind::Files,
+    };
     match payload {
         Payload::Text(text) => {
             entries.push(Entry {
@@ -282,6 +334,13 @@ pub fn send(peer: Peer, payload: Payload) -> Result<()> {
                 bytes: text.len() as u64,
             });
             sources.push(Box::new(io::Cursor::new(text.into_bytes())));
+        }
+        Payload::Image(bytes) => {
+            entries.push(Entry {
+                name: "Imagen.bmp".into(),
+                bytes: bytes.len() as u64,
+            });
+            sources.push(Box::new(io::Cursor::new(bytes)));
         }
         Payload::Files(paths) => {
             for path in paths {
@@ -303,6 +362,7 @@ pub fn send(peer: Peer, payload: Payload) -> Result<()> {
         version: PROTOCOL,
         sender: local_name(),
         entries,
+        kind,
     };
     offer.validate()?;
 
@@ -346,7 +406,7 @@ pub fn receive(
     downloads: PathBuf,
     cancel: Receiver<()>,
     mut event: impl FnMut(ReceiveEvent),
-) -> Result<Option<PathBuf>> {
+) -> Result<Option<Received>> {
     let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0))?;
     listener.set_nonblocking(true)?;
     let (certificate, config) = receiver_identity()?;
@@ -431,7 +491,44 @@ fn finish_receive(
     offer: Offer,
     cancel: &Receiver<()>,
     mut event: impl FnMut(ReceiveEvent),
-) -> Result<Option<PathBuf>> {
+) -> Result<Option<Received>> {
+    // Recepción activada por el usuario: las vistas previas son pequeñas y temporales.
+    // Los archivos siguen requiriendo confirmación antes de escribirse en Descargas.
+    if offer.kind != ContentKind::Files {
+        stream.sock.allow(TRANSFER_TIME, IO_TIME);
+        if cancel.try_recv().is_ok() {
+            return Ok(None);
+        }
+        stream.write_all(&[1])?;
+        stream.flush()?;
+        let received = match offer.kind {
+            ContentKind::Text => {
+                let mut bytes = Vec::new();
+                copy_exact(&mut *stream, &mut bytes, offer.entries[0].bytes)?;
+                Received::Text {
+                    sender: clean_label(&offer.sender),
+                    text: String::from_utf8(bytes)?,
+                }
+            }
+            ContentKind::Image => {
+                let directory = tempfile::Builder::new()
+                    .prefix("notch-preview-")
+                    .tempdir()?;
+                let path = directory.path().join("imagen");
+                let mut file = File::create_new(&path)?;
+                copy_exact(&mut *stream, &mut file, offer.entries[0].bytes)?;
+                Received::Image {
+                    sender: clean_label(&offer.sender),
+                    directory,
+                    path,
+                }
+            }
+            ContentKind::Files => unreachable!(),
+        };
+        stream.write_all(&[1])?;
+        stream.flush()?;
+        return Ok(Some(received));
+    }
     let (decision, answer) = std::sync::mpsc::channel();
     event(ReceiveEvent::Offer {
         description: offer.description(),
@@ -450,7 +547,7 @@ fn finish_receive(
     if saved.is_ok() {
         let _ = stream.write_all(&[1]).and_then(|()| stream.flush());
     }
-    saved.map(Some)
+    saved.map(|path| Some(Received::Files(path)))
 }
 
 fn save_offer(downloads: &Path, stream: &mut impl Read, offer: &Offer) -> Result<PathBuf> {
@@ -494,6 +591,76 @@ mod tests {
     use std::sync::mpsc;
 
     #[test]
+    fn texto_e_imagen_se_reciben_como_vista_previa_sin_descargas() -> Result<()> {
+        for payload in [
+            Payload::Text("Hola 👋\r\nsegunda línea".into()),
+            Payload::Image(vec![1, 2, 3, 4]),
+        ] {
+            let directory = tempfile::tempdir()?;
+            let downloads = directory.path().to_owned();
+            let (certificate, config) = receiver_identity()?;
+            let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
+            let std::net::SocketAddr::V4(address) = listener.local_addr()? else {
+                unreachable!()
+            };
+            let server = std::thread::spawn(move || -> Result<_> {
+                let (socket, _) = listener.accept()?;
+                let mut stream =
+                    StreamOwned::new(ServerConnection::new(config)?, Socket::new(socket, IO_TIME));
+                let offer = read_offer(&mut stream)?;
+                let (_stop, cancel) = mpsc::channel();
+                finish_receive(&downloads, &mut stream, offer, &cancel, |_| {
+                    panic!("una vista previa no pregunta dónde guardar")
+                })
+            });
+            send(
+                Peer {
+                    name: "Prueba".into(),
+                    code: certificate_code(&certificate),
+                    addresses: vec![address],
+                    certificate,
+                },
+                payload,
+            )?;
+            match server.join().unwrap()?.unwrap() {
+                Received::Text { text, .. } => assert_eq!(text, "Hola 👋\r\nsegunda línea"),
+                Received::Image {
+                    directory, path, ..
+                } => {
+                    assert_eq!(std::fs::read(&path)?, [1, 2, 3, 4]);
+                    drop(directory);
+                    assert!(!path.exists());
+                }
+                Received::Files(_) => panic!("no debe guardarse en Descargas"),
+            }
+            assert_eq!(directory.path().read_dir()?.count(), 0);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn valida_limites_de_vista_previa_y_compatibilidad() -> Result<()> {
+        let mut offer: Offer = serde_json::from_str(
+            r#"{"version":1,"sender":"Anterior","entries":[{"name":"Mensaje.txt","bytes":4}]}"#,
+        )?;
+        assert!(offer.kind == ContentKind::Files);
+        offer.kind = ContentKind::Text;
+        offer.entries[0].bytes = MAX_TEXT as u64 + 1;
+        assert!(offer.validate().is_err());
+        offer.kind = ContentKind::Image;
+        offer.entries[0].bytes = MAX_IMAGE + 1;
+        assert!(offer.validate().is_err());
+        offer.entries[0].bytes = MAX_IMAGE;
+        offer.validate()?;
+        offer.entries.push(Entry {
+            name: "extra".into(),
+            bytes: 0,
+        });
+        assert!(offer.validate().is_err());
+        Ok(())
+    }
+
+    #[test]
     #[ignore = "requiere una interfaz IPv4 local y tráfico mDNS permitido"]
     fn descubre_y_envia_en_la_red_local() -> Result<()> {
         let directory = tempfile::tempdir()?;
@@ -522,7 +689,9 @@ mod tests {
         let _ = stop.send(());
         let saved = worker.join().unwrap();
         result?;
-        let path = saved?.unwrap();
+        let Received::Files(path) = saved?.unwrap() else {
+            panic!("esperaba archivos")
+        };
         assert_eq!(
             std::fs::read(path.join("01 - foto.png"))?,
             [0x89, b'P', b'N', b'G']
@@ -567,12 +736,20 @@ mod tests {
                 addresses: vec![address],
                 certificate,
             };
-            let result = send(peer, Payload::Text("hola desde la isla 👋".into()));
+            let source = tempfile::tempdir()?;
+            let path = source.path().join("prueba.txt");
+            std::fs::write(&path, "hola desde la isla 👋")?;
+            let result = send(peer, Payload::Files(vec![path]));
             let saved = server.join().unwrap();
             if trusted && accepted {
                 result?;
-                let path = saved?.unwrap().join("01 - Mensaje.txt");
-                assert_eq!(std::fs::read_to_string(path)?, "hola desde la isla 👋");
+                let Received::Files(path) = saved?.unwrap() else {
+                    panic!("esperaba archivos")
+                };
+                assert_eq!(
+                    std::fs::read_to_string(path.join("01 - prueba.txt"))?,
+                    "hola desde la isla 👋"
+                );
             } else {
                 assert!(result.is_err());
                 assert!(saved.is_err() || saved?.is_none());
@@ -588,6 +765,7 @@ mod tests {
         let offer = Offer {
             version: PROTOCOL,
             sender: "Prueba".into(),
+            kind: ContentKind::Files,
             entries: vec![Entry {
                 name: "../foto.png".into(),
                 bytes: 8,
