@@ -1037,6 +1037,79 @@ mod tests {
     }
 
     #[test]
+    fn conserva_wifi_aunque_haya_mas_de_cuatro_adaptadores() {
+        let wifi = Ipv4Addr::new(192, 168, 50, 20);
+        let ips = [
+            Ipv4Addr::new(169, 254, 10, 1),
+            Ipv4Addr::new(169, 254, 20, 1),
+            Ipv4Addr::new(172, 16, 0, 1),
+            Ipv4Addr::new(172, 20, 128, 1),
+            Ipv4Addr::new(172, 24, 0, 1),
+            wifi,
+            Ipv4Addr::new(192, 168, 100, 1),
+            Ipv4Addr::new(192, 168, 200, 1),
+        ];
+        let addresses = discovered_addresses(ips, 12345);
+        assert_eq!(addresses.len(), ips.len());
+        assert!(addresses.contains(&SocketAddrV4::new(wifi, 12345)));
+        assert!(!addresses[0].ip().is_link_local());
+    }
+
+    #[test]
+    fn conecta_por_otra_ruta_sin_omitir_la_verificacion_tls() -> Result<()> {
+        let (directory, first, second) = identities()?;
+        let impostor = Arc::new(Store::at(directory.path().join("impostor.dat"))?);
+        let pairing = Arc::new(Pairing::default());
+        pairing.open();
+        let valid_config = server_config(second.clone(), pairing.clone())?;
+        let wrong_config = server_config(impostor.clone(), pairing)?;
+        let (valid, mut peer) = listen(&second, false)?;
+        let (wrong, wrong_peer) = listen(&impostor, false)?;
+        let wrong_address = wrong_peer.addresses[0];
+        // Una ruta acepta TCP pero presenta una identidad distinta.
+        peer.addresses.insert(0, wrong_address);
+        let valid_server = std::thread::spawn(move || -> Result<()> {
+            // Como el listener real, descarta sockets candidatos que no llegan a iniciar TLS.
+            for _ in 0..2 {
+                let (socket, _) = valid.accept()?;
+                let mut stream = StreamOwned::new(
+                    ServerConnection::new(valid_config.clone())?,
+                    Socket::new(socket, IO_TIME),
+                );
+                let result = (|| -> io::Result<()> {
+                    while stream.conn.is_handshaking() {
+                        stream.conn.complete_io(&mut stream.sock)?;
+                    }
+                    Ok(())
+                })();
+                if result.is_ok() {
+                    return Ok(());
+                }
+            }
+            Err("No llegó una conexión TLS válida.".into())
+        });
+        let wrong_server = std::thread::spawn(move || -> Result<()> {
+            let (socket, _) = wrong.accept()?;
+            let mut stream = StreamOwned::new(
+                ServerConnection::new(wrong_config)?,
+                Socket::new(socket, IO_TIME),
+            );
+            // Ninguna solicitud ni contenido debe enviarse a esta identidad.
+            assert!(read_message::<Request>(&mut stream).is_err());
+            Ok(())
+        });
+        let stream = connect(&first, &peer)?;
+        assert_eq!(
+            stream.conn.peer_certificates().unwrap()[0],
+            second.credentials().0
+        );
+        drop(stream);
+        valid_server.join().unwrap()?;
+        wrong_server.join().unwrap()?;
+        Ok(())
+    }
+
+    #[test]
     fn vincula_ambos_con_el_mismo_codigo_y_recibe_varios_envios_sin_reactivar() -> Result<()> {
         let (directory, first, second) = identities()?;
         let downloads = directory.path().join("downloads");
@@ -1255,51 +1328,71 @@ mod tests {
     #[ignore = "requiere una interfaz IPv4 local y tráfico mDNS permitido"]
     fn descubre_vincula_y_comparte_en_la_red_local() -> Result<()> {
         let (directory, first, second) = identities()?;
-        let pairing = Arc::new(Pairing::default());
-        pairing.open();
-        let expected = second.credentials().0;
-        let downloads = directory.path().to_owned();
-        let (stop, cancel) = mpsc::channel();
+        let first_cert = first.credentials().0;
+        let second_cert = second.credentials().0;
         let (ready, started) = mpsc::channel();
         let (codes, code) = mpsc::channel();
         let (texts, text) = mpsc::channel();
-        let worker = std::thread::spawn(move || {
-            serve(downloads, second, pairing, cancel, |event| match event {
-                ReceiveEvent::Ready(_) => {
-                    ready.send(()).unwrap();
-                }
-                ReceiveEvent::Pair { code, decision, .. } => {
-                    codes.send(code).unwrap();
-                    decision.send(true).unwrap();
-                }
-                ReceiveEvent::Completed { result, resume } => {
-                    let Some(Received::Text { text, .. }) = result.unwrap() else {
-                        panic!("esperaba texto")
-                    };
-                    texts.send(text).unwrap();
-                    resume.send(()).unwrap();
-                }
-                ReceiveEvent::Paired(_) => {}
-                _ => panic!("evento inesperado"),
-            })
-        });
+        let mut workers = Vec::new();
+        let mut stops = Vec::new();
+        // Los dos equipos sirven y descubren con sus propias identidades desde antes de vincular.
+        for store in [first.clone(), second.clone()] {
+            let pairing = Arc::new(Pairing::default());
+            pairing.open();
+            let downloads = directory.path().to_owned();
+            let (stop, cancel) = mpsc::channel();
+            stops.push(stop);
+            let ready = ready.clone();
+            let codes = codes.clone();
+            let texts = texts.clone();
+            workers.push(std::thread::spawn(move || {
+                serve(downloads, store, pairing, cancel, |event| match event {
+                    ReceiveEvent::Ready(_) => {
+                        ready.send(()).unwrap();
+                    }
+                    ReceiveEvent::Pair { code, decision, .. } => {
+                        codes.send(code).unwrap();
+                        decision.send(true).unwrap();
+                    }
+                    ReceiveEvent::Completed { result, resume } => {
+                        let Some(Received::Text { text, .. }) = result.unwrap() else {
+                            panic!("esperaba texto")
+                        };
+                        texts.send(text).unwrap();
+                        resume.send(()).unwrap();
+                    }
+                    ReceiveEvent::Paired(_) => {}
+                    _ => panic!("evento inesperado"),
+                })
+            }));
+        }
         let result = (|| -> Result<()> {
             started.recv_timeout(IO_TIME)?;
-            let peer = discover(&first)?
+            started.recv_timeout(IO_TIME)?;
+            let laptop = discover(&first)?
                 .into_iter()
-                .find(|peer| peer.pairable && peer.certificate == expected)
-                .ok_or("No se descubrió el receptor de prueba.")?;
-            pair(&first, peer.clone(), |_, displayed| {
+                .find(|peer| peer.pairable && peer.certificate == second_cert)
+                .ok_or("No se descubrió la laptop de prueba.")?;
+            pair(&first, laptop.clone(), |_, displayed| {
                 code.recv_timeout(IO_TIME)
                     .is_ok_and(|remote| remote == displayed)
             })?;
-            send(&first, peer, Payload::Text("prueba de red local".into()))?;
-            assert_eq!(text.recv_timeout(IO_TIME)?, "prueba de red local");
+            send(&first, laptop, Payload::Text("PC a laptop".into()))?;
+            assert_eq!(text.recv_timeout(IO_TIME)?, "PC a laptop");
+            let pc = discover(&second)?
+                .into_iter()
+                .find(|peer| peer.certificate == first_cert)
+                .ok_or("No se descubrió el PC de prueba.")?;
+            send(&second, pc, Payload::Text("laptop a PC".into()))?;
+            assert_eq!(text.recv_timeout(IO_TIME)?, "laptop a PC");
             Ok(())
         })();
-        let _ = stop.send(());
-        drop(stop);
-        worker.join().unwrap()?;
+        for stop in stops {
+            let _ = stop.send(());
+        }
+        for worker in workers {
+            worker.join().unwrap()?;
+        }
         result
     }
 
