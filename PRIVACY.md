@@ -1,6 +1,6 @@
 # Política de privacidad / Privacy policy
 
-*Última actualización / Last updated: 27 de octubre de 2026 / October 27, 2026*
+*Última actualización / Last updated: 8 de noviembre de 2026 / November 8, 2026*
 
 ## Español
 
@@ -25,7 +25,7 @@ Lo que la app escribe en tu PC:
 - La opción **Iniciar con Windows**, si la activas: un valor llamado `NotchIsla` en `HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run`. Se quita al desactivar la opción o al desinstalar la app.
 - Si eliges una **salida de audio para una app**, Windows la guarda en su propia configuración de sonido (la misma del Mezclador de volumen); se quita eligiendo **Predeterminada del sistema**.
 
-**Compartir cerca** funciona en la red local. Mientras activas la recepción, Notch Isla anuncia temporalmente el nombre de tu equipo y un certificado de sesión para que otras islas lo encuentren. Al elegir un destinatario, la app le envía por TLS el nombre de tu equipo, los nombres y tamaños de los elementos y, si acepta, el contenido seleccionado. El texto del portapapeles se lee solo al elegir **Enviar texto copiado**. Los envíos aceptados se guardan en Descargas en el equipo receptor.
+**Compartir cerca** funciona en la red local, sin cuentas ni servidor. Con **Recibir de equipos vinculados** activado, la app anuncia el nombre del PC y su certificado público mediante mDNS mientras está abierta; la recepción permanece disponible hasta que la pauses y esa preferencia se conserva al reiniciar. Solo los equipos vinculados pueden enviar contenido. Para agregar uno nuevo, abres una ventana de vinculación de dos minutos y confirmas un código en ambos PCs. Las conexiones usan TLS con autenticación de ambos equipos. El certificado, la clave privada, los nombres y certificados de los equipos vinculados y la preferencia de recepción se guardan en `%LOCALAPPDATA%\NotchIsla\share.dat`, cifrados con DPAPI para el usuario de Windows. **Olvidar equipo** revoca la confianza en este PC. Al enviar, el destinatario recibe el nombre de tu PC, los nombres y tamaños de los elementos y el contenido seleccionado. El portapapeles se lee solo al elegir **Enviar texto o imagen copiada**; recibir no lo modifica hasta pulsar **Copiar**. El texto recibido se mantiene en memoria y las imágenes se guardan temporalmente hasta cerrar la vista previa. Los demás archivos solo se guardan en Descargas después de aceptarlos.
 
 Preguntas: abre un *issue* en https://github.com/UtilityForCoders/notch-isla/issues
 
@@ -52,6 +52,6 @@ What the app writes to your PC:
 - The **Start with Windows** option, if you enable it: a value named `NotchIsla` under `HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run`. It is removed when you turn the option off or uninstall the app.
 - If you choose an **audio output for an app**, Windows stores it in its own sound settings (the same as the Volume mixer); choosing **Predeterminada del sistema** (system default) removes it.
 
-**Nearby sharing** works on the local network. When you enable receiving, Notch Isla temporarily advertises your computer name and a session certificate so other islands can find it. When you choose a recipient, the app sends them your computer name, the names and sizes of the items, and, if they accept, the selected content over TLS. Clipboard text is read only when you choose **Enviar texto copiado** (send copied text). Accepted transfers are saved to Downloads on the receiving computer.
+**Nearby sharing** works on the local network without accounts or a server. With **Recibir de equipos vinculados** (receive from paired devices) enabled, the app advertises your computer name and public certificate using mDNS while running. Receiving stays available until paused, and that preference survives restarts. Only paired devices can send content. Adding a device opens a two-minute pairing window and requires confirming the same code on both computers. Connections use TLS with mutual device authentication. The certificate, private key, paired device names and certificates, and receiving preference are stored in `%LOCALAPPDATA%\NotchIsla\share.dat`, encrypted with Windows DPAPI for the current user. **Olvidar equipo** (forget device) revokes trust on this PC. A recipient receives your computer name, item names and sizes, and the selected content. The clipboard is read only when choosing **Enviar texto o imagen copiada** (send copied text or image); receiving changes it only after clicking **Copiar** (copy). Received text stays in memory and images are stored temporarily until their preview closes. Other files are saved to Downloads only after acceptance.
 
 Questions: open an issue at https://github.com/UtilityForCoders/notch-isla/issues
