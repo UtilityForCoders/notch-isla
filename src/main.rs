@@ -19,6 +19,8 @@ mod projector;
 mod routing;
 mod settings;
 mod share;
+mod share_identity;
+mod share_preview;
 mod share_ui;
 mod spring;
 #[cfg(test)]
@@ -315,6 +317,7 @@ fn main() -> Result<()> {
             hotkey::register(hwnd, app.settings.hotkey);
         });
         DragAcceptFiles(hwnd, true);
+        share_ui::init(hwnd);
 
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
