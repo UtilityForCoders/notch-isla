@@ -153,8 +153,10 @@ fn show_with_label(
     let confirm = primary_label.is_some();
     unsafe {
         let instance = GetModuleHandleW(None)?;
-        // Recurso compartido del ejecutable: el mismo assets/icon.ico de la bandeja.
-        let icon = LoadIconW(Some(instance.into()), PCWSTR(1usize as *const u16))?;
+        // MAKEINTRESOURCEW(1): Win32 interpreta la dirección numérica como el ID de
+        // assets/icon.ico, no como una cadena ni como memoria para desreferenciar.
+        let resource = PCWSTR(std::ptr::without_provenance::<u16>(1));
+        let icon = LoadIconW(Some(instance.into()), resource)?;
         let class = w!("NotchIslaSharePreview");
         let _ = RegisterClassW(&WNDCLASSW {
             lpfnWndProc: Some(proc),
