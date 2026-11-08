@@ -22,6 +22,8 @@ const TLS_NAME: &str = "notchisla.local";
 const PROTOCOL: u8 = 2;
 const MAX_HEADER: usize = 16 * 1024;
 const MAX_BYTES: u64 = 1024 * 1024 * 1024;
+const MAX_ADDRESSES: usize = 32;
+const CONNECT_TIME: Duration = Duration::from_secs(2);
 const DISCOVERY_TIME: Duration = Duration::from_secs(3);
 const PAIRING_TIME: Duration = Duration::from_secs(120);
 const APPROVAL_TIME: Duration = Duration::from_secs(60);
@@ -231,14 +233,8 @@ pub fn discover(store: &Store) -> Result<Vec<Peer>> {
                     cert.extend_from_slice(part);
                 }
                 let code = certificate_code(&cert);
-                let mut addresses: Vec<_> = service
-                    .get_addresses_v4()
-                    .into_iter()
-                    .filter(|ip| (ip.is_private() || ip.is_link_local()) && !ip.is_broadcast())
-                    .map(|ip| SocketAddrV4::new(ip, service.get_port()))
-                    .collect();
-                addresses.sort_unstable();
-                addresses.truncate(4);
+                let addresses =
+                    discovered_addresses(service.get_addresses_v4(), service.get_port());
                 if !cert.is_empty()
                     && cert != own.as_ref()
                     && !addresses.is_empty()
@@ -270,6 +266,24 @@ pub fn discover(store: &Store) -> Result<Vec<Peer>> {
     peers.sort_by(|left, right| left.name.cmp(&right.name).then(left.code.cmp(&right.code)));
     peers.truncate(10);
     Ok(peers)
+}
+
+fn discovered_addresses(
+    addresses: impl IntoIterator<Item = Ipv4Addr>,
+    port: u16,
+) -> Vec<SocketAddrV4> {
+    let mut addresses: Vec<_> = addresses
+        .into_iter()
+        .filter(|ip| (ip.is_private() || ip.is_link_local()) && !ip.is_broadcast())
+        .map(|ip| SocketAddrV4::new(ip, port))
+        .collect();
+    // No recortar a cuatro: WSL, VMware y adaptadores desconectados pueden preceder al Wi-Fi.
+    addresses.sort_unstable_by_key(|address| (address.ip().is_link_local(), *address));
+    addresses.dedup();
+    if addresses.len() > MAX_ADDRESSES {
+        return Vec::new();
+    }
+    addresses
 }
 
 impl Offer {
@@ -470,18 +484,104 @@ fn read_message<T: serde::de::DeserializeOwned>(stream: &mut impl Read) -> Resul
     Ok(serde_json::from_slice(&bytes)?)
 }
 
+/// Prueba las rutas en paralelo; una IP virtual sin respuesta no retrasa la Wi-Fi.
+/// Al elegir un socket se cierran los demás, sin iniciar envíos ni handshakes duplicados.
+fn connect_tcp(
+    addresses: &[SocketAddrV4],
+    timeout: Duration,
+) -> io::Result<(SocketAddrV4, TcpStream)> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    for &address in addresses {
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            let result = TcpStream::connect_timeout(&address.into(), timeout);
+            let _ = tx.send((address, result));
+        });
+    }
+    drop(tx);
+    let mut failure = io::Error::new(
+        io::ErrorKind::NotConnected,
+        "No hay direcciones disponibles.",
+    );
+    for (address, result) in rx {
+        match result {
+            Ok(socket) => return Ok((address, socket)),
+            Err(error) => {
+                failure = error;
+            }
+        }
+    }
+    Err(failure)
+}
+
 fn connect(store: &Store, peer: &Peer) -> Result<StreamOwned<ClientConnection, Socket>> {
     let mut roots = RootCertStore::empty();
     roots.add(peer.certificate.clone())?;
     let (certificate, key) = store.credentials();
-    let config = ClientConfig::builder()
-        .with_root_certificates(roots)
-        .with_client_auth_cert(vec![certificate], key)?;
-    let socket = peer.addresses.iter().find_map(|address| TcpStream::connect_timeout(&(*address).into(), Duration::from_secs(2)).ok()).ok_or("El equipo no está disponible. Comprueba que Notch Isla esté abierto y permita recibir.")?;
-    Ok(StreamOwned::new(
-        ClientConnection::new(Arc::new(config), ServerName::try_from(TLS_NAME)?)?,
-        Socket::new(socket, IO_TIME),
-    ))
+    let config = Arc::new(
+        ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_client_auth_cert(vec![certificate], key)?,
+    );
+    if peer.addresses.is_empty() || peer.addresses.len() > MAX_ADDRESSES {
+        return Err("El equipo no anunció una dirección de red válida. Vuelve a buscarlo.".into());
+    }
+    let deadline = Instant::now() + IO_TIME;
+    let mut addresses = peer.addresses.clone();
+    addresses.sort_unstable();
+    addresses.dedup();
+    let mut tcp_error = None;
+    let mut tls_error = None;
+    while !addresses.is_empty() {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        let (address, socket) = match connect_tcp(&addresses, remaining.min(CONNECT_TIME)) {
+            Ok(connected) => connected,
+            Err(error) => {
+                tcp_error = Some(error);
+                break;
+            }
+        };
+        addresses.retain(|candidate| *candidate != address);
+        let connection = ClientConnection::new(config.clone(), ServerName::try_from(TLS_NAME)?)?;
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        let mut stream = StreamOwned::new(
+            connection,
+            Socket::new(socket, remaining.min(Duration::from_secs(3))),
+        );
+        let handshake = (|| -> io::Result<()> {
+            while stream.conn.is_handshaking() {
+                stream.conn.complete_io(&mut stream.sock)?;
+            }
+            Ok(())
+        })();
+        match handshake {
+            Ok(()) => {
+                stream.sock.allow(IO_TIME, IO_TIME);
+                return Ok(stream);
+            }
+            Err(error) => {
+                tls_error = Some(error);
+            }
+        }
+    }
+    if let Some(error) = tls_error {
+        return Err(format!(
+            "El equipo respondió, pero no se pudo verificar la conexión segura. {error}"
+        )
+        .into());
+    }
+    let detail = match tcp_error.as_ref().map(io::Error::kind) {
+        Some(io::ErrorKind::ConnectionRefused) => "El equipo rechaza la conexión. Reabre Notch Isla y activa Recibir de equipos vinculados allí.",
+        Some(io::ErrorKind::TimedOut) | Some(io::ErrorKind::WouldBlock) => "El equipo se anuncia, pero no responde. Revisa el permiso de red de Notch Isla en Windows y que ambos PCs estén en la misma red.",
+        _ => "No se pudo abrir la conexión al equipo. Revisa su recepción, la red y el permiso de Notch Isla en Windows.",
+    };
+    Err(detail.into())
 }
 
 /// El código se obtiene del canal TLS: una conexión intermediaria muestra otro código.
