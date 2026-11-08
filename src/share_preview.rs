@@ -14,6 +14,7 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Memory::*;
 use windows::Win32::UI::Controls::{SetWindowTheme, DRAWITEMSTRUCT, ODS_FOCUS};
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetFocus, SetFocus};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 const HEADER_HEIGHT: i32 = 68;
@@ -106,6 +107,19 @@ pub fn confirm(owner: HWND, description: &str, code: &str) -> bool {
     .unwrap_or(false)
 }
 
+pub fn pair(owner: HWND, name: &str, code: &str) -> bool {
+    let content = format!("{name}\r\n\r\n{code}\r\n\r\nComprueba que el otro equipo muestre exactamente el mismo código.\r\n\r\nAl vincularlo podrá enviarte texto e imágenes mientras Notch Isla esté abierto. Los archivos seguirán pidiendo confirmación para guardarse.");
+    show_with_label(
+        owner,
+        "Vincular equipo",
+        "Confirma el mismo código en ambos equipos.",
+        Some(&content),
+        None,
+        Some("Vincular equipo"),
+    )
+    .unwrap_or(false)
+}
+
 fn show(
     owner: HWND,
     title: &str,
@@ -114,6 +128,29 @@ fn show(
     image: Option<Image>,
     confirm: bool,
 ) -> Result<bool> {
+    show_with_label(
+        owner,
+        title,
+        detail,
+        text,
+        image,
+        if confirm {
+            Some("Guardar en Descargas")
+        } else {
+            None
+        },
+    )
+}
+
+fn show_with_label(
+    owner: HWND,
+    title: &str,
+    detail: &str,
+    text: Option<&str>,
+    image: Option<Image>,
+    primary_label: Option<&str>,
+) -> Result<bool> {
+    let confirm = primary_label.is_some();
     unsafe {
         let instance = GetModuleHandleW(None)?;
         // Recurso compartido del ejecutable: el mismo assets/icon.ico de la bandeja.
@@ -247,15 +284,7 @@ fn show(
             );
         }
         for (id, label, x) in [
-            (
-                1,
-                if confirm {
-                    "Guardar en Descargas"
-                } else {
-                    "Copiar"
-                },
-                280,
-            ),
+            (1, primary_label.unwrap_or("Copiar"), 280),
             (2, if confirm { "Rechazar" } else { "Cerrar" }, 24),
         ] {
             let button = CreateWindowExW(
@@ -301,6 +330,11 @@ fn show(
         );
         let _ = ShowWindow(hwnd, SW_SHOW);
         let _ = SetForegroundWindow(hwnd);
+        if confirm {
+            if let Ok(reject) = GetDlgItem(Some(hwnd), 2) {
+                let _ = SetFocus(Some(reject));
+            }
+        }
         // La confirmación vence junto con la solicitud de red.
         if confirm {
             SetTimer(Some(hwnd), 1, 60_000, None);
@@ -317,6 +351,19 @@ fn show(
             }
             if msg.message == WM_KEYDOWN && msg.wParam.0 == 27 {
                 break;
+            }
+            if confirm && msg.message == WM_KEYDOWN && msg.wParam.0 == 13 {
+                // Enter solo confirma si el usuario enfocó expresamente la acción principal.
+                let focused = GetFocus();
+                if GetDlgItem(Some(hwnd), 1).ok() == Some(focused) {
+                    panel.accepted = true;
+                    panel.done = true;
+                } else if GetDlgItem(Some(hwnd), 2).ok() == Some(focused)
+                    || GetDlgItem(Some(hwnd), 3).ok() == Some(focused)
+                {
+                    panel.done = true;
+                }
+                continue;
             }
             if !IsDialogMessageW(hwnd, &msg).as_bool() {
                 let _ = TranslateMessage(&msg);
@@ -712,6 +759,12 @@ pub fn clipboard_image(hwnd: HWND) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "diálogo interactivo de vinculación para revisión visual"]
+    fn revisar_vinculacion() {
+        pair(HWND::default(), "Mi portátil", "A12B · C34D · E56F");
+    }
 
     #[test]
     #[ignore = "vista previa interactiva para revisión visual"]

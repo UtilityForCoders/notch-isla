@@ -1,16 +1,17 @@
-//! Descubrimiento mDNS y envíos TLS de una sola sesión por la red local.
+//! Equipos vinculados por TLS mutuo, descubrimiento mDNS y recepción persistente.
 
+use crate::share_identity::Store;
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::net::{Ipv4Addr, SocketAddrV4, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo, TxtProperty};
-use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer, ServerName};
+use rustls::pki_types::{CertificateDer, ServerName};
 use rustls::{
     ClientConfig, ClientConnection, RootCertStore, ServerConfig, ServerConnection, StreamOwned,
 };
@@ -18,11 +19,11 @@ use serde::{Deserialize, Serialize};
 
 const SERVICE: &str = "_notchisla._tcp.local.";
 const TLS_NAME: &str = "notchisla.local";
-const PROTOCOL: u8 = 1;
+const PROTOCOL: u8 = 2;
 const MAX_HEADER: usize = 16 * 1024;
 const MAX_BYTES: u64 = 1024 * 1024 * 1024;
 const DISCOVERY_TIME: Duration = Duration::from_secs(3);
-const RECEIVE_TIME: Duration = Duration::from_secs(300);
+const PAIRING_TIME: Duration = Duration::from_secs(120);
 const APPROVAL_TIME: Duration = Duration::from_secs(60);
 const IO_TIME: Duration = Duration::from_secs(10);
 const TRANSFER_TIME: Duration = Duration::from_secs(600);
@@ -66,15 +67,45 @@ pub fn is_image(path: &Path) -> bool {
     })
 }
 
+#[derive(Clone)]
 pub struct Peer {
     pub name: String,
     pub code: String,
     addresses: Vec<SocketAddrV4>,
-    certificate: CertificateDer<'static>,
+    pub certificate: CertificateDer<'static>,
+    pub pairable: bool,
+}
+
+#[derive(Debug, Default)]
+pub struct Pairing(Mutex<Option<Instant>>);
+
+impl Pairing {
+    pub fn open(&self) {
+        *self.0.lock().unwrap() = Some(Instant::now() + PAIRING_TIME);
+    }
+    pub fn close(&self) {
+        *self.0.lock().unwrap() = None;
+    }
+    pub fn is_open(&self) -> bool {
+        self.0
+            .lock()
+            .unwrap()
+            .is_some_and(|until| Instant::now() < until)
+    }
 }
 
 pub enum ReceiveEvent {
     Ready(String),
+    Pair {
+        name: String,
+        code: String,
+        decision: Sender<bool>,
+    },
+    Paired(String),
+    Completed {
+        result: Result<Option<Received>>,
+        resume: Sender<()>,
+    },
     Offer {
         description: String,
         decision: Sender<bool>,
@@ -180,7 +211,8 @@ impl Drop for Discovery {
     }
 }
 
-pub fn discover() -> Result<Vec<Peer>> {
+pub fn discover(store: &Store) -> Result<Vec<Peer>> {
+    let own = store.credentials().0;
     let daemon = Discovery(ServiceDaemon::new()?);
     let events = daemon.0.browse(SERVICE)?;
     let until = Instant::now() + DISCOVERY_TIME;
@@ -188,6 +220,9 @@ pub fn discover() -> Result<Vec<Peer>> {
     while let Ok(event) = events.recv_timeout(until.saturating_duration_since(Instant::now())) {
         match event {
             ServiceEvent::ServiceResolved(service) if peers.len() < 64 => {
+                if service.get_property_val_str("protocol") != Some("2") {
+                    continue;
+                }
                 let mut cert = Vec::new();
                 for key in ["cert0", "cert1", "cert2", "cert3"] {
                     let Some(Some(part)) = service.get_property_val(key) else {
@@ -204,7 +239,11 @@ pub fn discover() -> Result<Vec<Peer>> {
                     .collect();
                 addresses.sort_unstable();
                 addresses.truncate(4);
-                if !cert.is_empty() && !addresses.is_empty() && service.get_port() != 0 {
+                if !cert.is_empty()
+                    && cert != own.as_ref()
+                    && !addresses.is_empty()
+                    && service.get_port() != 0
+                {
                     let name = clean_label(service.get_property_val_str("name").unwrap_or(""));
                     peers.insert(
                         service.get_fullname().to_owned(),
@@ -213,6 +252,7 @@ pub fn discover() -> Result<Vec<Peer>> {
                             code,
                             addresses,
                             certificate: cert.into(),
+                            pairable: service.get_property_val_str("pairing") == Some("1"),
                         },
                     );
                 }
@@ -312,7 +352,10 @@ fn copy_exact(source: impl Read, dest: &mut impl Write, size: u64) -> Result<()>
     Ok(())
 }
 
-pub fn send(peer: Peer, payload: Payload) -> Result<()> {
+pub fn send(store: &Store, peer: Peer, payload: Payload) -> Result<()> {
+    if store.known(&peer.certificate).is_none() {
+        return Err("Vincula este equipo antes de enviarle contenido.".into());
+    }
     let mut entries = Vec::new();
     let mut sources: Vec<Box<dyn Read>> = Vec::new();
     let kind = match &payload {
@@ -366,20 +409,15 @@ pub fn send(peer: Peer, payload: Payload) -> Result<()> {
     };
     offer.validate()?;
 
-    let mut roots = RootCertStore::empty();
-    roots.add(peer.certificate)?;
-    let config = ClientConfig::builder()
-        .with_root_certificates(roots)
-        .with_no_client_auth();
-    let socket = peer
-        .addresses
-        .into_iter()
-        .find_map(|address| {
-            TcpStream::connect_timeout(&address.into(), Duration::from_secs(2)).ok()
-        })
-        .ok_or("El dispositivo ya no está disponible.")?;
-    let connection = ClientConnection::new(Arc::new(config), ServerName::try_from(TLS_NAME)?)?;
-    let mut stream = StreamOwned::new(connection, Socket::new(socket, IO_TIME));
+    let mut stream = connect(store, &peer)?;
+    write_message(
+        &mut stream,
+        &Request {
+            version: PROTOCOL,
+            sender: local_name(),
+            pairing: false,
+        },
+    )?;
     write_offer(&mut stream, &offer)?;
 
     stream
@@ -402,39 +440,308 @@ pub fn send(peer: Peer, payload: Payload) -> Result<()> {
     Ok(())
 }
 
-pub fn receive(
-    downloads: PathBuf,
-    cancel: Receiver<()>,
-    mut event: impl FnMut(ReceiveEvent),
-) -> Result<Option<Received>> {
-    let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0))?;
-    listener.set_nonblocking(true)?;
-    let (certificate, config) = receiver_identity()?;
-    let code = certificate_code(&certificate);
+#[derive(Serialize, Deserialize)]
+struct Request {
+    version: u8,
+    sender: String,
+    pairing: bool,
+}
 
-    let mut properties = vec![TxtProperty::from(("name", local_name()))];
+fn write_message(stream: &mut impl Write, value: &impl Serialize) -> Result<()> {
+    let bytes = serde_json::to_vec(value)?;
+    if bytes.len() > MAX_HEADER {
+        return Err("La solicitud es demasiado grande.".into());
+    }
+    stream.write_all(&(bytes.len() as u32).to_be_bytes())?;
+    stream.write_all(&bytes)?;
+    stream.flush()?;
+    Ok(())
+}
+
+fn read_message<T: serde::de::DeserializeOwned>(stream: &mut impl Read) -> Result<T> {
+    let mut length = [0; 4];
+    stream.read_exact(&mut length)?;
+    let length = u32::from_be_bytes(length) as usize;
+    if length == 0 || length > MAX_HEADER {
+        return Err("La solicitud es demasiado grande.".into());
+    }
+    let mut bytes = vec![0; length];
+    stream.read_exact(&mut bytes)?;
+    Ok(serde_json::from_slice(&bytes)?)
+}
+
+fn connect(store: &Store, peer: &Peer) -> Result<StreamOwned<ClientConnection, Socket>> {
+    let mut roots = RootCertStore::empty();
+    roots.add(peer.certificate.clone())?;
+    let (certificate, key) = store.credentials();
+    let config = ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_client_auth_cert(vec![certificate], key)?;
+    let socket = peer.addresses.iter().find_map(|address| TcpStream::connect_timeout(&(*address).into(), Duration::from_secs(2)).ok()).ok_or("El equipo no está disponible. Comprueba que Notch Isla esté abierto y permita recibir.")?;
+    Ok(StreamOwned::new(
+        ClientConnection::new(Arc::new(config), ServerName::try_from(TLS_NAME)?)?,
+        Socket::new(socket, IO_TIME),
+    ))
+}
+
+/// El código se obtiene del canal TLS: una conexión intermediaria muestra otro código.
+fn pairing_code(material: &[u8]) -> String {
+    let code = certificate_code(material);
+    format!("{} · {} · {}", &code[..4], &code[4..8], &code[8..])
+}
+
+pub fn pair(
+    store: &Store,
+    peer: Peer,
+    mut confirm: impl FnMut(String, String) -> bool,
+) -> Result<()> {
+    if !peer.pairable {
+        return Err("Abre Vincular equipo en el otro PC y vuelve a buscar.".into());
+    }
+    let mut stream = connect(store, &peer)?;
+    write_message(
+        &mut stream,
+        &Request {
+            version: PROTOCOL,
+            sender: local_name(),
+            pairing: true,
+        },
+    )?;
+    // Respuesta de preparación: también completa el handshake antes de usar el exporter.
+    let mut ready = [0];
+    stream.read_exact(&mut ready)?;
+    if ready != [1] {
+        return Err("El otro equipo no permite vincularse en este momento.".into());
+    }
+    let material = stream
+        .conn
+        .export_keying_material([0u8; 32], b"notch-isla-pairing-v2", None)?;
+    stream
+        .sock
+        .allow(APPROVAL_TIME + IO_TIME, APPROVAL_TIME + IO_TIME);
+    let accepted = confirm(peer.name.clone(), pairing_code(&material));
+    stream.write_all(&[u8::from(accepted)])?;
+    stream.flush()?;
+    if !accepted {
+        return Err("Vinculación cancelada.".into());
+    }
+    stream.read_exact(&mut ready)?;
+    if ready != [1] {
+        return Err("El otro equipo rechazó la vinculación o no pudo guardarla.".into());
+    }
+    store.remember(peer.name, peer.certificate.to_vec())?;
+    Ok(())
+}
+
+/// Verifica la posesión de la clave mediante TLS. Solo admite identidades guardadas,
+/// salvo durante la ventana explícita de vinculación. No omite firmas ni validación X.509.
+#[derive(Debug)]
+struct KnownClients {
+    store: Arc<Store>,
+    pairing: Arc<Pairing>,
+}
+
+impl rustls::server::danger::ClientCertVerifier for KnownClients {
+    fn root_hint_subjects(&self) -> &[rustls::DistinguishedName] {
+        &[]
+    }
+    fn verify_client_cert(
+        &self,
+        cert: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        now: rustls::pki_types::UnixTime,
+    ) -> std::result::Result<rustls::server::danger::ClientCertVerified, rustls::Error> {
+        if self.store.known(cert).is_none() && !self.pairing.is_open() {
+            return Err(rustls::Error::General("Equipo no vinculado".into()));
+        }
+        let mut roots = RootCertStore::empty();
+        roots.add(cert.clone().into_owned())?;
+        let verifier = rustls::server::WebPkiClientVerifier::builder(Arc::new(roots))
+            .build()
+            .map_err(|error| rustls::Error::General(error.to_string()))?;
+        verifier.verify_client_cert(cert, intermediates, now)
+    }
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        signature: &rustls::DigitallySignedStruct,
+    ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            signature,
+            &rustls::crypto::ring::default_provider().signature_verification_algorithms,
+        )
+    }
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        signature: &rustls::DigitallySignedStruct,
+    ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            signature,
+            &rustls::crypto::ring::default_provider().signature_verification_algorithms,
+        )
+    }
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        rustls::crypto::ring::default_provider()
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
+}
+
+fn server_config(store: Arc<Store>, pairing: Arc<Pairing>) -> Result<Arc<ServerConfig>> {
+    let (certificate, key) = store.credentials();
+    Ok(Arc::new(
+        ServerConfig::builder()
+            .with_client_cert_verifier(Arc::new(KnownClients { store, pairing }))
+            .with_single_cert(vec![certificate], key)?,
+    ))
+}
+
+fn cancelled(cancel: &Receiver<()>) -> bool {
+    !matches!(cancel.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty))
+}
+
+fn wait_decision(answer: &Receiver<bool>, cancel: &Receiver<()>) -> bool {
+    let until = Instant::now() + APPROVAL_TIME;
+    while Instant::now() < until && !cancelled(cancel) {
+        match answer.recv_timeout(Duration::from_millis(100)) {
+            Ok(value) => return value,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return false,
+            Err(_) => {}
+        }
+    }
+    false
+}
+
+enum Session {
+    Paired(String),
+    Received(Option<Received>),
+}
+
+fn session(
+    downloads: &Path,
+    stream: &mut StreamOwned<ServerConnection, Socket>,
+    store: &Store,
+    pairing: &Pairing,
+    cancel: &Receiver<()>,
+    event: &mut impl FnMut(ReceiveEvent),
+) -> Result<Session> {
+    let request: Request = read_message(stream)?;
+    if request.version != PROTOCOL {
+        return Err("Actualiza Notch Isla en ambos equipos para vincularlos.".into());
+    }
+    let certificate = stream
+        .conn
+        .peer_certificates()
+        .and_then(|chain| chain.first())
+        .ok_or("El equipo no presentó su identidad.")?
+        .to_vec();
+    if request.pairing {
+        if !pairing.is_open() {
+            stream.write_all(&[0])?;
+            stream.flush()?;
+            return Err("La vinculación no está activada.".into());
+        }
+        stream.write_all(&[1])?;
+        stream.flush()?;
+        let material =
+            stream
+                .conn
+                .export_keying_material([0u8; 32], b"notch-isla-pairing-v2", None)?;
+        let (confirm, answer) = std::sync::mpsc::channel();
+        let name = clean_label(&request.sender);
+        event(ReceiveEvent::Pair {
+            name: name.clone(),
+            code: pairing_code(&material),
+            decision: confirm,
+        });
+        let accepted = wait_decision(&answer, cancel);
+        stream
+            .sock
+            .allow(APPROVAL_TIME + IO_TIME, APPROVAL_TIME + IO_TIME);
+        let mut other = [0];
+        // Al cancelar localmente, responder sin esperar la otra confirmación.
+        if !accepted {
+            stream.write_all(&[0])?;
+            stream.flush()?;
+            return Err("Vinculación cancelada.".into());
+        }
+        stream.read_exact(&mut other)?;
+        if other != [1] || cancelled(cancel) {
+            return Err("El otro equipo canceló la vinculación.".into());
+        }
+        if let Err(error) = store.remember(name.clone(), certificate) {
+            let _ = stream.write_all(&[0]).and_then(|_| stream.flush());
+            return Err(error);
+        }
+        stream.write_all(&[1])?;
+        stream.flush()?;
+        pairing.close();
+        return Ok(Session::Paired(name));
+    }
+    let device = store
+        .known(&certificate)
+        .ok_or("El equipo debe vincularse antes de enviar contenido.")?;
+    let mut offer = read_offer(stream)?;
+    // El nombre visible procede de la identidad guardada, nunca del envío entrante.
+    offer.sender = device.name;
+    if cancelled(cancel) || !store.enabled() || store.known(&certificate).is_none() {
+        return Err("Recepción desactivada o equipo olvidado.".into());
+    }
+    finish_receive(downloads, stream, offer, cancel, event).map(Session::Received)
+}
+
+fn service_info(port: u16, certificate: &[u8], pairing: bool) -> Result<ServiceInfo> {
+    let code = certificate_code(certificate);
+    let mut properties = vec![
+        TxtProperty::from(("name", local_name())),
+        TxtProperty::from(("protocol", "2")),
+        TxtProperty::from(("pairing", if pairing { "1" } else { "0" })),
+    ];
     for (index, part) in certificate.chunks(200).enumerate() {
         properties.push(TxtProperty::from((format!("cert{index}"), part)));
     }
-    let host = format!("notchisla-{code}.local.");
-    let service = ServiceInfo::new(
+    Ok(ServiceInfo::new(
         SERVICE,
         &code,
-        &host,
+        &format!("notchisla-{code}.local."),
         "",
-        listener.local_addr()?.port(),
+        port,
         properties,
     )?
-    .enable_addr_auto();
-    let fullname = service.get_fullname().to_owned();
-    let daemon = Discovery(ServiceDaemon::new()?);
-    daemon.0.register(service)?;
-    event(ReceiveEvent::Ready(code));
+    .enable_addr_auto())
+}
 
-    let deadline = Instant::now() + RECEIVE_TIME;
-    let incoming = loop {
-        if Instant::now() >= deadline || cancel.try_recv().is_ok() {
-            break None;
+pub fn serve(
+    downloads: PathBuf,
+    store: Arc<Store>,
+    pairing: Arc<Pairing>,
+    cancel: Receiver<()>,
+    mut event: impl FnMut(ReceiveEvent),
+) -> Result<()> {
+    let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0))?;
+    listener.set_nonblocking(true)?;
+    let config = server_config(store.clone(), pairing.clone())?;
+    let certificate = store.credentials().0;
+    let port = listener.local_addr()?.port();
+    let daemon = Discovery(ServiceDaemon::new()?);
+    let mut advertised_pairing = pairing.is_open();
+    let info = service_info(port, &certificate, advertised_pairing)?;
+    let fullname = info.get_fullname().to_owned();
+    daemon.0.register(info)?;
+    event(ReceiveEvent::Ready(certificate_code(&certificate)));
+    while !cancelled(&cancel) && store.enabled() {
+        if advertised_pairing != pairing.is_open() {
+            advertised_pairing = pairing.is_open();
+            daemon
+                .0
+                .register(service_info(port, &certificate, advertised_pairing)?)?;
         }
         match listener.accept() {
             Ok((socket, address)) => {
@@ -449,40 +756,54 @@ pub fn receive(
                     ServerConnection::new(config.clone())?,
                     Socket::new(socket, Duration::from_secs(3)),
                 );
-                if let Ok(offer) = read_offer(&mut stream) {
-                    break Some((stream, offer));
+                let result = session(
+                    &downloads,
+                    &mut stream,
+                    &store,
+                    &pairing,
+                    &cancel,
+                    &mut event,
+                );
+                match result {
+                    Ok(Session::Paired(name)) => event(ReceiveEvent::Paired(name)),
+                    result => {
+                        // Una sola vista previa a la vez: espera a que la UI termine antes de aceptar otra.
+                        // Errores de handshake de equipos desconocidos no generan avisos ni diálogos.
+                        let known = stream
+                            .conn
+                            .peer_certificates()
+                            .and_then(|chain| chain.first())
+                            .is_some_and(|cert| store.known(cert).is_some());
+                        let result = match result {
+                            Ok(Session::Received(received)) => Ok(received),
+                            Err(error) if known => Err(error),
+                            _ => continue,
+                        };
+                        let (resume, resumed) = std::sync::mpsc::channel();
+                        event(ReceiveEvent::Completed { result, resume });
+                        while !cancelled(&cancel) {
+                            match resumed.recv_timeout(Duration::from_millis(100)) {
+                                Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                                    break
+                                }
+                                Err(_) => {}
+                            }
+                        }
+                    }
                 }
             }
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                 if cancel.recv_timeout(Duration::from_millis(100)).is_ok() {
-                    break None;
+                    break;
                 }
             }
             Err(error) => return Err(error.into()),
         }
-    };
+    }
     if let Ok(status) = daemon.0.unregister(&fullname) {
         let _ = status.recv_timeout(Duration::from_millis(500));
     }
-    drop(daemon);
-    drop(listener);
-
-    let Some((mut stream, offer)) = incoming else {
-        return Ok(None);
-    };
-    finish_receive(&downloads, &mut stream, offer, &cancel, event)
-}
-
-fn receiver_identity() -> Result<(CertificateDer<'static>, Arc<ServerConfig>)> {
-    let identity = rcgen::generate_simple_self_signed(vec![TLS_NAME.into()])?;
-    let certificate = identity.cert.der().clone();
-    let config = ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(
-            vec![certificate.clone()],
-            PrivatePkcs8KeyDer::from(identity.signing_key.serialize_der()).into(),
-        )?;
-    Ok((certificate, Arc::new(config)))
+    Ok(())
 }
 
 fn finish_receive(
@@ -496,7 +817,7 @@ fn finish_receive(
     // Los archivos siguen requiriendo confirmación antes de escribirse en Descargas.
     if offer.kind != ContentKind::Files {
         stream.sock.allow(TRANSFER_TIME, IO_TIME);
-        if cancel.try_recv().is_ok() {
+        if cancelled(cancel) {
             return Ok(None);
         }
         stream.write_all(&[1])?;
@@ -534,7 +855,7 @@ fn finish_receive(
         description: offer.description(),
         decision,
     });
-    let accepted = answer.recv_timeout(APPROVAL_TIME) == Ok(true) && cancel.try_recv().is_err();
+    let accepted = wait_decision(&answer, cancel);
     stream.sock.allow(TRANSFER_TIME, IO_TIME);
     if !accepted {
         stream.write_all(&[0])?;
@@ -590,58 +911,302 @@ mod tests {
     use super::*;
     use std::sync::mpsc;
 
+    fn identities() -> Result<(tempfile::TempDir, Arc<Store>, Arc<Store>)> {
+        let directory = tempfile::tempdir()?;
+        let first = Arc::new(Store::at(directory.path().join("first.dat"))?);
+        let second = Arc::new(Store::at(directory.path().join("second.dat"))?);
+        first.set_enabled(true)?;
+        second.set_enabled(true)?;
+        Ok((directory, first, second))
+    }
+
+    fn listen(store: &Store, pairable: bool) -> Result<(TcpListener, Peer)> {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
+        let std::net::SocketAddr::V4(address) = listener.local_addr()? else {
+            unreachable!()
+        };
+        let certificate = store.credentials().0;
+        let peer = Peer {
+            name: "Receptor".into(),
+            code: certificate_code(&certificate),
+            addresses: vec![address],
+            certificate,
+            pairable,
+        };
+        Ok((listener, peer))
+    }
+
     #[test]
-    fn texto_e_imagen_se_reciben_como_vista_previa_sin_descargas() -> Result<()> {
-        for payload in [
+    fn vincula_ambos_con_el_mismo_codigo_y_recibe_varios_envios_sin_reactivar() -> Result<()> {
+        let (directory, first, second) = identities()?;
+        let downloads = directory.path().join("downloads");
+        std::fs::create_dir(&downloads)?;
+        let (listener, peer) = listen(&second, true)?;
+        let pairing = Arc::new(Pairing::default());
+        pairing.open();
+        let config = server_config(second.clone(), pairing.clone())?;
+        let server_store = second.clone();
+        let (codes, code) = mpsc::channel();
+        let server = std::thread::spawn(move || -> Result<Vec<Option<Received>>> {
+            let (_stop, cancel) = mpsc::channel();
+            let mut received = Vec::new();
+            for index in 0..5 {
+                let (socket, _) = listener.accept()?;
+                let mut stream = StreamOwned::new(
+                    ServerConnection::new(config.clone())?,
+                    Socket::new(socket, IO_TIME),
+                );
+                let result = session(
+                    &downloads,
+                    &mut stream,
+                    &server_store,
+                    &pairing,
+                    &cancel,
+                    &mut |event| match event {
+                        ReceiveEvent::Pair { code, decision, .. } => {
+                            codes.send(code).unwrap();
+                            decision.send(true).unwrap();
+                        }
+                        ReceiveEvent::Offer { decision, .. } => {
+                            decision.send(index != 4).unwrap();
+                        }
+                        _ => panic!("evento inesperado"),
+                    },
+                )?;
+                match result {
+                    Session::Paired(_) => {
+                        assert_eq!(index, 0);
+                        assert!(!pairing.is_open());
+                    }
+                    Session::Received(result) => received.push(result),
+                }
+            }
+            Ok(received)
+        });
+        pair(&first, peer.clone(), |_, displayed| {
+            assert_eq!(displayed, code.recv_timeout(IO_TIME).unwrap());
+            true
+        })?;
+        assert!(first.known(&second.credentials().0).is_some());
+        assert!(second.known(&first.credentials().0).is_some());
+        // Reabrir el almacén simula reiniciar la app: conserva claves y confianza.
+        let restored = Store::at(directory.path().join("first.dat"))?;
+        send(
+            &restored,
+            peer.clone(),
             Payload::Text("Hola 👋\r\nsegunda línea".into()),
-            Payload::Image(vec![1, 2, 3, 4]),
-        ] {
-            let directory = tempfile::tempdir()?;
+        )?;
+        send(&restored, peer.clone(), Payload::Image(vec![1, 2, 3, 4]))?;
+        let file = directory.path().join("documento.txt");
+        std::fs::write(&file, "archivo aceptado")?;
+        send(&restored, peer.clone(), Payload::Files(vec![file.clone()]))?;
+        assert!(send(&restored, peer, Payload::Files(vec![file])).is_err());
+        let mut received = server.join().unwrap()?.into_iter();
+        let Some(Received::Text { sender, text }) = received.next().unwrap() else {
+            panic!("esperaba texto")
+        };
+        assert_eq!(sender, local_name());
+        assert_eq!(text, "Hola 👋\r\nsegunda línea");
+        let Some(Received::Image {
+            directory: temporary,
+            path,
+            ..
+        }) = received.next().unwrap()
+        else {
+            panic!("esperaba imagen")
+        };
+        assert_eq!(std::fs::read(&path)?, [1, 2, 3, 4]);
+        drop(temporary);
+        assert!(!path.exists());
+        let Some(Received::Files(path)) = received.next().unwrap() else {
+            panic!("esperaba archivo")
+        };
+        assert_eq!(
+            std::fs::read_to_string(path.join("01 - documento.txt"))?,
+            "archivo aceptado"
+        );
+        assert!(received.next().unwrap().is_none());
+        assert_eq!(directory.path().join("downloads").read_dir()?.count(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn vincular_requiere_confirmacion_de_ambos_equipos() -> Result<()> {
+        for (local, remote) in [(false, true), (true, false), (false, false)] {
+            let (directory, first, second) = identities()?;
+            let (listener, peer) = listen(&second, true)?;
+            let pairing = Arc::new(Pairing::default());
+            pairing.open();
+            let config = server_config(second.clone(), pairing.clone())?;
+            let other = second.clone();
             let downloads = directory.path().to_owned();
-            let (certificate, config) = receiver_identity()?;
-            let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
-            let std::net::SocketAddr::V4(address) = listener.local_addr()? else {
-                unreachable!()
-            };
-            let server = std::thread::spawn(move || -> Result<_> {
+            let server = std::thread::spawn(move || -> Result<()> {
                 let (socket, _) = listener.accept()?;
                 let mut stream =
                     StreamOwned::new(ServerConnection::new(config)?, Socket::new(socket, IO_TIME));
-                let offer = read_offer(&mut stream)?;
                 let (_stop, cancel) = mpsc::channel();
-                finish_receive(&downloads, &mut stream, offer, &cancel, |_| {
-                    panic!("una vista previa no pregunta dónde guardar")
-                })
+                assert!(session(
+                    &downloads,
+                    &mut stream,
+                    &other,
+                    &pairing,
+                    &cancel,
+                    &mut |event| {
+                        if let ReceiveEvent::Pair { decision, .. } = event {
+                            let _ = decision.send(remote);
+                        }
+                    }
+                )
+                .is_err());
+                Ok(())
             });
-            send(
-                Peer {
-                    name: "Prueba".into(),
-                    code: certificate_code(&certificate),
-                    addresses: vec![address],
-                    certificate,
-                },
-                payload,
-            )?;
-            match server.join().unwrap()?.unwrap() {
-                Received::Text { text, .. } => assert_eq!(text, "Hola 👋\r\nsegunda línea"),
-                Received::Image {
-                    directory, path, ..
-                } => {
-                    assert_eq!(std::fs::read(&path)?, [1, 2, 3, 4]);
-                    drop(directory);
-                    assert!(!path.exists());
-                }
-                Received::Files(_) => panic!("no debe guardarse en Descargas"),
-            }
-            assert_eq!(directory.path().read_dir()?.count(), 0);
+            assert!(pair(&first, peer, |_, _| local).is_err());
+            server.join().unwrap()?;
+            assert!(first.devices().is_empty());
+            assert!(second.devices().is_empty());
         }
         Ok(())
     }
 
     #[test]
+    fn desconocidos_y_revocados_no_pueden_enviar_ni_abrir_dialogos() -> Result<()> {
+        for pairing_open in [false, true] {
+            let (directory, attacker, receiver) = identities()?;
+            // El atacante conoce al receptor; el receptor no confía en el atacante.
+            attacker.remember("Receptor".into(), receiver.credentials().0.to_vec())?;
+            let (listener, peer) = listen(&receiver, false)?;
+            let pairing = Arc::new(Pairing::default());
+            if pairing_open {
+                pairing.open();
+            }
+            let config = server_config(receiver.clone(), pairing.clone())?;
+            let downloads = directory.path().to_owned();
+            let server = std::thread::spawn(move || -> Result<()> {
+                let (socket, _) = listener.accept()?;
+                let mut stream =
+                    StreamOwned::new(ServerConnection::new(config)?, Socket::new(socket, IO_TIME));
+                let (_stop, cancel) = mpsc::channel();
+                assert!(session(
+                    &downloads,
+                    &mut stream,
+                    &receiver,
+                    &pairing,
+                    &cancel,
+                    &mut |_| panic!("un desconocido no puede abrir diálogos de contenido")
+                )
+                .is_err());
+                Ok(())
+            });
+            assert!(send(&attacker, peer, Payload::Text("intruso".into())).is_err());
+            server.join().unwrap()?;
+        }
+        let (directory, first, second) = identities()?;
+        first.remember("Segundo".into(), second.credentials().0.to_vec())?;
+        second.remember("Primero".into(), first.credentials().0.to_vec())?;
+        let pairing = Arc::new(Pairing::default());
+        let config = server_config(second.clone(), pairing.clone())?;
+        // El verificador ya existe: olvidar debe surtir efecto sin reiniciar el listener.
+        second.forget(&first.credentials().0)?;
+        let (listener, peer) = listen(&second, false)?;
+        let downloads = directory.path().to_owned();
+        let server = std::thread::spawn(move || -> Result<()> {
+            let (socket, _) = listener.accept()?;
+            let mut stream =
+                StreamOwned::new(ServerConnection::new(config)?, Socket::new(socket, IO_TIME));
+            let (_stop, cancel) = mpsc::channel();
+            assert!(session(
+                &downloads,
+                &mut stream,
+                &second,
+                &pairing,
+                &cancel,
+                &mut |_| panic!("equipo revocado")
+            )
+            .is_err());
+            Ok(())
+        });
+        assert!(send(&first, peer, Payload::Text("revocado".into())).is_err());
+        server.join().unwrap()?;
+        Ok(())
+    }
+
+    #[test]
+    fn nombre_igual_no_sustituye_identidad_y_rechaza_protocolo_anterior() -> Result<()> {
+        let (directory, first, second) = identities()?;
+        let impostor = Store::at(directory.path().join("impostor.dat"))?;
+        first.remember("Mi PC".into(), second.credentials().0.to_vec())?;
+        let (_, mut peer) = listen(&impostor, false)?;
+        peer.name = "Mi PC".into();
+        assert!(send(&first, peer, Payload::Text("secreto".into())).is_err());
+        let legacy = Offer {
+            version: 1,
+            sender: "Anterior".into(),
+            kind: ContentKind::Text,
+            entries: vec![Entry {
+                name: "Mensaje.txt".into(),
+                bytes: 1,
+            }],
+        };
+        assert!(legacy.validate().is_err());
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requiere una interfaz IPv4 local y tráfico mDNS permitido"]
+    fn descubre_vincula_y_comparte_en_la_red_local() -> Result<()> {
+        let (directory, first, second) = identities()?;
+        let pairing = Arc::new(Pairing::default());
+        pairing.open();
+        let expected = second.credentials().0;
+        let downloads = directory.path().to_owned();
+        let (stop, cancel) = mpsc::channel();
+        let (ready, started) = mpsc::channel();
+        let (codes, code) = mpsc::channel();
+        let (texts, text) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            serve(downloads, second, pairing, cancel, |event| match event {
+                ReceiveEvent::Ready(_) => {
+                    ready.send(()).unwrap();
+                }
+                ReceiveEvent::Pair { code, decision, .. } => {
+                    codes.send(code).unwrap();
+                    decision.send(true).unwrap();
+                }
+                ReceiveEvent::Completed { result, resume } => {
+                    let Some(Received::Text { text, .. }) = result.unwrap() else {
+                        panic!("esperaba texto")
+                    };
+                    texts.send(text).unwrap();
+                    resume.send(()).unwrap();
+                }
+                ReceiveEvent::Paired(_) => {}
+                _ => panic!("evento inesperado"),
+            })
+        });
+        let result = (|| -> Result<()> {
+            started.recv_timeout(IO_TIME)?;
+            let peer = discover(&first)?
+                .into_iter()
+                .find(|peer| peer.pairable && peer.certificate == expected)
+                .ok_or("No se descubrió el receptor de prueba.")?;
+            pair(&first, peer.clone(), |_, displayed| {
+                code.recv_timeout(IO_TIME)
+                    .is_ok_and(|remote| remote == displayed)
+            })?;
+            send(&first, peer, Payload::Text("prueba de red local".into()))?;
+            assert_eq!(text.recv_timeout(IO_TIME)?, "prueba de red local");
+            Ok(())
+        })();
+        let _ = stop.send(());
+        drop(stop);
+        worker.join().unwrap()?;
+        result
+    }
+
+    #[test]
     fn valida_limites_de_vista_previa_y_compatibilidad() -> Result<()> {
         let mut offer: Offer = serde_json::from_str(
-            r#"{"version":1,"sender":"Anterior","entries":[{"name":"Mensaje.txt","bytes":4}]}"#,
+            r#"{"version":2,"sender":"Anterior","entries":[{"name":"Mensaje.txt","bytes":4}]}"#,
         )?;
         assert!(offer.kind == ContentKind::Files);
         offer.kind = ContentKind::Text;
@@ -657,105 +1222,6 @@ mod tests {
             bytes: 0,
         });
         assert!(offer.validate().is_err());
-        Ok(())
-    }
-
-    #[test]
-    #[ignore = "requiere una interfaz IPv4 local y tráfico mDNS permitido"]
-    fn descubre_y_envia_en_la_red_local() -> Result<()> {
-        let directory = tempfile::tempdir()?;
-        let source = tempfile::tempdir()?;
-        let photo = source.path().join("foto.png");
-        let document = source.path().join("archivo.bin");
-        std::fs::write(&photo, [0x89, b'P', b'N', b'G'])?;
-        std::fs::write(&document, [0, 1, 2, 255])?;
-        let downloads = directory.path().to_owned();
-        let (stop, cancel) = mpsc::channel();
-        let (ready, code) = mpsc::channel();
-        let worker = std::thread::spawn(move || {
-            receive(downloads, cancel, |event| match event {
-                ReceiveEvent::Ready(value) => ready.send(value).unwrap(),
-                ReceiveEvent::Offer { decision, .. } => decision.send(true).unwrap(),
-            })
-        });
-        let code = code.recv_timeout(IO_TIME)?;
-        let result = (|| -> Result<()> {
-            let peer = discover()?
-                .into_iter()
-                .find(|peer| peer.code == code)
-                .ok_or("No se descubrió el receptor de prueba.")?;
-            send(peer, Payload::Files(vec![photo, document]))
-        })();
-        let _ = stop.send(());
-        let saved = worker.join().unwrap();
-        result?;
-        let Received::Files(path) = saved?.unwrap() else {
-            panic!("esperaba archivos")
-        };
-        assert_eq!(
-            std::fs::read(path.join("01 - foto.png"))?,
-            [0x89, b'P', b'N', b'G']
-        );
-        assert_eq!(
-            std::fs::read(path.join("02 - archivo.bin"))?,
-            [0, 1, 2, 255]
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn solo_guarda_el_envio_aceptado_y_autentica_el_certificado() -> Result<()> {
-        for (trusted, accepted) in [(true, true), (true, false), (false, true)] {
-            let directory = tempfile::tempdir()?;
-            let downloads = directory.path().to_owned();
-            let (certificate, config) = receiver_identity()?;
-            let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
-            let std::net::SocketAddr::V4(address) = listener.local_addr()? else {
-                unreachable!()
-            };
-            let server = std::thread::spawn(move || -> Result<_> {
-                let (socket, _) = listener.accept()?;
-                let mut stream =
-                    StreamOwned::new(ServerConnection::new(config)?, Socket::new(socket, IO_TIME));
-                let offer = read_offer(&mut stream)?;
-                let (_stop, cancel) = mpsc::channel();
-                finish_receive(&downloads, &mut stream, offer, &cancel, |event| {
-                    if let ReceiveEvent::Offer { decision, .. } = event {
-                        decision.send(accepted).unwrap();
-                    }
-                })
-            });
-            let certificate = if trusted {
-                certificate
-            } else {
-                receiver_identity()?.0
-            };
-            let peer = Peer {
-                name: "Receptor de prueba".into(),
-                code: certificate_code(&certificate),
-                addresses: vec![address],
-                certificate,
-            };
-            let source = tempfile::tempdir()?;
-            let path = source.path().join("prueba.txt");
-            std::fs::write(&path, "hola desde la isla 👋")?;
-            let result = send(peer, Payload::Files(vec![path]));
-            let saved = server.join().unwrap();
-            if trusted && accepted {
-                result?;
-                let Received::Files(path) = saved?.unwrap() else {
-                    panic!("esperaba archivos")
-                };
-                assert_eq!(
-                    std::fs::read_to_string(path.join("01 - prueba.txt"))?,
-                    "hola desde la isla 👋"
-                );
-            } else {
-                assert!(result.is_err());
-                assert!(saved.is_err() || saved?.is_none());
-                assert_eq!(directory.path().read_dir()?.count(), 0);
-            }
-        }
         Ok(())
     }
 
