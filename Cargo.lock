@@ -334,7 +334,7 @@ dependencies = [
 
 [[package]]
 name = "notch-isla"
-version = "0.5.3"
+version = "0.5.5"
 dependencies = [
  "embed-resource",
  "hidapi",
