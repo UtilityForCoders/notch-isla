@@ -12,12 +12,9 @@ use crate::hotkey::{self, Hotkey};
 
 const KEY: PCWSTR = w!("Software\\NotchIsla");
 
-/// Opciones de "Ocultar sola tras" en segundos; 0 = nunca.
-pub const HIDE_DELAYS: [u32; 5] = [3, 5, 10, 30, 0];
-
 #[derive(Clone)]
 pub struct Settings {
-    /// Segundos sin usarla antes de ocultarse en el borde superior; 0 = no se oculta.
+    /// Preferencia heredada, conservada por compatibilidad. La isla ya no se oculta sola.
     pub hide_delay: u32,
     /// Pantalla elegida (nombre de dispositivo, como "\\.\DISPLAY2"); vacío = la principal.
     pub monitor: String,

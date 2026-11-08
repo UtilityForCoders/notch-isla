@@ -94,6 +94,8 @@ pub struct TextRenderer {
     time: IDWriteTextFormat,
     lyric_current: IDWriteTextFormat,
     lyric_secondary: IDWriteTextFormat,
+    label_lines: Vec<Option<Line>>,
+    label_styles: [bool; 16],
     title_line: Option<Line>,
     subtitle_line: Option<Line>,
     // Una entrada por etiqueta: memoria acotada aunque cambien canción y tiempos.
@@ -147,6 +149,8 @@ impl TextRenderer {
                 time_lines: [None, None],
                 seek_line: None,
                 lyric_cache: Vec::with_capacity(LYRIC_CACHE),
+                label_lines: (0..16).map(|_| None).collect(),
+                label_styles: [false; 16],
                 title_line: None,
                 subtitle_line: None,
                 scale,
@@ -176,6 +180,7 @@ impl TextRenderer {
             self.time = time;
             self.lyric_current = lyric_current;
             self.lyric_secondary = lyric_secondary;
+            self.label_lines.iter_mut().for_each(|line| *line = None);
             self.title_line = None;
             self.subtitle_line = None;
             self.time_lines = [None, None];
@@ -264,6 +269,66 @@ impl TextRenderer {
                 .PushAxisAlignedClip(&zone_rect, D2D1_ANTIALIAS_MODE_ALIASED);
             self.target.Clear(Some(&D2D1_COLOR_F::default()));
 
+            for (index, label) in areas.labels.iter().take(16).enumerate() {
+                if self.label_styles[index] != label.strong {
+                    self.label_lines[index] = None;
+                    self.label_styles[index] = label.strong;
+                }
+                let format = if label.strong {
+                    &self.title
+                } else {
+                    &self.subtitle
+                };
+                let clip = D2D_RECT_F {
+                    left: label.x,
+                    top: label.y,
+                    right: label.x + label.w,
+                    bottom: label.y + label.h,
+                };
+                self.target
+                    .PushAxisAlignedClip(&clip, D2D1_ANTIALIAS_MODE_ALIASED);
+                if label.scroll {
+                    if let Some(line) = line_for(
+                        &self.dwrite,
+                        format,
+                        &mut self.label_lines[index],
+                        &label.text,
+                    ) {
+                        let area = crate::island::TextArea {
+                            x: label.x,
+                            w: label.w,
+                            cy: label.y,
+                            alpha: label.alpha,
+                        };
+                        track(draw_line(
+                            &self.target,
+                            &self.brush,
+                            line,
+                            &area,
+                            label.y,
+                            label.h,
+                            (0.9, 0.93, 0.98),
+                            s,
+                            t,
+                        ));
+                    }
+                } else {
+                    draw_simple_text(
+                        &self.target,
+                        &self.dwrite,
+                        format,
+                        &self.brush,
+                        &mut self.label_lines[index],
+                        &label.text,
+                        label.x,
+                        label.y,
+                        label.w,
+                        label.h,
+                        (0.9, 0.93, 0.98, label.alpha),
+                    );
+                }
+                self.target.PopAxisAlignedClip();
+            }
             // 1. Título y artista
             if let Some(line) = title_line {
                 track(draw_line(
@@ -583,6 +648,14 @@ fn signature(areas: &LayoutAreas, title: &str, subtitle: &str) -> u64 {
         [s.x, s.bar_cy, s.min_x, s.max_x, s.alpha]
             .into_iter()
             .for_each(&mut f);
+    }
+    for label in &areas.labels {
+        label.text.hash(&mut h);
+        label.strong.hash(&mut h);
+        label.scroll.hash(&mut h);
+        for value in [label.x, label.y, label.w, label.h, label.alpha] {
+            h.write_u32(value.to_bits());
+        }
     }
     (title, subtitle).hash(&mut h);
     areas

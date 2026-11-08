@@ -15,10 +15,10 @@ use tiny_skia::{
 const COLLAPSED: (f32, f32, f32) = (88.0, 34.0, 17.0);
 
 /// Expandida compacta (sin letra): tarjeta flotante con reproductor.
-pub const EXPANDED_COMPACT: (f32, f32, f32) = (252.0, 138.0, 22.0);
+pub const EXPANDED_COMPACT: (f32, f32, f32) = (252.0, 190.0, 22.0);
 
 /// Expandida amplia (con letra sincronizada): tarjeta completa con reproductor y letra.
-pub const EXPANDED_LYRICS: (f32, f32, f32) = (520.0, 138.0, 22.0);
+pub const EXPANDED_LYRICS: (f32, f32, f32) = (520.0, 190.0, 22.0);
 
 /// Con un aviso del sistema (salida de audio, temporizador, atajo, actualización): una sola
 /// fila con el ícono y los textos, sin el espacio del reproductor.
@@ -28,6 +28,7 @@ const NOTICE_ICON: (f32, f32, f32) = (9.0, 38.0, 9.0);
 
 /// Separación lógica entre el borde superior de la pantalla y la isla flotante (sin tocar el techo).
 const TOP_GAP: f32 = 8.0;
+pub const HEADER_HEIGHT: f32 = 40.0;
 pub const EXPANDED_CONTENT_START: f32 = 0.45;
 
 /// Medidas del panel izquierdo de reproducción (píxeles lógicos).
@@ -123,6 +124,8 @@ pub enum Button {
 /// Lo que hay bajo el mouse en la isla expandida.
 #[derive(Clone, Copy, PartialEq)]
 pub enum Hit {
+    Tab(crate::workspace::Page),
+    Share(crate::workspace::ShareAction),
     Button(Button),
     /// Sobre la barra de progreso, en esa fracción (0 a 1) de la canción.
     Seek(f32),
@@ -215,7 +218,19 @@ pub struct LyricsInfo {
 }
 
 /// Zonas de texto en píxeles físicos que DirectWrite dibuja después del fondo.
+pub struct LabelArea {
+    pub text: String,
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    pub alpha: f32,
+    pub strong: bool,
+    pub scroll: bool,
+}
+
 pub struct LayoutAreas {
+    pub labels: Vec<LabelArea>,
     pub text: TextArea,
     pub time: Option<TimeArea>,
     pub lyrics: Option<LyricsArea>,
@@ -350,7 +365,7 @@ impl Geometry {
         let s = self.scale;
         (
             self.x0 + COVER_PAD_X * s,
-            self.y0 + COVER_PAD_TOP * s,
+            self.y0 + (COVER_PAD_TOP + HEADER_HEIGHT) * s,
             COVER_SIZE * s,
         )
     }
@@ -362,7 +377,7 @@ impl Geometry {
         let pw = PLAYER_W * s;
         let bar_x = px + 40.0 * s;
         let bar_w = pw - 82.0 * s;
-        let bar_cy = self.y0 + 86.0 * s;
+        let bar_cy = self.y0 + (86.0 + HEADER_HEIGHT) * s;
         (bar_x, bar_cy, bar_w.max(10.0 * s))
     }
 }
@@ -446,7 +461,10 @@ pub fn bounds(
     // en la isla expandida y se desvanece: asoma fuera del cuadro negro, que es más chico.
     // La zona lo cubre entero, si no quedarían restos de esos cuadros al encogerse.
     if g.alpha > 0.0 {
-        let (w, h) = expanded_size(shape);
+        let (w, mut h) = expanded_size(shape);
+        if shape.1 < 1.0 {
+            h = h.max(EXPANDED_COMPACT.1);
+        }
         let (w, h) = (w * OVERSHOOT * scale, h * OVERSHOOT * scale);
         x0 = x0.min((max_w - w) / 2.0);
         x1 = x1.max(g.x0 + w);
@@ -481,7 +499,7 @@ fn text_column(g: &Geometry, s: f32) -> (f32, f32) {
 fn button_centers(g: &Geometry, s: f32) -> [(Button, f32, f32); 4] {
     let px = g.x0 + COVER_PAD_X * s;
     let pw = PLAYER_W * s;
-    let cy = g.y0 + 114.0 * s;
+    let cy = g.y0 + (114.0 + HEADER_HEIGHT) * s;
     let lyrics_cx = px + 14.0 * s;
     let media_cx = px + 44.0 * s + (pw - 44.0 * s) / 2.0;
     let gap = 36.0 * s;
@@ -579,6 +597,7 @@ pub fn draw(
     time_info: Option<TimeInfo>,
     lyrics_info: Option<LyricsInfo>,
     translucent: bool,
+    page: crate::workspace::Page,
 ) -> Option<LayoutAreas> {
     let g = geometry(
         pixmap.width() as f32,
@@ -666,6 +685,17 @@ pub fn draw(
         draw_bars(pixmap, start_x + size + spacing, g.cy(), s, c, t, mini);
     }
 
+    if controls.is_none() && mini > 0.0 {
+        paint.set_color_rgba8(120, 190, 255, (mini * 235.0) as u8);
+        draw_notice_icon(
+            pixmap,
+            &paint,
+            NoticeIcon::Wireless,
+            g.x0 + g.w / 2.0,
+            g.cy(),
+            s * 0.8,
+        );
+    }
     if g.alpha <= 0.0 {
         return None;
     }
@@ -674,6 +704,7 @@ pub fn draw(
     if let Some(n) = notice {
         let text_area = draw_notice(pixmap, &g, n.0, n.1);
         return Some(LayoutAreas {
+            labels: Vec::new(),
             text: text_area,
             time: None,
             lyrics: None,
@@ -681,6 +712,20 @@ pub fn draw(
         });
     }
 
+    if page == crate::workspace::Page::Share {
+        return Some(LayoutAreas {
+            labels: Vec::new(),
+            text: TextArea {
+                x: g.x0,
+                w: 0.0,
+                cy: g.cy(),
+                alpha: 0.0,
+            },
+            time: None,
+            lyrics: None,
+            seek: None,
+        });
+    }
     // Panel izquierdo: carátula de la canción
     let (cover_x, cover_y, size) = g.cover_rect();
     draw_cover(
@@ -760,7 +805,7 @@ pub fn draw(
     let title_area = TextArea {
         x: text_x,
         w: text_w,
-        cy: g.y0 + (COVER_PAD_TOP + COVER_SIZE / 2.0) * s,
+        cy: g.y0 + (COVER_PAD_TOP + HEADER_HEIGHT + COVER_SIZE / 2.0) * s,
         alpha: g.alpha,
     };
 
@@ -771,7 +816,7 @@ pub fn draw(
         TimeArea {
             cur_x: px,
             rem_x: px + pw - 38.0 * s,
-            y: g.y0 + 78.0 * s,
+            y: g.y0 + (78.0 + HEADER_HEIGHT) * s,
             current: ti.current,
             remaining: ti.remaining,
             alpha: g.alpha,
@@ -789,7 +834,7 @@ pub fn draw(
                 Some(LyricsArea {
                     x: lyrics_x,
                     w: lyrics_w,
-                    cy: g.cy(),
+                    cy: g.y0 + HEADER_HEIGHT * s + (g.h - HEADER_HEIGHT * s) / 2.0,
                     lines: li.lines,
                     shift: li.shift,
                     sung: li.sung,
@@ -803,6 +848,7 @@ pub fn draw(
     };
 
     Some(LayoutAreas {
+        labels: Vec::new(),
         text: title_area,
         time: time_area,
         lyrics: lyrics_area,
@@ -844,6 +890,7 @@ pub fn draw_notice_card(
         stroke_path(pixmap, &paint, &path, 1.0);
     }
     LayoutAreas {
+        labels: Vec::new(),
         text: draw_notice_content(pixmap, &g, notice, text_w, 0.8),
         time: None,
         lyrics: None,
@@ -1626,6 +1673,7 @@ mod tests {
                 None,
                 None,
                 false,
+                crate::workspace::Page::Music,
             );
         }
         start.elapsed().as_secs_f64() * 1000.0 / runs as f64
@@ -1701,6 +1749,7 @@ mod tests {
                         None,
                         None,
                         false,
+                        crate::workspace::Page::Music,
                     );
                     let (x0, y0, x1, y1) = bounds(pw as f32, ph as f32, scale, p, presence, shape);
                     for (i, px) in pixmap.pixels().iter().enumerate() {

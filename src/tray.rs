@@ -24,7 +24,7 @@ use crate::hotkey::{self, Hotkey};
 use crate::menu::{self, Item};
 use crate::monitors::{self, Monitor};
 use crate::routing::Output;
-use crate::settings::{Settings, HIDE_DELAYS};
+use crate::settings::Settings;
 use crate::{autostart, island};
 
 /// Mensaje que Windows nos manda cuando hay clics sobre el ícono.
@@ -54,7 +54,6 @@ const CMD_BATTERY_REFRESH: usize = 21;
 const CMD_CONNECTION_NOTICES: usize = 22;
 const CMD_SHARE: usize = 23;
 /// Las opciones de los submenús van numeradas a partir de estas bases.
-const CMD_HIDE_DELAY: usize = 100;
 const CMD_MONITOR: usize = 200;
 const CMD_TIMER: usize = 300;
 /// Menú de salida de audio de la isla.
@@ -73,8 +72,6 @@ pub enum Command {
     ToggleAutostart,
     Update,
     Exit,
-    /// Segundos para ocultarse sola (0 = nunca).
-    HideDelay(u32),
     /// Posición en la lista de pantallas.
     Monitor(usize),
     /// Minutos del temporizador.
@@ -214,22 +211,6 @@ pub fn build_items(state: &MenuState) -> Vec<Item> {
         items.push(action(CMD_UPDATE, label, false));
         items.push(Item::Separator);
     }
-
-    let delays = HIDE_DELAYS
-        .iter()
-        .enumerate()
-        .map(|(i, &secs)| {
-            let label = match secs {
-                0 => "Nunca".to_string(),
-                s => format!("{s} segundos"),
-            };
-            action(CMD_HIDE_DELAY + i, &label, settings.hide_delay == secs)
-        })
-        .collect();
-    items.push(Item::Group {
-        label: "Ocultarse sola tras".to_string(),
-        items: delays,
-    });
 
     if state.monitors.len() > 1 {
         let current = monitors::find(&settings.monitor);
@@ -383,8 +364,6 @@ fn id_to_command(id: usize, state: &MenuState) -> Option<Command> {
         _ => {
             if let Some(i) = pick(CMD_BLUR_RADIUS, 41) {
                 Some(Command::BlurRadius(i as u32))
-            } else if let Some(i) = pick(CMD_HIDE_DELAY, HIDE_DELAYS.len()) {
-                Some(Command::HideDelay(HIDE_DELAYS[i]))
             } else if let Some(i) = pick(CMD_MONITOR, state.monitors.len()) {
                 Some(Command::Monitor(i))
             } else {
