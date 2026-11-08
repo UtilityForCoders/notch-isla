@@ -19,6 +19,7 @@ mod projector;
 mod routing;
 mod settings;
 mod share;
+mod share_identity;
 mod share_preview;
 mod share_ui;
 mod spring;
