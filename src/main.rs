@@ -3509,6 +3509,192 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore = "abre la isla de prueba durante 45 segundos para revisar las pestañas"]
+    fn revisar_panel_principal() {
+        unsafe {
+            CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok().unwrap();
+            let instance = GetModuleHandleW(None).unwrap();
+            let class = w!("NotchWorkspacePreview");
+            RegisterClassExW(&WNDCLASSEXW {
+                cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+                lpfnWndProc: Some(wndproc),
+                hInstance: instance.into(),
+                lpszClassName: class,
+                ..Default::default()
+            });
+            let hwnd = CreateWindowExW(
+                WS_EX_LAYERED | windows::Win32::UI::WindowsAndMessaging::WS_EX_APPWINDOW,
+                class,
+                w!("Notch Isla · Panel de prueba"),
+                WS_POPUP,
+                0,
+                0,
+                1,
+                1,
+                None,
+                None,
+                Some(instance.into()),
+                None,
+            )
+            .unwrap();
+            let mut settings = Settings::load();
+            settings.pinned_expanded = true;
+            settings.hide_fullscreen = false;
+            settings.high_refresh = false;
+            settings.translucent = false;
+            settings.lyrics_island = false;
+            settings.lyrics_projector = false;
+            let mut app = App::new(hwnd, monitors::find(""), settings).unwrap();
+            app.tray.remove();
+            app.pos.y += 150;
+            app.presence.reset(1.0);
+            app.spring.reset(1.0);
+            APP.with(|cell| *cell.borrow_mut() = Some(app));
+            with_app(|app| {
+                app.update_visibility();
+                app.redraw();
+            });
+            SetTimer(Some(hwnd), 999, 100, None);
+            let seconds = std::env::var("NOTCH_PREVIEW_SECONDS")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(45);
+            let until = Instant::now() + Duration::from_secs(seconds);
+            let mut msg = MSG::default();
+            while Instant::now() < until && GetMessageW(&mut msg, None, 0, 0).as_bool() {
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+                ui::promote_timers();
+            }
+            let _ = KillTimer(Some(hwnd), 999);
+            APP.with(|cell| cell.borrow_mut().take());
+            let _ = DestroyWindow(hwnd);
+        }
+    }
+
+    #[test]
+    fn isla_sin_musica_permanece_y_letra_solo_abre_con_contenido() {
+        unsafe {
+            CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok().unwrap();
+            let instance = GetModuleHandleW(None).unwrap();
+            let class = w!("NotchWorkspacePolicyTest");
+            RegisterClassExW(&WNDCLASSEXW {
+                cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+                lpfnWndProc: Some(default_proc),
+                hInstance: instance.into(),
+                lpszClassName: class,
+                ..Default::default()
+            });
+            let hwnd = CreateWindowExW(
+                WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                class,
+                class,
+                WS_POPUP,
+                -32000,
+                -32000,
+                1,
+                1,
+                None,
+                None,
+                Some(instance.into()),
+                None,
+            )
+            .unwrap();
+            let mut settings = Settings::load();
+            settings.translucent = false;
+            settings.hide_fullscreen = false;
+            settings.lyrics_island = true;
+            settings.lyrics_projector = false;
+            settings.high_refresh = false;
+            settings.pinned_expanded = false;
+            let mut app = App::new(hwnd, monitors::find(""), settings).unwrap();
+            app.tray.remove();
+            app.pos = POINT {
+                x: -32000,
+                y: -32000,
+            };
+            app.x_spring.reset(-32000.0);
+            app.monitor_bounds = RECT {
+                left: -32000,
+                top: -32000,
+                right: -30000,
+                bottom: -30000,
+            };
+            app.update_visibility();
+            assert!(app.visible && app.shown);
+            assert_eq!(app.spring.target(), 0.0);
+            app.end_linger();
+            assert!(!app.idle_hidden && app.visible);
+            let media = NowPlaying {
+                title: "Prueba local".into(),
+                artist: "Artista local".into(),
+                album: String::new(),
+                playing: false,
+                cover: None,
+                timeline: Some(media::Timeline {
+                    position: 0.0,
+                    duration: 120.0,
+                    read_at: Instant::now(),
+                }),
+                app_icon: None,
+                app_id: String::new(),
+                sessions: (0, 1),
+            };
+            let key = lyrics::key(&media.title, &media.artist);
+            app.lyrics.insert(key.clone(), Vec::new());
+            app.set_media(Some(media));
+            assert_eq!(app.lyrics_spring.target(), 0.0);
+            assert!(app.settings.lyrics_island);
+            app.set_lyrics(lyrics::Lyrics {
+                key,
+                lines: vec![lyrics::Verse {
+                    start: 0.0,
+                    text: "Letra disponible".into(),
+                    words: Vec::new(),
+                }],
+            });
+            assert_eq!(app.lyrics_spring.target(), 1.0);
+            app.select_page(workspace::Page::Share);
+            assert_eq!(app.lyrics_spring.target(), 0.0);
+            app.set_media(None);
+            assert!(app.visible);
+            app.spring.reset(1.0);
+            app.presence.reset(1.0);
+            let bounds = island::backdrop_geometry(
+                app.surface.width as f32,
+                app.surface.height as f32,
+                app.scale,
+                1.0,
+                1.0,
+                app.shape(),
+            );
+            assert!(
+                app.hit_at(bounds.0 + 40.0 * app.scale, bounds.1 + 20.0 * app.scale)
+                    == Some(Hit::Tab(workspace::Page::Music))
+            );
+            assert!(
+                app.hit_at(bounds.0 + 70.0 * app.scale, bounds.1 + 60.0 * app.scale)
+                    == Some(Hit::Share(workspace::ShareAction::Files))
+            );
+            app.toggle_hidden();
+            assert!(app.idle_hidden && !app.visible);
+            app.toggle_hidden();
+            assert!(!app.idle_hidden && app.visible);
+            app.presence.reset(1.0);
+            app.spring.reset(0.0);
+            app.lyrics_spring.reset(0.0);
+            let motion = app.render();
+            assert!(
+                timer_for(&motion, false, FRAME_MS).is_none(),
+                "la píldora sin música no debe animarse continuamente"
+            );
+            app.set_timer(None);
+            drop(app);
+            let _ = DestroyWindow(hwnd);
+        }
+    }
+
+    #[test]
     #[ignore = "prueba prolongada de refresco alto; NOTCH_STRESS_SECONDS controla su duración"]
     fn refresco_alto_no_satura_la_cola_ni_bloquea_temporizadores() {
         use std::cell::Cell;

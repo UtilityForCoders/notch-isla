@@ -190,3 +190,33 @@ pub fn draw(
     }
     labels
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn pestañas_y_acciones_coinciden_a_distintos_dpi() {
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            let bounds = (80.0, 8.0, 252.0 * scale, 190.0 * scale, 22.0 * scale);
+            for (hit, [x, y, w, h]) in regions(252.0, Page::Share) {
+                assert!(
+                    hit_test(
+                        bounds,
+                        scale,
+                        Page::Share,
+                        bounds.0 + (x + w / 2.0) * scale,
+                        bounds.1 + (y + h / 2.0) * scale
+                    ) == Some(hit)
+                );
+            }
+            assert!(hit_test(
+                bounds,
+                scale,
+                Page::Music,
+                bounds.0 + 60.0 * scale,
+                bounds.1 + 100.0 * scale
+            )
+            .is_none());
+        }
+    }
+}
