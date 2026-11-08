@@ -71,7 +71,7 @@ pub fn edge_strip_width(scale: f32) -> f32 {
 
 /// Línea de tiempo en el borde superior, donde estaba la isla contraída: indica que sigue ahí.
 /// Tocar la línea con el mouse la hace volver; todo su ancho recibe el mouse.
-/// `progress`: avance si la app lo informa; `update`: marca una versión nueva con un punto azul.
+/// `progress`: avance si la app lo informa; `update`: marca una versión nueva con un segmento azul.
 pub fn draw_edge_strip(
     pixmap: &mut Pixmap,
     scale: f32,
@@ -86,12 +86,6 @@ pub fn draw_edge_strip(
         anti_alias: true,
         ..Default::default()
     };
-    if update {
-        let r = UPDATE_DOT_R * scale;
-        let [ur, ug, ub] = UPDATE_COLOR;
-        paint.set_color_rgba8(ur, ug, ub, 255);
-        fill_circle(pixmap, &paint, x + w + r + 4.0 * scale, r + 1.0 * scale, r);
-    }
     // Pista semitransparente: se distingue sobre fondos claros y oscuros.
     paint.set_color_rgba8(0, 0, 0, 170);
     fill_rounded_rect(pixmap, &paint, x, 0.0, w, h, h / 2.0);
@@ -109,6 +103,19 @@ pub fn draw_edge_strip(
             paint.set_color_rgba8(r, g, b, 140);
             fill_rounded_rect(pixmap, &paint, x, 0.0, w, h, h / 2.0);
         }
+    }
+    if update {
+        let [r, g, b] = UPDATE_COLOR;
+        paint.set_color_rgba8(r, g, b, 255);
+        fill_rounded_rect(
+            pixmap,
+            &paint,
+            x + w - 8.0 * scale,
+            0.0,
+            7.0 * scale,
+            h,
+            h / 2.0,
+        );
     }
 }
 
@@ -131,37 +138,126 @@ pub enum Hit {
     Seek(f32),
     /// Sobre la carátula, con varias apps sonando: un clic pasa a la siguiente.
     Cover,
-    /// Sobre el punto de actualización disponible: un clic la instala.
+    /// Sobre el botón de actualización disponible: un clic la instala.
     Update,
+    Battery,
 }
 
-/// Color del punto de actualización (azul de sistema, se lee sobre el negro de la isla).
-const UPDATE_COLOR: [u8; 3] = [10, 132, 255];
-/// Radio del punto y de la zona que acepta el clic, en píxeles lógicos.
-const UPDATE_DOT_R: f32 = 3.5;
-const UPDATE_HIT_R: f32 = 9.0;
-const BATTERY_DOT_R: f32 = 2.5;
-const BATTERY_COLOR: [u8; 4] = [255, 159, 10, 190];
+const UPDATE_COLOR: [u8; 3] = [75, 166, 255];
+const BATTERY_COLOR: [u8; 3] = [255, 174, 66];
+const INDICATOR_HIT_R: f32 = 8.0;
 
-/// Centro del punto de actualización: en la isla expandida, dentro de la esquina superior
-/// derecha; en la contraída, montado sobre esa esquina como la marca de una notificación.
-fn update_dot(g: &Geometry, p: f32) -> (f32, f32) {
+#[derive(Clone, Copy, Default)]
+pub struct Indicators {
+    pub battery_low: bool,
+    pub update: bool,
+    pub hovered: Option<Hit>,
+}
+
+fn indicator_center(g: &Geometry, p: f32, battery: bool) -> (f32, f32) {
+    let p = p.clamp(0.0, 1.0);
     let s = g.scale;
-    let lerp = |a: f32, b: f32| a + (b - a) * p.clamp(0.0, 1.0);
-    (g.x1() - lerp(9.0, 14.0) * s, g.y0 + lerp(4.0, 12.0) * s)
+    let x = if battery {
+        g.x0 + 14.0 * s * (1.0 - p) + (g.w - 33.0 * s) * p
+    } else {
+        g.x1() - (14.0 - p) * s
+    };
+    (x, g.y0 + ((17.0 + 3.0 * p) * s).min(g.h / 2.0))
 }
 
-/// Puede quedar visible por sí solo cuando la isla se oculta sin música.
-pub fn draw_edge_battery_dot(pixmap: &mut Pixmap, scale: f32) {
-    let x = (pixmap.width() as f32 - edge_strip_width(scale)) / 2.0;
-    let r = BATTERY_DOT_R * scale;
-    let [red, green, blue, alpha] = BATTERY_COLOR;
+#[allow(clippy::too_many_arguments)]
+pub fn indicator_hit_test(
+    max_w: f32,
+    max_h: f32,
+    scale: f32,
+    p: f32,
+    presence: f32,
+    shape: (f32, f32),
+    indicators: Indicators,
+    x: f32,
+    y: f32,
+) -> Option<Hit> {
+    let g = geometry(max_w, max_h, scale, p, presence, shape);
+    if presence < 0.9 {
+        return None;
+    }
+    for (shown, hit, battery) in [
+        (indicators.battery_low, Hit::Battery, true),
+        (indicators.update, Hit::Update, false),
+    ] {
+        if !shown {
+            continue;
+        }
+        let (cx, cy) = indicator_center(&g, p, battery);
+        if (x - cx).abs() <= INDICATOR_HIT_R * scale && (y - cy).abs() <= INDICATOR_HIT_R * scale {
+            return Some(hit);
+        }
+    }
+    None
+}
+
+fn draw_indicators(pixmap: &mut Pixmap, g: &Geometry, p: f32, indicators: Indicators) {
     let mut paint = Paint {
         anti_alias: true,
         ..Default::default()
     };
-    paint.set_color_rgba8(red, green, blue, alpha);
-    fill_circle(pixmap, &paint, x - r - 4.0 * scale, r + scale, r);
+    for (shown, hit, battery, icon, color) in [
+        (
+            indicators.battery_low,
+            Hit::Battery,
+            true,
+            NoticeIcon::Battery,
+            BATTERY_COLOR,
+        ),
+        (
+            indicators.update,
+            Hit::Update,
+            false,
+            NoticeIcon::Installing,
+            UPDATE_COLOR,
+        ),
+    ] {
+        if !shown {
+            continue;
+        }
+        let (cx, cy) = indicator_center(g, p, battery);
+        let s = g.scale;
+        let [r, green, b] = color;
+        paint.set_color_rgba8(
+            r,
+            green,
+            b,
+            if indicators.hovered == Some(hit) {
+                65
+            } else {
+                28
+            },
+        );
+        fill_rounded_rect(
+            pixmap,
+            &paint,
+            cx - 8.0 * s,
+            cy - 9.0 * s,
+            16.0 * s,
+            18.0 * s,
+            5.0 * s,
+        );
+        paint.set_color_rgba8(r, green, b, 245);
+        draw_notice_icon(pixmap, &paint, icon, cx, cy, 0.52 * s);
+    }
+}
+
+/// Marca naranja integrada en el extremo izquierdo de la barrita.
+pub fn draw_edge_battery_marker(pixmap: &mut Pixmap, scale: f32) {
+    let x = (pixmap.width() as f32 - edge_strip_width(scale)) / 2.0;
+    let mut paint = Paint {
+        anti_alias: true,
+        ..Default::default()
+    };
+    let [r, g, b] = BATTERY_COLOR;
+    paint.set_color_rgba8(r, g, b, 245);
+    let h = (EDGE_STRIP_H * scale).round().max(2.0);
+    fill_rounded_rect(pixmap, &paint, x + scale, 0.0, 7.0 * scale, h, h / 2.0);
 }
 
 /// Estado de la reproducción; `None` en `draw` = no hay música (sin botones ni indicador).
@@ -184,10 +280,6 @@ pub struct Controls {
     pub cover_hovered: bool,
     /// Botón recién pulsado y avance de su animación (0 a 1).
     pub pressed: Option<(Button, f32)>,
-    /// Hay una versión nueva: se dibuja el punto azul.
-    pub update: bool,
-    /// El mouse está sobre el punto de actualización (se agranda un poco).
-    pub update_hovered: bool,
     /// Nivel real de cada barra (0 a 1, de graves a agudos) si se está escuchando el audio;
     /// `None` = la animación de siempre.
     pub levels: Option<[f32; 4]>,
@@ -443,7 +535,7 @@ fn expanded_size((lyrics_p, notice_p): (f32, f32)) -> (f32, f32) {
 }
 
 /// Rectángulo (x0, y0, x1, y1, píxeles físicos) donde `draw` puede pintar algo en este cuadro:
-/// la isla con un margen para lo que asoma de ella (el punto de actualización, el recorte de
+/// la isla con un margen para lo que asoma de ella (el recorte de
 /// la letra). Fuera de él la ventana queda transparente, así que basta con limpiar, copiar y
 /// mandar a Windows esta zona: contraída es una parte mínima de la ventana.
 pub fn bounds(
@@ -474,11 +566,10 @@ pub fn bounds(
 }
 
 /// Como `bounds`, para la línea del borde superior y sus indicadores.
-pub fn edge_strip_bounds(max_w: f32, scale: f32, battery_low: bool) -> (f32, f32, f32, f32) {
+pub fn edge_strip_bounds(max_w: f32, scale: f32, _battery_low: bool) -> (f32, f32, f32, f32) {
     let w = edge_strip_width(scale);
     let x = (max_w - w) / 2.0;
-    let left = if battery_low { 12.0 } else { 4.0 };
-    (x - left * scale, 0.0, x + w + 20.0 * scale, 12.0 * scale)
+    (x - 2.0 * scale, 0.0, x + w + 2.0 * scale, 5.0 * scale)
 }
 
 /// Borde inferior en píxeles físicos; debajo se coloca el proyector de la letra.
@@ -513,7 +604,7 @@ fn button_centers(g: &Geometry, s: f32) -> [(Button, f32, f32); 4] {
 
 /// Qué hay bajo el punto (x, y) de la ventana, solo si el contenido ya se ve por completo.
 /// `seekable` = la barra de progreso está visible; `switchable` = hay otra app a la que cambiar;
-/// `updatable` = se muestra el punto de actualización.
+/// `updatable` = se muestra el botón de actualización.
 #[allow(clippy::too_many_arguments)]
 pub fn hit_test(
     max_w: f32,
@@ -533,10 +624,21 @@ pub fn hit_test(
         return None;
     }
     if updatable {
-        let (dx, dy) = update_dot(&g, p);
-        let r = UPDATE_HIT_R * scale;
-        if (x - dx).powi(2) + (y - dy).powi(2) <= r * r {
-            return Some(Hit::Update);
+        if let Some(hit) = indicator_hit_test(
+            max_w,
+            max_h,
+            scale,
+            p,
+            presence,
+            shape,
+            Indicators {
+                update: true,
+                ..Indicators::default()
+            },
+            x,
+            y,
+        ) {
+            return Some(hit);
         }
     }
     if switchable {
@@ -589,7 +691,7 @@ pub fn draw(
     presence: f32,
     shape: (f32, f32),
     controls: Option<Controls>,
-    battery_low: bool,
+    indicators: Indicators,
     notice: Option<(&Notice, f32)>,
     cover: Option<&Pixmap>,
     app_icon: Option<&Pixmap>,
@@ -644,25 +746,8 @@ pub fn draw(
         fill_rounded_rect(pixmap, &paint, g.x0, g.y0, g.w, g.h, g.r);
     }
 
-    // Actualización disponible: punto azul con aro de fondo
-    if let Some(c) = controls.as_ref().filter(|c| c.update) {
-        let (dx, dy) = update_dot(&g, p);
-        let r = UPDATE_DOT_R * s * if c.update_hovered { 1.35 } else { 1.0 };
-        if translucent {
-            paint.set_color_rgba8(20, 20, 24, 185);
-        } else {
-            paint.set_color_rgba8(0, 0, 0, 255);
-        }
-        fill_circle(pixmap, &paint, dx, dy, r + 1.5 * s);
-        let [ur, ug, ub] = UPDATE_COLOR;
-        paint.set_color_rgba8(ur, ug, ub, 255);
-        fill_circle(pixmap, &paint, dx, dy, r);
-    }
-    if battery_low {
-        let (dx, dy) = update_dot(&g, p);
-        let [red, green, blue, alpha] = BATTERY_COLOR;
-        paint.set_color_rgba8(red, green, blue, alpha);
-        fill_circle(pixmap, &paint, g.x0 + g.x1() - dx, dy, BATTERY_DOT_R * s);
+    if notice.is_none() {
+        draw_indicators(pixmap, &g, p, indicators);
     }
 
     // Indicador de la isla contraída: mini carátula y barras de audio centradas en la píldora flotante
@@ -671,7 +756,12 @@ pub fn draw(
         let size = 22.0 * s;
         let spacing = 10.0 * s;
         let bars_w = 4.0 * 3.0 * s + 3.0 * 2.5 * s;
-        let total_w = size + spacing + bars_w;
+        let reserved = indicators.battery_low || indicators.update;
+        let total_w = if reserved {
+            size
+        } else {
+            size + spacing + bars_w
+        };
         let start_x = g.x0 + (g.w - total_w) / 2.0;
         draw_cover(
             pixmap,
@@ -682,7 +772,9 @@ pub fn draw(
             size / 2.0,
             mini,
         );
-        draw_bars(pixmap, start_x + size + spacing, g.cy(), s, c, t, mini);
+        if !reserved {
+            draw_bars(pixmap, start_x + size + spacing, g.cy(), s, c, t, mini);
+        }
     }
 
     if controls.is_none() && mini > 0.0 {
@@ -1644,8 +1736,6 @@ mod tests {
             sessions: (0, 1),
             cover_hovered: false,
             pressed: None,
-            update: false,
-            update_hovered: false,
             levels: Some([0.6, 0.4, 0.3, 0.2]),
             lyrics_active: false,
         }
@@ -1665,7 +1755,7 @@ mod tests {
                 1.0,
                 (0.0, 0.0),
                 Some(controls()),
-                false,
+                Indicators::default(),
                 None,
                 None,
                 None,
@@ -1691,13 +1781,61 @@ mod tests {
     }
 
     #[test]
-    fn punto_de_bateria_queda_a_la_izquierda_y_dentro_de_la_franja() {
+    fn indicadores_quedan_dentro_del_contorno_y_responden_sin_musica() {
+        let indicators = Indicators {
+            battery_low: true,
+            update: true,
+            ..Indicators::default()
+        };
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            let (w, h) = window_size();
+            let (w, h) = ((w * scale).ceil() as u32, (h * scale).ceil() as u32);
+            for step in 0..=22 {
+                let p = step as f32 * 0.05;
+                let g = geometry(w as f32, h as f32, scale, p, 1.0, (0.0, 0.0));
+                let mut image = Pixmap::new(w, h).unwrap();
+                draw_indicators(&mut image, &g, p, indicators);
+                for (index, pixel) in image.pixels().iter().enumerate() {
+                    if pixel.alpha() == 0 {
+                        continue;
+                    }
+                    let x = (index as u32 % w) as f32 + 0.5;
+                    let y = (index as u32 / w) as f32 + 0.5;
+                    let cx = x.clamp(g.x0 + g.r, g.x1() - g.r);
+                    let cy = y.clamp(g.y0 + g.r, g.y0 + g.h - g.r);
+                    assert!(
+                        (x - cx).hypot(y - cy) <= g.r + 0.75,
+                        "indicador fuera del contorno: escala={scale}, progreso={p}, ({x},{y})"
+                    );
+                }
+                for (battery, hit) in [(true, Hit::Battery), (false, Hit::Update)] {
+                    let (x, y) = indicator_center(&g, p, battery);
+                    assert!(
+                        indicator_hit_test(
+                            w as f32,
+                            h as f32,
+                            scale,
+                            p,
+                            1.0,
+                            (0.0, 0.0),
+                            indicators,
+                            x,
+                            y
+                        ) == Some(hit)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn bateria_se_integra_dentro_del_extremo_de_la_franja() {
         let scale = 1.25;
         let (w, h) = window_size();
         let mut pixmap = Pixmap::new((w * scale).ceil() as u32, (h * scale).ceil() as u32).unwrap();
         let width = pixmap.width() as f32;
         let (left, top, right, bottom) = edge_strip_bounds(width, scale, true);
-        draw_edge_battery_dot(&mut pixmap, scale);
+        draw_edge_battery_marker(&mut pixmap, scale);
         let mut visible = false;
         for (index, px) in pixmap.pixels().iter().enumerate() {
             if px.alpha() == 0 {
@@ -1707,7 +1845,7 @@ mod tests {
             let x = (index as u32 % pixmap.width()) as f32;
             let y = (index as u32 / pixmap.width()) as f32;
             assert!(x >= left.floor() && x < right.ceil() && y >= top && y < bottom.ceil());
-            assert!(x < (width - edge_strip_width(scale)) / 2.0);
+            assert!(x >= (width - edge_strip_width(scale)) / 2.0);
             assert!(px.red() > px.green() && px.green() > px.blue());
         }
         assert!(visible);
@@ -1729,10 +1867,7 @@ mod tests {
                 let p = step as f32 * 0.05;
                 for presence in [0.4, 1.0] {
                     let mut pixmap = Pixmap::new(pw, ph).unwrap();
-                    let c = Controls {
-                        update: true,
-                        ..controls()
-                    };
+                    let c = controls();
                     let notice = (shape.1 > 0.0).then_some((&notice, 1.0));
                     draw(
                         &mut pixmap,
@@ -1741,7 +1876,11 @@ mod tests {
                         presence,
                         shape,
                         Some(c),
-                        true,
+                        Indicators {
+                            battery_low: true,
+                            update: true,
+                            ..Indicators::default()
+                        },
                         notice,
                         None,
                         None,

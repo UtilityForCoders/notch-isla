@@ -14,7 +14,7 @@ const KEY: PCWSTR = w!("Software\\NotchIsla");
 
 #[derive(Clone)]
 pub struct Settings {
-    /// Preferencia heredada, conservada por compatibilidad. La isla ya no se oculta sola.
+    /// Preferencia heredada, conservada por compatibilidad con versiones anteriores.
     pub hide_delay: u32,
     /// Pantalla elegida (nombre de dispositivo, como "\\.\DISPLAY2"); vacío = la principal.
     pub monitor: String,

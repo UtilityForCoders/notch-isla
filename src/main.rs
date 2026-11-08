@@ -502,7 +502,7 @@ struct App {
     drag_island: Option<DragIsland>,
     /// El mouse está sobre la carátula y se puede cambiar de app.
     cover_hovered: bool,
-    /// El mouse está sobre el punto de actualización.
+    /// El mouse está sobre el botón de actualización.
     update_hovered: bool,
     tray: Tray,
     /// Inicio del desplazamiento de textos largos; se reinicia al expandir o cambiar de canción.
@@ -544,6 +544,7 @@ struct App {
     audio: Option<AudioWatch>,
     battery: Option<battery::Monitor>,
     battery_low: bool,
+    low_battery_devices: Vec<battery::Device>,
     battery_alerts: battery::Alerts,
     battery_pending: std::collections::VecDeque<battery::Device>,
     connections: battery::Connections,
@@ -631,7 +632,7 @@ impl App {
             volume_app: false,
             volume_until: None,
             update: None,
-            idle_hidden: false,
+            idle_hidden: true,
             pressed: None,
             settings,
             notice: None,
@@ -640,6 +641,7 @@ impl App {
             audio: None,
             battery: None,
             battery_low: false,
+            low_battery_devices: Vec::new(),
             battery_alerts: battery::Alerts::default(),
             battery_pending: std::collections::VecDeque::new(),
             connections: battery::Connections::default(),
@@ -883,16 +885,42 @@ impl App {
         )
     }
 
+    fn low_battery_items(&self) -> Vec<menu::Item> {
+        let mut items = vec![
+            menu::Item::Label("Dispositivos con batería baja".into()),
+            menu::Item::Separator,
+        ];
+        if self.low_battery_devices.is_empty() {
+            items.push(menu::Item::Label(
+                "No hay dispositivos con batería baja".into(),
+            ));
+        }
+        for device in &self.low_battery_devices {
+            items.push(menu::Item::DeviceStatus {
+                name: device.name.clone(),
+                status: device.status(),
+                icon: island::device_icon(device.kind),
+                connection: match device.connection {
+                    "Bluetooth" => NoticeIcon::Bluetooth,
+                    "USB / 2.4 GHz" | "Inalámbrico" => NoticeIcon::Wireless,
+                    _ => NoticeIcon::Usb,
+                },
+            });
+        }
+        items
+    }
+
     fn on_battery(&mut self) {
         let Some(monitor) = &self.battery else {
             return;
         };
         let snapshot = monitor.snapshot();
-        let battery_low = self.settings.battery_notices
-            && snapshot
-                .devices
-                .iter()
-                .any(|device| snapshot.confirmed_link(device) && device.has_low_battery());
+        self.low_battery_devices = if self.settings.battery_notices {
+            snapshot.low_devices()
+        } else {
+            Vec::new()
+        };
+        let battery_low = !self.low_battery_devices.is_empty();
         let marker_changed = std::mem::replace(&mut self.battery_low, battery_low) != battery_low;
         self.connection_pending = self
             .connection_pending
@@ -1371,7 +1399,7 @@ impl App {
         self.start_animation();
     }
 
-    /// En el borde queda la franja de música o solo el punto de batería baja.
+    /// En el borde queda la barrita con el progreso y los avisos integrados.
     fn edge_strip(&self) -> bool {
         self.notice.is_none() && !self.hidden_by_fullscreen() && self.idle_hidden
     }
@@ -1383,6 +1411,12 @@ impl App {
         }
         self.idle_hidden = false;
         self.update_visibility();
+        if !self.hovered && !self.settings.pinned_expanded {
+            self.lingering = true;
+            unsafe {
+                SetTimer(Some(self.hwnd), COLLAPSE_TIMER, 3000, None);
+            }
+        }
     }
 
     /// Rueda del mouse sobre la isla: sube o baja el volumen de la app que suena (o el general,
@@ -1516,6 +1550,7 @@ impl App {
             self.seek_hover = None;
             self.cover_hovered = false;
             self.update_hovered = false;
+            self.workspace_hover = None;
             self.aim_expansion(false);
             return;
         }
@@ -1564,6 +1599,7 @@ impl App {
             self.seek_hover = None;
             self.cover_hovered = false;
             self.update_hovered = false;
+            self.workspace_hover = None;
             self.aim_expansion(false);
         }
         if want && self.settings.pinned_expanded {
@@ -1615,11 +1651,29 @@ impl App {
         }
     }
 
-    /// Qué hay en el punto (x, y) de la ventana; sin música no hay botones ni barra.
+    /// Qué hay en el punto (x, y) de la ventana; incluye los avisos y las pestañas aunque no haya música.
     fn hit_at(&self, x: f32, y: f32) -> Option<Hit> {
         // Durante un aviso no hay botones: un clic solo lo cierra.
         if !self.visible || self.notice.is_some() {
             return None;
+        }
+        let indicators = island::Indicators {
+            battery_low: self.battery_low,
+            update: self.update.is_some(),
+            hovered: None,
+        };
+        if let Some(hit) = island::indicator_hit_test(
+            self.surface.width as f32,
+            self.surface.height as f32,
+            self.scale,
+            self.spring.value,
+            self.presence.value,
+            self.shape(),
+            indicators,
+            x,
+            y,
+        ) {
+            return Some(hit);
         }
         if self.spring.value >= 1.0 && self.notice_spring.value <= 0.001 {
             let bounds = island::backdrop_geometry(
@@ -1666,7 +1720,12 @@ impl App {
         };
         let cover = hit == Some(Hit::Cover);
         let update = hit == Some(Hit::Update);
-        let workspace_hover = hit.filter(|hit| matches!(hit, Hit::Tab(_) | Hit::Share(_)));
+        let workspace_hover = hit.filter(|hit| {
+            matches!(
+                hit,
+                Hit::Tab(_) | Hit::Share(_) | Hit::Battery | Hit::Update
+            )
+        });
         if self.workspace_hover == workspace_hover
             && self.hovered_button == button
             && self.seek_hover == seek
@@ -1934,7 +1993,9 @@ impl App {
 
     /// Terminó la espera tras salir el mouse: ahora sí se encoge.
     fn end_linger(&mut self) {
-        if self.page == workspace::Page::Share && share_ui::panel_state().busy {
+        if self.tray_menu_open
+            || (self.page == workspace::Page::Share && share_ui::panel_state().busy)
+        {
             unsafe {
                 SetTimer(Some(self.hwnd), COLLAPSE_TIMER, COLLAPSE_DELAY_MS, None);
             }
@@ -1945,6 +2006,10 @@ impl App {
         }
         self.lingering = false;
         self.expanded_by_click = false;
+        if !self.settings.pinned_expanded {
+            self.idle_hidden = true;
+            self.update_visibility();
+        }
         self.update_expansion();
     }
 
@@ -2034,7 +2099,11 @@ impl App {
         let reshaping = self.notice_spring.value != notice_shape;
         let strip = self.edge_strip();
         let playing = (self.visible || strip) && self.media.as_ref().is_some_and(|m| m.playing);
-        let bars = self.visible && playing && island::mini_alpha(self.spring.value) > 0.0;
+        let bars = self.visible
+            && playing
+            && island::mini_alpha(self.spring.value) > 0.0
+            && !self.battery_low
+            && self.update.is_none();
         let show_player = notice.is_none()
             && self.page == workspace::Page::Music
             && self.spring.value > island::EXPANDED_CONTENT_START
@@ -2064,8 +2133,6 @@ impl App {
             volume,
             sessions: m.sessions,
             cover_hovered: self.cover_hovered,
-            update: self.update.is_some(),
-            update_hovered: self.update_hovered,
             lyrics_active: self.settings.lyrics_island && self.has_current_lyrics(),
         });
         // El contenido expandido (y con él la barra) se ve a partir de ~55 % de la expansión.
@@ -2213,7 +2280,11 @@ impl App {
             self.presence.value,
             shape,
             controls,
-            self.battery_low,
+            island::Indicators {
+                battery_low: self.battery_low,
+                update: self.update.is_some(),
+                hovered: self.workspace_hover,
+            },
             notice.map(|n| (&n.view, notice_text_w)),
             cover.map(|c| c.image.as_ref()),
             media
@@ -2263,9 +2334,6 @@ impl App {
         // Solo se repinta si la letra se ve.
         let lyric_painting = lyric_painting && lyrics_area.is_some();
         let mut edge_ms = None;
-        if strip && self.battery_low {
-            island::draw_edge_battery_dot(&mut self.surface.pixmap, self.scale);
-        }
         if let (true, Some(m)) = (strip, self.media.as_ref()) {
             let accent = m.cover.as_ref().map_or([255, 255, 255], |c| c.accent);
             let progress = m.timeline.map(|t| t.progress(m.playing));
@@ -2288,9 +2356,12 @@ impl App {
                 &mut self.surface.pixmap,
                 self.scale,
                 None,
-                BLUE,
+                [128, 132, 142],
                 self.update.is_some(),
             );
+        }
+        if strip && self.battery_low {
+            island::draw_edge_battery_marker(&mut self.surface.pixmap, self.scale);
         }
         self.surface.copy_area(dirty);
         self.surface.drawn = Some(drawn);
@@ -2383,7 +2454,7 @@ impl App {
                         let percent = (level * 100.0).round() as u32;
                         subtitle = format!("Volumen {kind} {percent} %");
                     } else if let (true, Some(u)) = (self.update_hovered, &self.update) {
-                        // Explica qué hace el punto azul antes de hacer clic.
+                        // Explica qué hace el botón azul antes de hacer clic.
                         subtitle = u.menu_label();
                     } else if !m.playing {
                         if !subtitle.is_empty() {
@@ -2979,6 +3050,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             // WM_DESTROY necesita el estado de la app libre.
             let mut pending = None;
             let mut share_action = None;
+            let mut battery_items = None;
             with_app(|app| {
                 if std::mem::take(&mut app.centering_double_click) {
                     unsafe {
@@ -3017,6 +3089,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                     if !app.settings.expand_on_hover
                         && !app.expanded_by_click
                         && app.spring.value < 0.95
+                        && !matches!(drag.pending_hit, Some(Hit::Battery))
                     {
                         app.expanded_by_click = true;
                         app.set_hovered(true);
@@ -3029,6 +3102,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                         Some(Hit::Button(button)) => app.press(button),
                         Some(Hit::Seek(fraction)) => app.seek(fraction),
                         Some(Hit::Cover) => media::next_session(),
+                        Some(Hit::Battery) => battery_items = Some(app.low_battery_items()),
                         Some(Hit::Update) => pending = app.update.clone(),
                         None => {}
                     }
@@ -3048,10 +3122,19 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                     Some(Hit::Button(button)) => app.press(button),
                     Some(Hit::Seek(fraction)) => app.seek(fraction),
                     Some(Hit::Cover) => media::next_session(),
+                    Some(Hit::Battery) => battery_items = Some(app.low_battery_items()),
                     Some(Hit::Update) => pending = app.update.clone(),
                     None => {}
                 }
             });
+            if let Some(items) = battery_items {
+                with_app(|app| app.tray_menu_open = true);
+                menu::show(items);
+                with_app(|app| {
+                    app.tray_menu_open = false;
+                    app.redraw();
+                });
+            }
             if let Some(action) = share_action {
                 share_ui::perform(hwnd, action);
             }
@@ -3241,7 +3324,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 let version = &found.version;
                 if manual {
                     let subtitle = if found.installer.is_some() {
-                        "Haz clic en el punto azul para instalarla"
+                        "Abre la isla y pulsa el icono azul para instalarla"
                     } else {
                         "Descárgala desde el menú de la bandeja"
                     };
@@ -3266,7 +3349,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                     );
                 }
                 app.update = Some(found);
-                // Aparece el punto azul en la isla.
+                // Aparece el aviso azul en la barrita y el botón en la isla.
                 app.redraw();
             });
             LRESULT(0)
@@ -3547,6 +3630,21 @@ mod tests {
             let mut app = App::new(hwnd, monitors::find(""), settings).unwrap();
             app.tray.remove();
             app.pos.y += 150;
+            app.idle_hidden = false;
+            if std::env::var_os("NOTCH_PREVIEW_INDICATORS").is_some() {
+                app.battery_low = true;
+                app.low_battery_devices = vec![battery::Device {
+                    id: "preview-mouse".into(),
+                    name: "Mouse de prueba".into(),
+                    kind: battery::DeviceKind::Mouse,
+                    connection: "Bluetooth",
+                    level: Some(battery::Level::Percent(15)),
+                    charging: false,
+                    stale: false,
+                    windows_cached: false,
+                    detail: String::new(),
+                }];
+            }
             app.presence.reset(1.0);
             app.spring.reset(1.0);
             APP.with(|cell| *cell.borrow_mut() = Some(app));
@@ -3573,7 +3671,7 @@ mod tests {
     }
 
     #[test]
-    fn isla_sin_musica_permanece_y_letra_solo_abre_con_contenido() {
+    fn barra_sin_musica_abre_con_click_y_letra_solo_con_contenido() {
         unsafe {
             CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok().unwrap();
             let instance = GetModuleHandleW(None).unwrap();
@@ -3621,10 +3719,13 @@ mod tests {
                 bottom: -30000,
             };
             app.update_visibility();
-            assert!(app.visible && app.shown);
+            assert!(app.shown && !app.visible && app.edge_strip());
             assert_eq!(app.spring.target(), 0.0);
+            app.reveal();
+            assert!(app.visible);
             app.end_linger();
-            assert!(!app.idle_hidden && app.visible);
+            assert!(app.idle_hidden && !app.visible && app.edge_strip());
+            app.reveal();
             let media = NowPlaying {
                 title: "Prueba local".into(),
                 artist: "Artista local".into(),
@@ -3676,6 +3777,29 @@ mod tests {
                 app.hit_at(bounds.0 + 70.0 * app.scale, bounds.1 + 60.0 * app.scale)
                     == Some(Hit::Share(workspace::ShareAction::Files))
             );
+            app.battery_low = true;
+            app.low_battery_devices.push(battery::Device {
+                id: "bt:test".into(),
+                name: "Mouse de prueba".into(),
+                kind: battery::DeviceKind::Mouse,
+                connection: "Bluetooth",
+                level: Some(battery::Level::Percent(15)),
+                charging: false,
+                stale: false,
+                windows_cached: false,
+                detail: String::new(),
+            });
+            assert!(
+                app.hit_at(
+                    bounds.0 + bounds.2 - 33.0 * app.scale,
+                    bounds.1 + 20.0 * app.scale
+                ) == Some(Hit::Battery)
+            );
+            assert!(app.low_battery_items().iter().any(|item| matches!(
+                item,
+                menu::Item::DeviceStatus { name, status, .. }
+                    if name == "Mouse de prueba" && status == "15 % · Baja"
+            )));
             app.toggle_hidden();
             assert!(app.idle_hidden && !app.visible);
             app.toggle_hidden();
@@ -4064,12 +4188,10 @@ mod tests {
                     sessions: (0, 1),
                     cover_hovered: false,
                     pressed: None,
-                    update: false,
-                    update_hovered: false,
                     levels: None,
                     lyrics_active: true,
                 }),
-                false,
+                island::Indicators::default(),
                 None,
                 None,
                 None,

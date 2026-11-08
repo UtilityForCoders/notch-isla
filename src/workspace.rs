@@ -29,8 +29,8 @@ pub struct ShareState {
 
 fn regions(width: f32, page: Page) -> Vec<(Hit, [f32; 4])> {
     let mut regions = vec![
-        (Hit::Tab(Page::Music), [12.0, 8.0, 98.0, 26.0]),
-        (Hit::Tab(Page::Share), [116.0, 8.0, 124.0, 26.0]),
+        (Hit::Tab(Page::Music), [12.0, 8.0, 76.0, 26.0]),
+        (Hit::Tab(Page::Share), [94.0, 8.0, 114.0, 26.0]),
     ];
     if page == Page::Share {
         regions.extend([

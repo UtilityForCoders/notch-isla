@@ -46,6 +46,7 @@ fn isla_con_desenfoque_sigue_ocultandose_y_recibiendo_clics() {
         settings.hotkey = None;
         let mut app = App::new(hwnd, monitors::find(""), settings).unwrap();
         app.tray.remove();
+        app.idle_hidden = false;
         app.pos = POINT {
             x: -32000,
             y: -32000,
