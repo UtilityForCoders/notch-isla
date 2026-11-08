@@ -10,7 +10,7 @@ Objetivo: controlar la música que suena en el PC (Spotify, YouTube, etc.) desde
 | 1 | Píldora arriba al centro que se expande con rebote al hacer clic | Hecho |
 | 2 | Leer la canción que suena (título, artista, carátula) vía SMTC | Hecho |
 | 3 | Controles: play/pausa, siguiente, anterior | Hecho |
-| 4 | Ícono en la bandeja, inicio con Windows, una sola instancia, ocultar en pantalla completa y mantener la píldora sin música | Hecho |
+| 4 | Ícono en la bandeja, inicio con Windows, una sola instancia, ocultar en pantalla completa y mantener la barrita sin música | Hecho |
 
 ## Requisitos
 
@@ -50,9 +50,9 @@ cargo run --example icon
 
 **Uso:**
 
-- La isla permanece visible como una píldora compacta, incluso sin música, para tener a mano el reproductor y Compartir cerca. Puede ocultarse en pantalla completa si activas esa opción.
-- Al dejar de usarla, la isla vuelve a su forma compacta y permanece en pantalla. En la vista extendida, las pestañas **Música** y **Compartir** cambian entre el reproductor y los accesos a archivos, portapapeles, vinculación y equipos guardados. El indicador de recepción de Compartir permite activarla o pausarla; el resultado de las acciones aparece en el propio panel. **Ctrl + Alt + N** la oculta manualmente en el borde superior y vuelve a mostrarla; el atajo se puede cambiar o desactivar desde la bandeja.
-- Es una píldora flotante arriba al centro. Contraída muestra una mini carátula y barras de audio (con el color de la carátula) que siguen el sonido real de la app que suena: graves, medios y agudos. Se puede volver a la animación simple con **Barras con el sonido real** en la bandeja.
+- En reposo la isla deja solo una barrita en el borde superior, incluso sin música. Un clic abre el reproductor y Compartir cerca. Puede ocultarse en pantalla completa si activas esa opción.
+- Al sacar el puntero, la isla vuelve a ocultarse y deja únicamente la barrita superior. En la vista extendida, las pestañas **Música** y **Compartir** cambian entre el reproductor y los accesos a archivos, portapapeles, vinculación y equipos guardados. El indicador de recepción de Compartir permite activarla o pausarla; el resultado de las acciones aparece en el propio panel. **Ctrl + Alt + N** también permite ocultarla y volver a mostrarla; el atajo se puede cambiar o desactivar desde la bandeja.
+- Durante la transición aparece una píldora flotante con la mini carátula y barras de audio que siguen el sonido real de la app que suena. Si hay avisos pendientes, reserva ese espacio para sus iconos. En reposo queda la barrita con el avance de la canción.
 - Haz clic sobre la píldora para expandirla: en **Música** aparecen la carátula, el título, el artista y los botones anterior / play-pausa / siguiente. Ese primer clic solo abre los controles. Al retirar el puntero se encoge tras una breve espera. Si prefieres la apertura automática, activa **Expandir al pasar el puntero** en la bandeja.
 - En la esquina de la carátula, el ícono de la app que suena (Spotify, Chrome...). Si hay varias apps con música, unos puntos bajo la carátula lo indican y un clic en ella pasa a la siguiente.
 - Debajo, una barra de progreso con el color de la carátula; haz clic en ella para saltar a ese punto de la canción (si la app informa el tiempo).
@@ -62,9 +62,9 @@ cargo run --example icon
 - **Letra sincronizada** (opcional): en la bandeja, **Mostrar letra de la canción** tiene dos opciones que se activan por separado. **Con la isla expandida** muestra la letra en la pestaña Música, como un carrusel que sube un verso cada vez que empieza el siguiente, solo cuando la canción tiene letra sincronizada disponible; durante la búsqueda o si no hay letra, conserva el reproductor compacto sin una columna vacía (también se activa con el botón de letra de la isla). **Con la isla encogida** muestra el verso que se canta en un "proyector" bajo la isla: una píldora negra que se ajusta al largo de cada verso, que aparece desvaneciéndose y que sigue a la isla (también cuando se oculta en el borde). Los clics la atraviesan, así que no tapa nada. La letra se pide a [LRCLIB](https://lrclib.net) una vez por canción (se envían título, artista, álbum y duración; ver [PRIVACY.md](PRIVACY.md)). Funciona con las apps que informan el avance de la canción, como Spotify.
 - Si el título o el artista no caben, se desplazan de un lado al otro.
 - **Salida de audio**: al cambiar a otra salida (audífonos, parlantes), aparece una tarjeta debajo de la isla con su nombre. Si la isla está oculta, la tarjeta aparece sola cerca del borde superior.
+- Los avisos de batería baja y actualización se integran en los extremos de la barrita. Al abrir la isla aparecen como iconos en la cabecera: pulsa la **batería naranja** para ver los dispositivos con carga baja y su nivel; el **icono azul de descarga** permite actualizar.
 - **Dispositivos y batería**: en el menú de la bandeja, muestra los periféricos Bluetooth conectados, los mandos que informan batería a Windows y los receptores USB compatibles. Se consulta en segundo plano cada 5 segundos con los avisos de conexión activados, o cada 30 si se desactivan; también se puede **Actualizar ahora**. **Avisar al conectar un dispositivo** muestra su nombre cuando se confirma un nuevo enlace. Un dongle enchufado sin el periférico respondiendo no dispara el aviso. Con una lectura actual de 20 % o menos, la isla avisa una vez por descarga; los niveles aproximados de un mando se indican como tales. El aviso se puede desactivar desde ese apartado. Si el mouse duerme, el último nivel válido queda marcado como **anterior** y no genera avisos. Compatibilidad y pruebas: [docs/battery.md](docs/battery.md).
 - Clic derecho en el ícono de la bandeja: abre el menú con el diseño de la isla y navegación por teclado. Permanece abierto al cambiar ajustes; se cierra con Esc o al hacer clic fuera.
-  - **Ocultarse sola tras**: 3, 5, 10 o 30 segundos, o nunca.
   - **Pantalla**: en qué monitor va la isla (si hay más de uno).
   - **Temporizador**: de 5 a 60 minutos; al terminar suena y la isla avisa.
   - **Desenfoque del fondo**: una barra permite ajustar la intensidad de 0 a 100 % en vivo, para la isla y la letra flotante. Arrástrala o usa las flechas izquierda y derecha con la barra seleccionada. La intensidad se guarda al cerrar el menú. Se puede desactivar para usar negro opaco. Windows compone el fondo en vivo; si el efecto no está disponible, se usa el fondo opaco.
