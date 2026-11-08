@@ -18,6 +18,8 @@ mod notice_card;
 mod projector;
 mod routing;
 mod settings;
+mod share;
+mod share_ui;
 mod spring;
 #[cfg(test)]
 mod stability_tests;
@@ -66,7 +68,7 @@ use windows::Win32::UI::HiDpi::{
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT,
 };
-use windows::Win32::UI::Shell::NIN_BALLOONUSERCLICK;
+use windows::Win32::UI::Shell::{DragAcceptFiles, HDROP, NIN_BALLOONUSERCLICK};
 use windows::Win32::UI::WindowsAndMessaging::{
     BeginDeferWindowPos, CreateWindowExW, DefWindowProcW, DeferWindowPos, DestroyWindow,
     DispatchMessageW, EndDeferWindowPos, GetCursorPos, GetMessageW, KillTimer, LoadCursorW,
@@ -76,9 +78,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     MA_NOACTIVATE, MB_ICONASTERISK, MSG, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE,
     SWP_NOZORDER, SW_HIDE, SW_SHOWNOACTIVATE, ULW_ALPHA, UPDATELAYEREDWINDOWINFO, WM_APP,
     WM_CAPTURECHANGED, WM_CONTEXTMENU, WM_DESTROY, WM_DEVICECHANGE, WM_DISPLAYCHANGE,
-    WM_DPICHANGED, WM_HOTKEY, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE,
-    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONUP, WM_TIMER, WNDCLASSEXW, WS_EX_LAYERED,
-    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    WM_DPICHANGED, WM_DROPFILES, WM_HOTKEY, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONUP, WM_TIMER, WNDCLASSEXW,
+    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 /// Aviso de "el mouse salió de la ventana" (definido aquí para no cargar todo el módulo Win32_UI_Controls).
@@ -312,6 +314,7 @@ fn main() -> Result<()> {
         with_app(|app| {
             hotkey::register(hwnd, app.settings.hotkey);
         });
+        DragAcceptFiles(hwnd, true);
 
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
@@ -538,6 +541,7 @@ struct App {
     /// Escucha la salida de audio; `None` si Core Audio no está disponible.
     audio: Option<AudioWatch>,
     battery: Option<battery::Monitor>,
+    battery_low: bool,
     battery_alerts: battery::Alerts,
     battery_pending: std::collections::VecDeque<battery::Device>,
     connections: battery::Connections,
@@ -632,6 +636,7 @@ impl App {
             notice_card: None,
             audio: None,
             battery: None,
+            battery_low: false,
             battery_alerts: battery::Alerts::default(),
             battery_pending: std::collections::VecDeque::new(),
             connections: battery::Connections::default(),
@@ -849,6 +854,12 @@ impl App {
             return;
         };
         let snapshot = monitor.snapshot();
+        let battery_low = self.settings.battery_notices
+            && snapshot
+                .devices
+                .iter()
+                .any(|device| snapshot.confirmed_link(device) && device.has_low_battery());
+        let marker_changed = std::mem::replace(&mut self.battery_low, battery_low) != battery_low;
         self.connection_pending = self
             .connection_pending
             .drain(..)
@@ -882,6 +893,12 @@ impl App {
             .update(&snapshot.devices, self.settings.battery_notices);
         self.battery_pending.extend(alerts);
         self.show_next_notice();
+        if marker_changed {
+            self.update_visibility();
+            if self.shown {
+                self.redraw();
+            }
+        }
     }
 
     fn show_next_notice(&mut self) {
@@ -1343,13 +1360,15 @@ impl App {
         self.start_animation();
     }
 
-    /// Oculta, queda la franja del borde superior (hay música, pero la isla se ocultó sola).
+    /// En el borde queda la franja de música o solo el punto de batería baja.
     fn edge_strip(&self) -> bool {
-        // Mientras un aviso ocupa la isla, la línea no se dibuja encima.
-        self.idle_hidden
-            && self.media.is_some()
-            && self.notice.is_none()
+        self.notice.is_none()
             && !self.hidden_by_fullscreen()
+            && if self.media.is_some() {
+                self.idle_hidden
+            } else {
+                self.battery_low
+            }
     }
 
     /// (Re)inicia la cuenta para ocultarse; se cancela mientras el mouse esté encima.
@@ -1885,7 +1904,7 @@ impl App {
         if media.is_some() {
             self.last_media = media.clone();
         } else {
-            // Sin música no hay franja; cuando vuelva a sonar algo, la isla aparece un momento.
+            // Cuando vuelva a sonar algo, la isla aparece un momento.
             self.idle_hidden = false;
         }
         self.media = media;
@@ -2161,7 +2180,7 @@ impl App {
         );
         if strip {
             drawn = drawn.union(Area::new(
-                island::edge_strip_bounds(sw as f32, self.scale),
+                island::edge_strip_bounds(sw as f32, self.scale, self.battery_low),
                 sw,
                 sh,
             ));
@@ -2205,6 +2224,7 @@ impl App {
             self.presence.value,
             shape,
             controls,
+            self.battery_low,
             notice.map(|n| (&n.view, notice_text_w)),
             cover.map(|c| c.image.as_ref()),
             media
@@ -2220,6 +2240,9 @@ impl App {
         // Solo se repinta si la letra se ve.
         let lyric_painting = lyric_painting && lyrics_area.is_some();
         let mut edge_ms = None;
+        if strip && self.battery_low {
+            island::draw_edge_battery_dot(&mut self.surface.pixmap, self.scale);
+        }
         if let (true, Some(m)) = (strip, self.media.as_ref()) {
             let accent = m.cover.as_ref().map_or([255, 255, 255], |c| c.accent);
             let progress = m.timeline.map(|t| t.progress(m.playing));
@@ -2730,7 +2753,7 @@ fn finish_install(hwnd: HWND) {
 
 /// Menú contextual sobre la isla: opciones de salida de audio y centrar en la pantalla.
 /// Va fuera de `with_app`: el menú corre su propio bucle de mensajes.
-fn open_island_menu(app_id: Option<&str>, is_centered: bool, pinned_expanded: bool) {
+fn open_island_menu(hwnd: HWND, app_id: Option<&str>, is_centered: bool, pinned_expanded: bool) {
     let (label, pids, outputs, unavailable) = if let Some(app_id) = app_id {
         let label = audio::app_label(app_id);
         let pids = audio::app_pids(app_id);
@@ -2769,6 +2792,7 @@ fn open_island_menu(app_id: Option<&str>, is_centered: bool, pinned_expanded: bo
         return;
     };
     match choice {
+        tray::IslandMenuChoice::Share => share_ui::open(hwnd),
         tray::IslandMenuChoice::TogglePinnedExpanded => {
             with_app(|app| {
                 app.settings.pinned_expanded = !app.settings.pinned_expanded;
@@ -2830,6 +2854,18 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
         return LRESULT(0);
     }
     match msg {
+        WM_DROPFILES => {
+            share_ui::drop_files(hwnd, HDROP(wparam.0 as _));
+            LRESULT(0)
+        }
+        share_ui::WM_SHARE_MENU => {
+            share_ui::open(hwnd);
+            LRESULT(0)
+        }
+        share_ui::WM_SHARE_EVENT => {
+            share_ui::on_event(hwnd);
+            LRESULT(0)
+        }
         WM_MOUSEMOVE => {
             let (x, y) = mouse_pos(lparam);
             with_app(|app| {
@@ -2991,7 +3027,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                     pinned_expanded = app.settings.pinned_expanded;
                 }
             });
-            open_island_menu(app_id.as_deref(), is_centered, pinned_expanded);
+            open_island_menu(hwnd, app_id.as_deref(), is_centered, pinned_expanded);
             LRESULT(0)
         }
         WM_ANIM_TICK => {
@@ -3239,6 +3275,17 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                     }
                 });
                 tray::show_menu(state, |cmd, settings| match cmd {
+                    Command::Share => {
+                        unsafe {
+                            let _ = PostMessageW(
+                                Some(hwnd),
+                                share_ui::WM_SHARE_MENU,
+                                WPARAM(0),
+                                LPARAM(0),
+                            );
+                        }
+                        false
+                    }
                     Command::ToggleBatteryNotices => {
                         settings.battery_notices = !settings.battery_notices;
                         settings.save();
@@ -3399,6 +3446,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             LRESULT(0)
         }
         WM_DESTROY => {
+            share_ui::stop();
             unsafe {
                 let _ = KillTimer(Some(hwnd), FULLSCREEN_TIMER);
             }
@@ -3800,6 +3848,7 @@ mod tests {
                     levels: None,
                     lyrics_active: true,
                 }),
+                false,
                 None,
                 None,
                 None,

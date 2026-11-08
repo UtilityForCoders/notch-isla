@@ -25,6 +25,10 @@ mientras permanece abierto.
 
 El aviso de batería baja está activado por defecto y se puede desactivar en ese
 apartado. Una lectura actual de 20 % o menos dispara el aviso.
+Mientras quede algún dispositivo conectado con batería baja, aparece un punto
+naranja tenue a la izquierda de la isla. Si la isla se oculta o no hay música,
+el punto queda en el borde superior. Se rige por el mismo ajuste de avisos de
+batería y por la opción de ocultar la isla en pantalla completa.
 Los mandos que solo comunican niveles aproximados avisan con el nivel **Baja**,
 sin atribuirle un porcentaje. No se avisa cargando ni usando lecturas anteriores.
 Cada dispositivo avisa una vez por descarga durante la sesión de la app; vuelve

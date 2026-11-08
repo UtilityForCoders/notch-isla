@@ -31,6 +31,7 @@ const DEVICE_ABSENCE_GRACE: Duration = Duration::from_secs(5);
 const RECEIVER_LABEL_GRACE: Duration = Duration::from_secs(5);
 const RECEIVER_READING_GRACE: Duration = Duration::from_secs(15);
 const BT_BATTERY: &str = "{104EA319-6EE2-4701-BD47-8DDBF425BBE5} 2";
+const BT_ENDPOINT_CONTAINER: &str = "System.Devices.Aep.ContainerId";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Level {
@@ -589,8 +590,8 @@ fn bluetooth(out: &mut Vec<Device>, trace: bool) -> windows::core::Result<()> {
             batteries.insert(container, level);
         }
     }
-    // Enumerar interfaces instaladas evita iniciar descubrimiento de radio (AEP),
-    // que puede tardar un minuto incluso sin dispositivos nuevos.
+    // El selector de conexión evita el descubrimiento de radio. El emparejamiento
+    // pertenece al endpoint Bluetooth (AEP), no a la interfaz de dispositivo.
     for le in [false, true] {
         let selector = if le {
             BluetoothLEDevice::GetDeviceSelectorFromConnectionStatus(
@@ -601,13 +602,15 @@ fn bluetooth(out: &mut Vec<Device>, trace: bool) -> windows::core::Result<()> {
                 BluetoothConnectionStatus::Connected,
             )?
         };
-        let devices = DeviceInformation::FindAllAsyncAqsFilterAndAdditionalProperties(
-            &selector,
-            &properties(&["System.Devices.ContainerId"]),
-        )
-        .and_then(finish)?;
+        let devices = finish(
+            DeviceInformation::FindAllAsyncWithKindAqsFilterAndAdditionalProperties(
+                &selector,
+                &properties(&[BT_ENDPOINT_CONTAINER]),
+                DeviceInformationKind::AssociationEndpoint,
+            )?,
+        )?;
         if trace {
-            println!("Bluetooth: interfaces LE={le}: {}", devices.Size()?);
+            println!("Bluetooth: endpoints LE={le}: {}", devices.Size()?);
         }
         for info in &devices {
             // El selector de conexión no exige emparejamiento. Compruébalo antes
@@ -671,7 +674,7 @@ fn bluetooth(out: &mut Vec<Device>, trace: bool) -> windows::core::Result<()> {
             let address = address
                 .map(|a| format!("{a:012X}"))
                 .unwrap_or_else(|| id.to_string());
-            let cached_level = property(&info, "System.Devices.ContainerId")
+            let cached_level = property(&info, BT_ENDPOINT_CONTAINER)
                 .and_then(|p| p.GetGuid().ok())
                 .and_then(|key| batteries.get(&key).copied())
                 .or_else(|| {

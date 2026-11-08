@@ -4,7 +4,7 @@
 
 ## Español
 
-Notch Isla **no recopila, no guarda y no envía ningún dato personal**. No tiene telemetría, estadísticas de uso, anuncios ni cuentas.
+Notch Isla no tiene telemetría, estadísticas de uso, anuncios ni cuentas.
 
 Se conecta a internet solo para dos cosas. **Actualizaciones**: un minuto después de abrirse y luego cada 6 horas, la app pide a GitHub (`api.github.com`) el número de la última versión publicada. Si hay una versión nueva y la app está instalada, descarga su instalador desde `github.com` a la carpeta temporal; solo se instala si haces clic en el aviso. Las peticiones no llevan datos tuyos, solo el nombre y la versión de la app. Como cualquier conexión, GitHub ve tu dirección IP; se aplica la [declaración de privacidad de GitHub](https://docs.github.com/es/site-policy/privacy-policies/github-general-privacy-statement).
 
@@ -25,13 +25,13 @@ Lo que la app escribe en tu PC:
 - La opción **Iniciar con Windows**, si la activas: un valor llamado `NotchIsla` en `HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run`. Se quita al desactivar la opción o al desinstalar la app.
 - Si eliges una **salida de audio para una app**, Windows la guarda en su propia configuración de sonido (la misma del Mezclador de volumen); se quita eligiendo **Predeterminada del sistema**.
 
-Fuera de las actualizaciones y de la letra (si la activas), ningún dato sale de tu equipo ni se comparte con terceros.
+**Compartir cerca** funciona en la red local. Mientras activas la recepción, Notch Isla anuncia temporalmente el nombre de tu equipo y un certificado de sesión para que otras islas lo encuentren. Al elegir un destinatario, la app le envía por TLS el nombre de tu equipo, los nombres y tamaños de los elementos y, si acepta, el contenido seleccionado. El texto del portapapeles se lee solo al elegir **Enviar texto copiado**. Los envíos aceptados se guardan en Descargas en el equipo receptor.
 
 Preguntas: abre un *issue* en https://github.com/UtilityForCoders/notch-isla/issues
 
 ## English
 
-Notch Isla **does not collect, store, or send any personal data**. It has no telemetry, usage statistics, ads, or accounts.
+Notch Isla has no telemetry, usage statistics, ads, or accounts.
 
 It connects to the internet for only two things. **Updates**: one minute after it starts and then every 6 hours, the app asks GitHub (`api.github.com`) for the number of the latest published version. If there is a new version and the app is installed, it downloads the installer from `github.com` to the temporary folder; it is installed only if you click the notification. The requests carry none of your data, only the app's name and version. As with any connection, GitHub sees your IP address; the [GitHub General Privacy Statement](https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement) applies.
 
@@ -52,6 +52,6 @@ What the app writes to your PC:
 - The **Start with Windows** option, if you enable it: a value named `NotchIsla` under `HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run`. It is removed when you turn the option off or uninstall the app.
 - If you choose an **audio output for an app**, Windows stores it in its own sound settings (the same as the Volume mixer); choosing **Predeterminada del sistema** (system default) removes it.
 
-Apart from updates and lyrics (if you turn them on), no data leaves your computer or is shared with third parties.
+**Nearby sharing** works on the local network. When you enable receiving, Notch Isla temporarily advertises your computer name and a session certificate so other islands can find it. When you choose a recipient, the app sends them your computer name, the names and sizes of the items, and, if they accept, the selected content over TLS. Clipboard text is read only when you choose **Enviar texto copiado** (send copied text). Accepted transfers are saved to Downloads on the receiving computer.
 
 Questions: open an issue at https://github.com/UtilityForCoders/notch-isla/issues
