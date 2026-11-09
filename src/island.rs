@@ -285,6 +285,8 @@ pub struct Controls {
     pub levels: Option<[f32; 4]>,
     /// La letra fue activada por el usuario; resalta el botón correspondiente.
     pub lyrics_active: bool,
+    /// Hay letra sincronizada confirmada para la canción actual.
+    pub lyrics_available: bool,
 }
 
 /// Etiquetas de tiempo reproducido y restante, ya formateadas como minutos y segundos.
@@ -588,12 +590,17 @@ fn text_column(g: &Geometry, s: f32) -> (f32, f32) {
 }
 
 /// Centros de los cuatro botones en la fila inferior del reproductor.
-fn button_centers(g: &Geometry, s: f32) -> [(Button, f32, f32); 4] {
+fn button_centers(
+    g: &Geometry,
+    s: f32,
+    lyrics_available: bool,
+) -> impl Iterator<Item = (Button, f32, f32)> {
     let px = g.x0 + COVER_PAD_X * s;
     let pw = PLAYER_W * s;
     let cy = g.y0 + (134.0 + HEADER_HEIGHT) * s;
     let lyrics_cx = px + 14.0 * s;
-    let media_cx = px + 44.0 * s + (pw - 44.0 * s) / 2.0;
+    let inset = if lyrics_available { 44.0 * s } else { 0.0 };
+    let media_cx = px + inset + (pw - inset) / 2.0;
     let gap = 40.0 * s;
     [
         (Button::Lyrics, lyrics_cx, cy),
@@ -601,6 +608,8 @@ fn button_centers(g: &Geometry, s: f32) -> [(Button, f32, f32); 4] {
         (Button::PlayPause, media_cx, cy),
         (Button::Next, media_cx + gap, cy),
     ]
+    .into_iter()
+    .filter(move |(button, _, _)| *button != Button::Lyrics || lyrics_available)
 }
 
 /// Qué hay bajo el punto (x, y) de la ventana, solo si el contenido ya se ve por completo.
@@ -617,6 +626,7 @@ pub fn hit_test(
     seekable: bool,
     switchable: bool,
     updatable: bool,
+    lyrics_available: bool,
     x: f32,
     y: f32,
 ) -> Option<Hit> {
@@ -655,8 +665,7 @@ pub fn hit_test(
             return Some(Hit::Seek(((x - bx) / bw.max(1.0)).clamp(0.0, 1.0)));
         }
     }
-    button_centers(&g, scale)
-        .into_iter()
+    button_centers(&g, scale, lyrics_available)
         .find(|&(button, bx, by)| {
             let r = if button == Button::PlayPause {
                 19.0
@@ -872,7 +881,7 @@ pub fn draw(
     // Botones de control
     let mut seek = None;
     if let Some(c) = &controls {
-        for (button, cx, cy) in button_centers(&g, s) {
+        for (button, cx, cy) in button_centers(&g, s, c.lyrics_available) {
             match c.pressed {
                 Some((pressed, t)) if pressed == button => {
                     paint.set_color_rgba8(255, 255, 255, (g.alpha * 70.0 * (1.0 - t)) as u8);
@@ -1773,6 +1782,69 @@ mod tests {
             pressed: None,
             levels: Some([0.6, 0.4, 0.3, 0.2]),
             lyrics_active: false,
+            lyrics_available: false,
+        }
+    }
+
+    #[test]
+    fn letra_solo_se_dibuja_y_recibe_clics_cuando_esta_disponible() {
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            let (w, h) = window_size();
+            let (w, h) = ((w * scale).ceil() as u32, (h * scale).ceil() as u32);
+            let g = geometry(w as f32, h as f32, scale, 1.0, 1.0, (0.0, 0.0));
+            let (_, lx, ly) = button_centers(&g, scale, true).next().unwrap();
+            for available in [false, true] {
+                let buttons: Vec<_> = button_centers(&g, scale, available).collect();
+                assert_eq!(buttons.len(), if available { 4 } else { 3 });
+                let mut image = Pixmap::new(w, h).unwrap();
+                let mut c = controls();
+                c.lyrics_available = available;
+                for (button, x, y) in buttons {
+                    draw_button(&mut image, button, &c, x, y, scale, 1.0);
+                    assert!(
+                        hit_test(
+                            w as f32,
+                            h as f32,
+                            scale,
+                            1.0,
+                            1.0,
+                            (0.0, 0.0),
+                            false,
+                            false,
+                            false,
+                            available,
+                            x,
+                            y
+                        ) == Some(Hit::Button(button))
+                    );
+                    if button == Button::PlayPause && !available {
+                        assert!((x - (g.x0 + g.w / 2.0)).abs() < 0.01);
+                    }
+                }
+                assert_eq!(
+                    image
+                        .pixel((lx - 3.0 * scale) as u32, (ly - 2.0 * scale) as u32)
+                        .unwrap()
+                        .alpha()
+                        > 0,
+                    available
+                );
+                let hit = hit_test(
+                    w as f32,
+                    h as f32,
+                    scale,
+                    1.0,
+                    1.0,
+                    (0.0, 0.0),
+                    false,
+                    false,
+                    false,
+                    available,
+                    lx,
+                    ly,
+                );
+                assert_eq!(hit == Some(Hit::Button(Button::Lyrics)), available);
+            }
         }
     }
 

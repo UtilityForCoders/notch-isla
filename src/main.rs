@@ -748,7 +748,7 @@ impl App {
             self.lyrics_order.push_back(found.key.clone());
         }
         self.lyrics.insert(found.key, found.lines);
-        if redraw && self.settings.lyrics() {
+        if redraw {
             self.sync_lyrics_expansion();
             self.redraw();
         }
@@ -1387,6 +1387,9 @@ impl App {
     /// Clic en un botón: manda la orden a la app y anima el botón.
     fn press(&mut self, button: Button) {
         if button == Button::Lyrics {
+            if !self.has_current_lyrics() {
+                return;
+            }
             // El botón está en la isla expandida: cambia la letra de la isla, no la del proyector.
             self.settings.lyrics_island = !self.settings.lyrics_island;
             self.settings.save();
@@ -1703,6 +1706,7 @@ impl App {
             media.timeline.is_some(),
             media.sessions.1 > 1,
             self.update.is_some(),
+            self.has_current_lyrics(),
             x,
             y,
         )
@@ -2134,6 +2138,7 @@ impl App {
             sessions: m.sessions,
             cover_hovered: self.cover_hovered,
             lyrics_active: self.settings.lyrics_island && self.has_current_lyrics(),
+            lyrics_available: self.has_current_lyrics(),
         });
         // El contenido expandido (y con él la barra) se ve a partir de ~55 % de la expansión.
         // Mientras se muestra el volumen también hace falta redibujar: para quitarlo a tiempo.
@@ -4207,6 +4212,7 @@ mod tests {
                     pressed: None,
                     levels: None,
                     lyrics_active: true,
+                    lyrics_available: true,
                 }),
                 island::Indicators::default(),
                 None,
