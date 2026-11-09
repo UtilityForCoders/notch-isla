@@ -60,12 +60,14 @@ struct Ui {
     receive_code: Option<String>,
     sending: bool,
     accepting: bool,
+    status: String,
+    modal: bool,
 }
 
 thread_local! {
     static UI: RefCell<Ui> = {
         let (tx, rx) = mpsc::channel();
-        RefCell::new(Ui { tx, rx, store: None, pairing: Arc::new(share::Pairing::default()), cancel: None, service_id: 0, receive_code: None, sending: false, accepting: false })
+        RefCell::new(Ui { tx, rx, store: None, pairing: Arc::new(share::Pairing::default()), cancel: None, service_id: 0, receive_code: None, sending: false, accepting: false, status: String::new(), modal: false })
     };
 }
 
@@ -107,7 +109,13 @@ fn reporter(hwnd: HWND) -> impl Fn(Event) + Send + 'static {
 }
 
 fn notify(detail: &str) {
+    UI.with_borrow_mut(|ui| ui.status = detail.to_string());
     crate::with_app(|app| {
+        if app.page == crate::workspace::Page::Share {
+            app.scroll_start = std::time::Instant::now();
+            app.redraw();
+            return;
+        }
         app.show_notice_card(
             Notice {
                 icon: NoticeIcon::Wireless,
@@ -126,6 +134,82 @@ fn action(id: usize, label: impl Into<String>) -> Item {
         label: label.into(),
         checked: false,
     }
+}
+
+struct PanelModal(bool);
+
+fn panel_modal() -> PanelModal {
+    PanelModal(UI.with_borrow_mut(|ui| {
+        let previous = ui.modal;
+        ui.modal = true;
+        previous
+    }))
+}
+
+impl Drop for PanelModal {
+    fn drop(&mut self) {
+        UI.with_borrow_mut(|ui| ui.modal = self.0);
+        crate::with_app(|app| app.redraw());
+    }
+}
+
+pub fn panel_state() -> crate::workspace::ShareState {
+    UI.with_borrow(|ui| crate::workspace::ShareState {
+        receiving: ui.cancel.is_some(),
+        devices: ui.store.as_ref().map_or(0, |store| store.device_count()),
+        busy: ui.sending || ui.accepting || ui.modal,
+        status: ui.status.clone(),
+    })
+}
+
+/// Las acciones del panel se ejecutan fuera del préstamo de App: los diálogos procesan mensajes.
+pub fn perform(hwnd: HWND, action: crate::workspace::ShareAction) {
+    use crate::workspace::ShareAction;
+    if UI.with_borrow(|ui| ui.sending || ui.accepting || ui.modal) {
+        notify("Termina primero la solicitud actual.");
+        return;
+    }
+    match action {
+        ShareAction::Files => {
+            let _modal = panel_modal();
+            notify("Elige archivos para compartir");
+            let selected = choose_files(hwnd);
+            match selected {
+                Ok(Some(files)) => start_send(hwnd, Payload::Files(files)),
+                Ok(None) => {}
+                Err(_) => notify("No se pudo abrir el selector de archivos."),
+            }
+        }
+        ShareAction::Clipboard => match crate::share_preview::clipboard_image(hwnd)
+            .map(Payload::Image)
+            .or_else(|| clipboard_text(hwnd).map(Payload::Text))
+        {
+            Some(payload) => start_send(hwnd, payload),
+            None => notify("Copia texto o una imagen primero."),
+        },
+        ShareAction::Pair => start_pairing(hwnd),
+        ShareAction::Devices => start_search(hwnd, Search::Manage),
+        ShareAction::Receive => {
+            let Some(store) = store() else {
+                return;
+            };
+            if UI.with_borrow(|ui| ui.cancel.is_some()) {
+                match store.set_enabled(false) {
+                    Ok(()) => {
+                        stop();
+                        notify("Recepción pausada");
+                    }
+                    Err(error) => notify(&format!("No se pudo pausar. {error}")),
+                }
+            } else {
+                enable_receive(hwnd);
+                if UI.with_borrow(|ui| ui.cancel.is_some()) {
+                    notify("Recepción activada");
+                }
+            }
+        }
+    }
+    crate::with_app(|app| app.redraw());
 }
 
 pub fn open(hwnd: HWND) {
@@ -378,6 +462,7 @@ fn choose_device(hwnd: HWND, payload: Payload, peers: Vec<Peer>) {
     let Some(store) = store() else {
         return;
     };
+    let _modal = panel_modal();
     let description = match &payload {
         Payload::Image(_) => "Imagen copiada".into(),
         Payload::Text(text) => format!("Texto · {} caracteres", text.chars().count()),
@@ -441,6 +526,7 @@ fn choose_pair(hwnd: HWND, peers: Vec<Peer>) {
     let Some(store) = store() else {
         return;
     };
+    let _modal = panel_modal();
     let peers: Vec<_> = peers.into_iter().filter(|peer| peer.pairable).collect();
     let mut items = vec![
         Item::Label("Vincular equipo".into()),
@@ -487,6 +573,7 @@ fn manage_devices(peers: Vec<Peer>) {
     let Some(store) = store() else {
         return;
     };
+    let _modal = panel_modal();
     let devices = store.devices();
     let mut items = vec![Item::Label("Tus dispositivos".into())];
     for (index, device) in devices.iter().enumerate() {
@@ -587,7 +674,7 @@ pub fn on_event(hwnd: HWND) {
             Event::Sent(result) => {
                 UI.with_borrow_mut(|ui| ui.sending = false);
                 match result {
-                    Ok(()) => notify("El destinatario recibió el envío."),
+                    Ok(()) => notify("Envío completado"),
                     Err(error) => notify(&format!("No se pudo enviar. {error}")),
                 }
             }
@@ -616,7 +703,8 @@ pub fn on_event(hwnd: HWND) {
                 }
                 match event {
                     ReceiveEvent::Ready(code) => {
-                        UI.with_borrow_mut(|ui| ui.receive_code = Some(code))
+                        UI.with_borrow_mut(|ui| ui.receive_code = Some(code));
+                        crate::with_app(|app| app.redraw());
                     }
                     ReceiveEvent::Pair {
                         name,

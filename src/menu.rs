@@ -132,8 +132,11 @@ pub enum MenuAction {
     /// Cierra el menú (la opción ya se procesó).
     Close,
     /// Mantiene el menú abierto y actualiza las opciones (por ejemplo, alternar casillas de verificación).
+    // Se conserva para los menús interactivos y sus pruebas de regresión.
+    #[cfg_attr(not(test), allow(dead_code))]
     KeepOpen(Vec<Item>),
     /// Cambia solo el deslizador y una casilla relacionada, conservando los demás layouts.
+    #[cfg_attr(not(test), allow(dead_code))]
     UpdateSlider {
         id: usize,
         value: u32,

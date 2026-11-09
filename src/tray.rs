@@ -24,7 +24,7 @@ use crate::hotkey::{self, Hotkey};
 use crate::menu::{self, Item};
 use crate::monitors::{self, Monitor};
 use crate::routing::Output;
-use crate::settings::{Settings, HIDE_DELAYS};
+use crate::settings::Settings;
 use crate::{autostart, island};
 
 /// Mensaje que Windows nos manda cuando hay clics sobre el ícono.
@@ -53,8 +53,8 @@ const CMD_BATTERY_NOTICES: usize = 20;
 const CMD_BATTERY_REFRESH: usize = 21;
 const CMD_CONNECTION_NOTICES: usize = 22;
 const CMD_SHARE: usize = 23;
+const CMD_SETTINGS: usize = 24;
 /// Las opciones de los submenús van numeradas a partir de estas bases.
-const CMD_HIDE_DELAY: usize = 100;
 const CMD_MONITOR: usize = 200;
 const CMD_TIMER: usize = 300;
 /// Menú de salida de audio de la isla.
@@ -73,8 +73,6 @@ pub enum Command {
     ToggleAutostart,
     Update,
     Exit,
-    /// Segundos para ocultarse sola (0 = nunca).
-    HideDelay(u32),
     /// Posición en la lista de pantallas.
     Monitor(usize),
     /// Minutos del temporizador.
@@ -99,6 +97,7 @@ pub enum Command {
     /// Alternar desenfoque real del fondo.
     ToggleTranslucent,
     ToggleExpandOnHover,
+    TogglePinnedExpanded,
     BlurRadius(u32),
 }
 
@@ -199,7 +198,7 @@ impl Drop for Tray {
 /// Muestra el menú de la bandeja junto al cursor y devuelve la opción elegida.
 ///
 /// Genera las opciones del menú para el estado actual.
-pub fn build_items(state: &MenuState) -> Vec<Item> {
+fn build_settings_items(state: &MenuState) -> Vec<Item> {
     let settings = &state.settings;
     let action = |id: usize, label: &str, checked: bool| Item::Action {
         id,
@@ -210,26 +209,14 @@ pub fn build_items(state: &MenuState) -> Vec<Item> {
         Item::Label(format!("Notch Isla v{}", env!("CARGO_PKG_VERSION"))),
         Item::Separator,
     ];
-    if let Some(label) = state.update {
+    let mut update_label = state.update.map(str::to_string);
+    crate::with_app(|app| {
+        update_label = app.update.as_ref().map(crate::update::Update::menu_label)
+    });
+    if let Some(label) = update_label.as_deref() {
         items.push(action(CMD_UPDATE, label, false));
         items.push(Item::Separator);
     }
-
-    let delays = HIDE_DELAYS
-        .iter()
-        .enumerate()
-        .map(|(i, &secs)| {
-            let label = match secs {
-                0 => "Nunca".to_string(),
-                s => format!("{s} segundos"),
-            };
-            action(CMD_HIDE_DELAY + i, &label, settings.hide_delay == secs)
-        })
-        .collect();
-    items.push(Item::Group {
-        label: "Ocultarse sola tras".to_string(),
-        items: delays,
-    });
 
     if state.monitors.len() > 1 {
         let current = monitors::find(&settings.monitor);
@@ -262,7 +249,11 @@ pub fn build_items(state: &MenuState) -> Vec<Item> {
     });
 
     items.push(Item::Separator);
-    let mut devices = Vec::new();
+    let mut devices = battery_items(
+        &crate::battery::Snapshot::default(),
+        settings.battery_notices,
+        settings.connection_notices,
+    );
     crate::with_app(|app| devices = app.battery_group_items());
     items.push(Item::Group {
         label: "Dispositivos y batería".into(),
@@ -327,6 +318,11 @@ pub fn build_items(state: &MenuState) -> Vec<Item> {
         settings.expand_on_hover,
     ));
     items.push(action(
+        CMD_PIN_EXPANDED,
+        "Mantener la isla expandida",
+        settings.pinned_expanded,
+    ));
+    items.push(action(
         CMD_AUTOSTART,
         "Iniciar con Windows",
         autostart::is_enabled(),
@@ -377,14 +373,13 @@ fn id_to_command(id: usize, state: &MenuState) -> Option<Command> {
         CMD_HIGH_REFRESH => Some(Command::ToggleHighRefresh),
         CMD_TRANSLUCENT => Some(Command::ToggleTranslucent),
         CMD_EXPAND_ON_HOVER => Some(Command::ToggleExpandOnHover),
+        CMD_PIN_EXPANDED => Some(Command::TogglePinnedExpanded),
         CMD_HOTKEY_CHANGE => Some(Command::ChangeHotkey),
         CMD_HOTKEY_DEFAULT => Some(Command::SetHotkey(Some(hotkey::DEFAULT))),
         CMD_HOTKEY_OFF => Some(Command::SetHotkey(None)),
         _ => {
             if let Some(i) = pick(CMD_BLUR_RADIUS, 41) {
                 Some(Command::BlurRadius(i as u32))
-            } else if let Some(i) = pick(CMD_HIDE_DELAY, HIDE_DELAYS.len()) {
-                Some(Command::HideDelay(HIDE_DELAYS[i]))
             } else if let Some(i) = pick(CMD_MONITOR, state.monitors.len()) {
                 Some(Command::Monitor(i))
             } else {
@@ -397,36 +392,131 @@ fn id_to_command(id: usize, state: &MenuState) -> Option<Command> {
 /// No recibe `&Tray` a propósito: el menú corre su propio bucle de mensajes y la ventana
 /// sigue recibiendo mensajes mientras está abierto (no debe haber un préstamo de la app activo).
 /// Permite ejecutar comandos de configuración manteniendo el menú abierto e interactivo.
+pub fn build_items(_state: &MenuState) -> Vec<Item> {
+    vec![
+        Item::Action {
+            id: CMD_SETTINGS,
+            label: "Configuración…".into(),
+            checked: false,
+        },
+        Item::Separator,
+        Item::Action {
+            id: CMD_EXIT,
+            label: "Salir".into(),
+            checked: false,
+        },
+    ]
+}
+
+fn categories(state: &MenuState) -> Vec<crate::settings_ui::Category> {
+    use crate::settings_ui::Category;
+    let mut categories: Vec<Category> = [
+        ("General", "Inicio, comportamiento y atajos de teclado"),
+        ("Apariencia", "Pantalla, posición y efectos visuales"),
+        (
+            "Música y letra",
+            "Reproducción y letra sincronizada de LRCLIB",
+        ),
+        ("Dispositivos", "Batería, conexiones y avisos"),
+        ("Temporizador", "Elige cuándo quieres recibir un aviso"),
+        ("Compartir", "Archivos y portapapeles entre tus equipos"),
+        ("Actualizaciones", "Versión instalada y nuevas versiones"),
+    ]
+    .into_iter()
+    .map(|(title, description)| Category {
+        title: title.into(),
+        description: description.into(),
+        items: Vec::new(),
+    })
+    .collect();
+    for item in build_settings_items(state) {
+        let index = match &item {
+            Item::Separator => continue,
+            Item::Label(_) => 6,
+            Item::Group { label, .. } => match label.as_str() {
+                "Pantalla" | "Desenfoque del fondo" => 1,
+                "Mostrar letra de la canción" => 2,
+                "Dispositivos y batería" => 3,
+                "Temporizador" => 4,
+                _ => 0,
+            },
+            Item::Action { id, .. } => match *id {
+                CMD_EXIT => continue,
+                CMD_CENTER | CMD_HIGH_REFRESH => 1,
+                CMD_REAL_BARS => 2,
+                CMD_NOTICES => 3,
+                CMD_SHARE => 5,
+                CMD_UPDATE | CMD_CHECK_UPDATES => 6,
+                _ => 0,
+            },
+            _ => 0,
+        };
+        categories[index].items.push(item);
+    }
+    categories
+}
+
+pub(crate) fn is_toggle(id: usize) -> bool {
+    matches!(
+        id,
+        CMD_AUTOSTART
+            | CMD_NOTICES
+            | CMD_FULLSCREEN
+            | CMD_LYRICS
+            | CMD_LYRICS_PROJECTOR
+            | CMD_REAL_BARS
+            | CMD_HIGH_REFRESH
+            | CMD_TRANSLUCENT
+            | CMD_EXPAND_ON_HOVER
+            | CMD_PIN_EXPANDED
+            | CMD_BATTERY_NOTICES
+            | CMD_CONNECTION_NOTICES
+    )
+}
+
 pub fn show_menu<F>(mut state: MenuState, mut on_command: F)
 where
     F: FnMut(Command, &mut Settings) -> bool,
 {
-    let items = build_items(&state);
-    let mut appearance_changed = false;
-    menu::show_tray(items, |id| {
-        let Some(cmd) = id_to_command(id, &state) else {
-            return menu::MenuAction::Close;
-        };
-        let mut settings = state.settings.clone();
-        let blur_changed = matches!(&cmd, Command::BlurRadius(_));
-        let keep_open = on_command(cmd, &mut settings);
-        if keep_open {
-            state.settings = settings;
-            if blur_changed {
-                appearance_changed = true;
-                return menu::MenuAction::UpdateSlider {
-                    id: CMD_BLUR_RADIUS,
-                    value: state.settings.blur_radius,
-                    label: format!("Intensidad: {} %", state.settings.blur_radius * 100 / 40),
-                    checked: Some((CMD_TRANSLUCENT, state.settings.translucent)),
-                };
-            }
-            let new_items = build_items(&state);
-            menu::MenuAction::KeepOpen(new_items)
-        } else {
-            menu::MenuAction::Close
-        }
+    let mut chosen = None;
+    menu::show_tray(build_items(&state), |id| {
+        chosen = Some(id);
+        menu::MenuAction::Close
     });
+    if chosen == Some(CMD_EXIT) {
+        on_command(Command::Exit, &mut state.settings);
+        return;
+    }
+    if chosen != Some(CMD_SETTINGS) {
+        return;
+    }
+    // La configuración es una ventana independiente: la isla sigue ocultándose y avisando.
+    crate::with_app(|app| {
+        app.tray_menu_open = false;
+        app.show_next_notice();
+    });
+    let mut appearance_changed = false;
+    let result = crate::settings_ui::show(categories(&state), |id| {
+        let mut close = false;
+        if let Some(id) = id {
+            if let Some(cmd) = id_to_command(id, &state) {
+                appearance_changed |= matches!(cmd, Command::BlurRadius(_));
+                on_command(cmd, &mut state.settings);
+                close = matches!(id, CMD_SHARE | CMD_HOTKEY_CHANGE | CMD_UPDATE);
+            }
+        }
+        crate::with_app(|app| {
+            state.settings = app.settings.clone();
+            state.timer_left = app.countdown_left();
+        });
+        (categories(&state), close)
+    });
+    if let Err(error) = result {
+        crate::with_app(|app| {
+            app.tray
+                .notify("Configuración", &format!("No se pudo abrir: {error}"))
+        });
+    }
     if appearance_changed {
         state.settings.save_appearance();
     }
@@ -678,5 +768,89 @@ fn make_icon() -> Result<HICON> {
         let _ = DeleteObject(color.into());
         let _ = DeleteObject(mask.into());
         icon
+    }
+}
+
+#[cfg(test)]
+mod settings_tests {
+    use super::*;
+
+    fn ids(items: &[Item]) -> Vec<usize> {
+        let mut out = Vec::new();
+        for item in items {
+            match item {
+                Item::Action { id, .. } | Item::Slider { id, .. } => out.push(*id),
+                Item::Group { items, .. } => out.extend(ids(items)),
+                _ => {}
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn configuracion_conserva_cada_opcion_en_una_categoria() {
+        let monitors = monitors::list();
+        let state = MenuState {
+            update: Some("Instalar nueva versión"),
+            settings: Settings::load(),
+            monitors: &monitors,
+            timer_left: Some(12),
+        };
+        assert_eq!(ids(&build_items(&state)), vec![CMD_SETTINGS, CMD_EXIT]);
+        let mut expected = ids(&build_settings_items(&state));
+        expected.retain(|id| *id != CMD_EXIT);
+        let groups = categories(&state);
+        assert_eq!(groups.len(), 7);
+        let mut actual: Vec<_> = groups
+            .iter()
+            .flat_map(|category| ids(&category.items))
+            .collect();
+        expected.sort_unstable();
+        actual.sort_unstable();
+        assert_eq!(actual, expected);
+        actual.dedup();
+        assert_eq!(actual.len(), expected.len());
+        for id in actual {
+            assert!(id_to_command(id, &state).is_some());
+        }
+    }
+
+    #[test]
+    #[ignore = "ventana de revisión visual; los cambios de esta prueba solo viven en memoria"]
+    fn revisar_configuracion() {
+        unsafe {
+            windows::Win32::System::Com::CoInitializeEx(
+                None,
+                windows::Win32::System::Com::COINIT_APARTMENTTHREADED,
+            )
+            .ok()
+            .unwrap();
+        }
+        let monitors = monitors::list();
+        let mut state = MenuState {
+            update: None,
+            settings: Settings::load(),
+            monitors: &monitors,
+            timer_left: None,
+        };
+        crate::settings_ui::show(categories(&state), |id| {
+            if let Some(id) = id {
+                match id_to_command(id, &state) {
+                    Some(Command::ToggleFullscreen) => state.settings.hide_fullscreen ^= true,
+                    Some(Command::ToggleExpandOnHover) => state.settings.expand_on_hover ^= true,
+                    Some(Command::TogglePinnedExpanded) => state.settings.pinned_expanded ^= true,
+                    Some(Command::ToggleTranslucent) => state.settings.translucent ^= true,
+                    Some(Command::ToggleHighRefresh) => state.settings.high_refresh ^= true,
+                    Some(Command::ToggleLyricsIsland) => state.settings.lyrics_island ^= true,
+                    Some(Command::ToggleLyricsProjector) => state.settings.lyrics_projector ^= true,
+                    Some(Command::BlurRadius(value)) => state.settings.blur_radius = value,
+                    Some(Command::Timer(minutes)) => state.timer_left = Some(minutes),
+                    Some(Command::CancelTimer) => state.timer_left = None,
+                    _ => {}
+                }
+            }
+            (categories(&state), false)
+        })
+        .unwrap();
     }
 }
