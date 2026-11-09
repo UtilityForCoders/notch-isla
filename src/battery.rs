@@ -217,6 +217,14 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
+    pub fn low_devices(&self) -> Vec<Device> {
+        self.devices
+            .iter()
+            .filter(|device| self.confirmed_link(device) && device.has_low_battery())
+            .cloned()
+            .collect()
+    }
+
     pub fn confirmed_link(&self, device: &Device) -> bool {
         device.active_link()
             && !self.checking_links.contains_key(&device.id)
@@ -1422,6 +1430,32 @@ mod tests {
             windows_cached: false,
             detail: String::new(),
         }
+    }
+
+    #[test]
+    fn low_devices_only_lists_confirmed_current_discharging_devices() {
+        let mut snapshot = Snapshot::default();
+        for (id, level, charging, stale) in [
+            ("low", Some(Level::Percent(20)), false, false),
+            ("approximate", Some(Level::Low), false, false),
+            ("charging", Some(Level::Percent(10)), true, false),
+            ("old", Some(Level::Percent(10)), false, true),
+            ("high", Some(Level::Percent(21)), false, false),
+            ("unknown", None, false, false),
+            ("checking", Some(Level::Percent(10)), false, false),
+            ("bt:unavailable", Some(Level::Percent(10)), false, false),
+        ] {
+            let mut item = device(level, charging);
+            item.id = id.into();
+            item.stale = stale;
+            snapshot.devices.push(item);
+        }
+        snapshot
+            .checking_links
+            .insert("checking".into(), Instant::now());
+        snapshot.unavailable.insert(Source::Bluetooth);
+        let ids: Vec<_> = snapshot.low_devices().into_iter().map(|d| d.id).collect();
+        assert_eq!(ids, ["low", "approximate"]);
     }
 
     #[test]

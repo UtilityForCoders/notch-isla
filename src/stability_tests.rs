@@ -46,6 +46,7 @@ fn isla_con_desenfoque_sigue_ocultandose_y_recibiendo_clics() {
         settings.hotkey = None;
         let mut app = App::new(hwnd, monitors::find(""), settings).unwrap();
         app.tray.remove();
+        app.idle_hidden = false;
         app.pos = POINT {
             x: -32000,
             y: -32000,
@@ -171,7 +172,6 @@ fn isla_con_desenfoque_sigue_ocultandose_y_recibiendo_clics() {
         if drag_bench {
             with_app(|app| {
                 app.settings.hide_delay = 0;
-                app.stop_idle_countdown();
                 app.pos.y = 0;
                 app.presence.reset(1.0);
                 app.spring.reset(1.0);
@@ -379,10 +379,10 @@ fn isla_con_desenfoque_sigue_ocultandose_y_recibiendo_clics() {
             let media = app.media.take();
             app.battery_low = true;
             app.end_notice();
-            assert!(app.shown && !app.visible && app.edge_strip());
+            assert!(app.shown && app.visible && !app.edge_strip());
             app.battery_low = false;
             app.update_visibility();
-            assert!(!app.shown && !app.edge_strip());
+            assert!(app.shown && app.visible && !app.edge_strip());
             app.media = media;
             app.update_visibility();
             app.settings.battery_notices = battery_notices;
@@ -474,7 +474,6 @@ fn isla_con_desenfoque_sigue_ocultandose_y_recibiendo_clics() {
         }
         with_app(|app| {
             app.settings.pinned_expanded = false;
-            app.start_idle_countdown();
         });
 
         let seconds = std::env::var("NOTCH_STRESS_SECONDS")
@@ -546,6 +545,10 @@ fn isla_con_desenfoque_sigue_ocultandose_y_recibiendo_clics() {
                         "el clic debe liberar el arrastre"
                     );
                     assert!(app.dragging.is_none(), "el mouse no debe quedar capturado");
+                    // El ocultamiento ahora es explícito; la inactividad solo contrae la isla.
+                    if actions % 3 == 0 {
+                        app.toggle_hidden();
+                    }
                 });
             }
         }
