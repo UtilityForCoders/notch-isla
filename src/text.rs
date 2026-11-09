@@ -97,7 +97,7 @@ pub struct TextRenderer {
     lyric_current: IDWriteTextFormat,
     lyric_secondary: IDWriteTextFormat,
     label_lines: Vec<Option<Line>>,
-    label_styles: [bool; 16],
+    label_styles: Vec<bool>,
     title_line: Option<Line>,
     subtitle_line: Option<Line>,
     // Una entrada por etiqueta: memoria acotada aunque cambien canción y tiempos.
@@ -113,6 +113,10 @@ pub struct TextRenderer {
 impl TextRenderer {
     /// Crea los formatos y un pincel compartido para todos los textos de la isla.
     pub fn new(scale: f32) -> Result<Self> {
+        Self::with_label_capacity(scale, 16)
+    }
+
+    pub(crate) fn with_label_capacity(scale: f32, capacity: usize) -> Result<Self> {
         unsafe {
             let d2d: ID2D1Factory = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?;
             let wic: IWICImagingFactory =
@@ -155,8 +159,8 @@ impl TextRenderer {
                 time_lines: [None, None],
                 seek_line: None,
                 lyric_cache: Vec::with_capacity(LYRIC_CACHE),
-                label_lines: (0..16).map(|_| None).collect(),
-                label_styles: [false; 16],
+                label_lines: (0..capacity).map(|_| None).collect(),
+                label_styles: vec![false; capacity],
                 title_line: None,
                 subtitle_line: None,
                 scale,
@@ -275,7 +279,7 @@ impl TextRenderer {
                 .PushAxisAlignedClip(&zone_rect, D2D1_ANTIALIAS_MODE_ALIASED);
             self.target.Clear(Some(&D2D1_COLOR_F::default()));
 
-            for (index, label) in areas.labels.iter().take(16).enumerate() {
+            for (index, label) in areas.labels.iter().take(self.label_lines.len()).enumerate() {
                 if self.label_styles[index] != label.strong {
                     self.label_lines[index] = None;
                     self.label_styles[index] = label.strong;

@@ -18,6 +18,7 @@ mod notice_card;
 mod projector;
 mod routing;
 mod settings;
+mod settings_ui;
 mod share;
 mod share_identity;
 mod share_preview;
@@ -3528,6 +3529,18 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                             app.settings.blur_radius = radius;
                             app.settings.translucent = true;
                             app.redraw();
+                        });
+                        true
+                    }
+                    Command::TogglePinnedExpanded => {
+                        settings.pinned_expanded = !settings.pinned_expanded;
+                        settings.save();
+                        with_app(|app| {
+                            app.settings.pinned_expanded = settings.pinned_expanded;
+                            if settings.pinned_expanded {
+                                app.reveal();
+                            }
+                            app.update_expansion();
                         });
                         true
                     }
