@@ -29,24 +29,27 @@ pub struct ShareState {
 
 fn regions(width: f32, page: Page) -> Vec<(Hit, [f32; 4])> {
     let mut regions = vec![
-        (Hit::Tab(Page::Music), [12.0, 8.0, 76.0, 26.0]),
-        (Hit::Tab(Page::Share), [94.0, 8.0, 114.0, 26.0]),
+        (Hit::Tab(Page::Music), [16.0, 12.0, 88.0, 28.0]),
+        (Hit::Tab(Page::Share), [104.0, 12.0, 106.0, 28.0]),
     ];
     if page == Page::Share {
         regions.extend([
             (
                 Hit::Share(ShareAction::Files),
-                [14.0, 48.0, width - 28.0, 38.0],
+                [20.0, 56.0, width - 40.0, 42.0],
             ),
             (
                 Hit::Share(ShareAction::Clipboard),
-                [14.0, 92.0, width - 28.0, 38.0],
+                [20.0, 104.0, width - 40.0, 42.0],
             ),
-            (Hit::Share(ShareAction::Pair), [14.0, 138.0, 90.0, 26.0]),
-            (Hit::Share(ShareAction::Devices), [110.0, 138.0, 90.0, 26.0]),
+            (Hit::Share(ShareAction::Pair), [20.0, 158.0, 88.0, 28.0]),
+            (
+                Hit::Share(ShareAction::Devices),
+                [114.0, 158.0, width - 176.0, 28.0],
+            ),
             (
                 Hit::Share(ShareAction::Receive),
-                [width - 46.0, 138.0, 32.0, 26.0],
+                [width - 56.0, 158.0, 36.0, 28.0],
             ),
         ]);
     }
@@ -84,17 +87,28 @@ pub fn draw(
         ..Default::default()
     };
     let mut labels = Vec::new();
+    // Una sola pista para las pestañas; solo la selección tiene un fondo destacado.
+    paint.set_color_rgba8(27, 39, 60, (150.0 * alpha) as u8);
+    island::fill_rounded_rect(
+        pixmap,
+        &paint,
+        left + 16.0 * scale,
+        top + 12.0 * scale,
+        194.0 * scale,
+        28.0 * scale,
+        10.0 * scale,
+    );
     for (hit, [x, y, w, h]) in regions(width / scale, page) {
         let active = matches!(hit, Hit::Tab(tab) if tab == page);
         let hover = hovered == Some(hit);
         let (r, g, b, opacity) = if active {
-            (40, 88, 128, 210)
+            (49, 104, 181, 185)
         } else if hover {
-            (65, 68, 78, 240)
+            (55, 71, 96, 220)
         } else if matches!(hit, Hit::Share(ShareAction::Files | ShareAction::Clipboard)) {
-            (32, 36, 45, 240)
+            (31, 44, 65, 220)
         } else {
-            (25, 27, 33, 150)
+            (29, 40, 59, if matches!(hit, Hit::Tab(_)) { 0 } else { 150 })
         };
         paint.set_color_rgba8(r, g, b, (opacity as f32 * alpha) as u8);
         island::fill_rounded_rect(
@@ -104,10 +118,10 @@ pub fn draw(
             top + y * scale,
             w * scale,
             h * scale,
-            9.0 * scale,
+            10.0 * scale,
         );
         let (label, icon) = match hit {
-            Hit::Tab(Page::Music) => ("Música".to_string(), None),
+            Hit::Tab(Page::Music) => ("Música".to_string(), Some(NoticeIcon::Music)),
             Hit::Tab(Page::Share) => ("Compartir".to_string(), Some(NoticeIcon::Wireless)),
             Hit::Share(ShareAction::Files) => {
                 ("Elegir archivos…".to_string(), Some(NoticeIcon::Usb))
@@ -129,10 +143,10 @@ pub fn draw(
                 icon,
                 left + (x + 18.0) * scale,
                 top + (y + h / 2.0) * scale,
-                scale * 0.65,
+                scale * 0.7,
             );
         }
-        let inset = if icon.is_some() { 36.0 } else { 12.0 };
+        let inset = if icon.is_some() { 36.0 } else { 14.0 };
         let text = label;
         labels.push(LabelArea {
             text,
@@ -173,15 +187,15 @@ pub fn draw(
         } else if state.busy {
             "Solicitud en curso…"
         } else if state.receiving {
-            "Recibiendo de tus equipos"
+            "~~~"
         } else {
             "Recepción pausada"
         };
         labels.push(LabelArea {
             text: status.to_string(),
-            x: left + 18.0 * scale,
-            y: top + 171.0 * scale,
-            w: width - 36.0 * scale,
+            x: left + 20.0 * scale,
+            y: top + 192.0 * scale,
+            w: width - 40.0 * scale,
             h: 16.0 * scale,
             alpha: alpha * 0.7,
             strong: false,
@@ -197,8 +211,16 @@ mod tests {
     #[test]
     fn pestañas_y_acciones_coinciden_a_distintos_dpi() {
         for scale in [1.0, 1.25, 1.5, 2.0] {
-            let bounds = (80.0, 8.0, 252.0 * scale, 190.0 * scale, 22.0 * scale);
-            for (hit, [x, y, w, h]) in regions(252.0, Page::Share) {
+            let bounds = (80.0, 8.0, 284.0 * scale, 216.0 * scale, 24.0 * scale);
+            let regions = regions(284.0, Page::Share);
+            for (index, (_, [x, y, w, h])) in regions.iter().enumerate() {
+                assert!(*x >= 16.0 && x + w <= 284.0 - 16.0);
+                assert!(*y >= 12.0 && y + h <= 216.0 - 16.0);
+                for (_, [ox, oy, ow, oh]) in &regions[index + 1..] {
+                    assert!(x + w <= *ox || ox + ow <= *x || y + h <= *oy || oy + oh <= *y);
+                }
+            }
+            for (hit, [x, y, w, h]) in regions {
                 assert!(
                     hit_test(
                         bounds,

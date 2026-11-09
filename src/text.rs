@@ -91,6 +91,8 @@ pub struct TextRenderer {
     target: ID2D1RenderTarget,
     title: IDWriteTextFormat,
     subtitle: IDWriteTextFormat,
+    label: IDWriteTextFormat,
+    label_strong: IDWriteTextFormat,
     time: IDWriteTextFormat,
     lyric_current: IDWriteTextFormat,
     lyric_secondary: IDWriteTextFormat,
@@ -132,6 +134,8 @@ impl TextRenderer {
             let lyric_secondary =
                 make_format(&dwrite, DWRITE_FONT_WEIGHT_REGULAR, LYRIC_SIZE * scale)?;
 
+            let label = make_format(&dwrite, DWRITE_FONT_WEIGHT_REGULAR, 12.0 * scale)?;
+            let label_strong = make_format(&dwrite, DWRITE_FONT_WEIGHT_SEMI_BOLD, 12.0 * scale)?;
             Ok(Self {
                 dwrite,
                 d2d,
@@ -142,6 +146,8 @@ impl TextRenderer {
                 target,
                 title,
                 subtitle,
+                label,
+                label_strong,
                 time,
                 lyric_current,
                 lyric_secondary,
@@ -275,9 +281,9 @@ impl TextRenderer {
                     self.label_styles[index] = label.strong;
                 }
                 let format = if label.strong {
-                    &self.title
+                    &self.label_strong
                 } else {
-                    &self.subtitle
+                    &self.label
                 };
                 let clip = D2D_RECT_F {
                     left: label.x,

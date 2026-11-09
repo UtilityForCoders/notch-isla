@@ -15,10 +15,10 @@ use tiny_skia::{
 const COLLAPSED: (f32, f32, f32) = (88.0, 34.0, 17.0);
 
 /// Expandida compacta (sin letra): tarjeta flotante con reproductor.
-pub const EXPANDED_COMPACT: (f32, f32, f32) = (252.0, 190.0, 22.0);
+pub const EXPANDED_COMPACT: (f32, f32, f32) = (284.0, 216.0, 24.0);
 
 /// Expandida amplia (con letra sincronizada): tarjeta completa con reproductor y letra.
-pub const EXPANDED_LYRICS: (f32, f32, f32) = (520.0, 190.0, 22.0);
+pub const EXPANDED_LYRICS: (f32, f32, f32) = (552.0, 216.0, 24.0);
 
 /// Con un aviso del sistema (salida de audio, temporizador, atajo, actualización): una sola
 /// fila con el ícono y los textos, sin el espacio del reproductor.
@@ -28,19 +28,19 @@ const NOTICE_ICON: (f32, f32, f32) = (9.0, 38.0, 9.0);
 
 /// Separación lógica entre el borde superior de la pantalla y la isla flotante (sin tocar el techo).
 const TOP_GAP: f32 = 8.0;
-pub const HEADER_HEIGHT: f32 = 40.0;
+pub const HEADER_HEIGHT: f32 = 48.0;
 pub const EXPANDED_CONTENT_START: f32 = 0.45;
 
 /// Medidas del panel izquierdo de reproducción (píxeles lógicos).
-const COVER_PAD_X: f32 = 18.0;
+const COVER_PAD_X: f32 = 20.0;
 /// Margen superior lógico de la carátula dentro del reproductor.
 const COVER_PAD_TOP: f32 = 14.0;
 /// Lado lógico de la carátula expandida.
-const COVER_SIZE: f32 = 56.0;
+const COVER_SIZE: f32 = 60.0;
 /// Radio lógico de las esquinas de la carátula.
 const COVER_RADIUS: f32 = 10.0;
 /// Ancho lógico reservado al reproductor, independiente del panel de letra.
-const PLAYER_W: f32 = 216.0;
+const PLAYER_W: f32 = EXPANDED_COMPACT.0 - 2.0 * COVER_PAD_X;
 
 /// Barra de progreso: grosor (normal y con mouse encima) y zona de clic.
 const PROGRESS_THICK: (f32, f32) = (3.2, 5.0);
@@ -158,11 +158,11 @@ fn indicator_center(g: &Geometry, p: f32, battery: bool) -> (f32, f32) {
     let p = p.clamp(0.0, 1.0);
     let s = g.scale;
     let x = if battery {
-        g.x0 + 14.0 * s * (1.0 - p) + (g.w - 33.0 * s) * p
+        g.x0 + 14.0 * s * (1.0 - p) + (g.w - 50.0 * s) * p
     } else {
-        g.x1() - (14.0 - p) * s
+        g.x1() - (14.0 + 10.0 * p) * s
     };
-    (x, g.y0 + ((17.0 + 3.0 * p) * s).min(g.h / 2.0))
+    (x, g.y0 + ((17.0 + 9.0 * p) * s).min(g.h / 2.0))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -367,6 +367,7 @@ pub struct LyricsArea {
 /// Ícono de un aviso del sistema.
 #[derive(Clone, Copy, PartialEq)]
 pub enum NoticeIcon {
+    Music,
     Mouse,
     Gamepad,
     Speaker,
@@ -469,7 +470,7 @@ impl Geometry {
         let pw = PLAYER_W * s;
         let bar_x = px + 40.0 * s;
         let bar_w = pw - 82.0 * s;
-        let bar_cy = self.y0 + (86.0 + HEADER_HEIGHT) * s;
+        let bar_cy = self.y0 + (96.0 + HEADER_HEIGHT) * s;
         (bar_x, bar_cy, bar_w.max(10.0 * s))
     }
 }
@@ -581,8 +582,8 @@ pub fn bottom(max_w: f32, max_h: f32, scale: f32, p: f32, presence: f32, shape: 
 
 /// Columna a la derecha de la carátula: (x, ancho). El texto nunca pasa del reproductor.
 fn text_column(g: &Geometry, s: f32) -> (f32, f32) {
-    let x = g.x0 + (COVER_PAD_X + COVER_SIZE + 10.0) * s;
-    let w = (PLAYER_W - COVER_SIZE - 10.0) * s;
+    let x = g.x0 + (COVER_PAD_X + COVER_SIZE + 14.0) * s;
+    let w = (PLAYER_W - COVER_SIZE - 14.0) * s;
     (x, w.max(0.0))
 }
 
@@ -590,10 +591,10 @@ fn text_column(g: &Geometry, s: f32) -> (f32, f32) {
 fn button_centers(g: &Geometry, s: f32) -> [(Button, f32, f32); 4] {
     let px = g.x0 + COVER_PAD_X * s;
     let pw = PLAYER_W * s;
-    let cy = g.y0 + (114.0 + HEADER_HEIGHT) * s;
+    let cy = g.y0 + (134.0 + HEADER_HEIGHT) * s;
     let lyrics_cx = px + 14.0 * s;
     let media_cx = px + 44.0 * s + (pw - 44.0 * s) / 2.0;
-    let gap = 36.0 * s;
+    let gap = 40.0 * s;
     [
         (Button::Lyrics, lyrics_cx, cy),
         (Button::Prev, media_cx - gap, cy),
@@ -654,10 +655,16 @@ pub fn hit_test(
             return Some(Hit::Seek(((x - bx) / bw.max(1.0)).clamp(0.0, 1.0)));
         }
     }
-    let r = BUTTON_RADIUS * scale;
     button_centers(&g, scale)
         .into_iter()
-        .find(|&(_, bx, by)| (x - bx).powi(2) + (y - by).powi(2) <= r * r)
+        .find(|&(button, bx, by)| {
+            let r = if button == Button::PlayPause {
+                19.0
+            } else {
+                BUTTON_RADIUS
+            } * scale;
+            (x - bx).powi(2) + (y - by).powi(2) <= r * r
+        })
         .map(|(b, _, _)| Hit::Button(b))
 }
 
@@ -728,7 +735,7 @@ pub fn draw(
 
     // Tinte sobre el fondo desenfocado del compositor; opaco si no está disponible.
     if translucent {
-        paint.set_color_rgba8(20, 20, 24, 100);
+        paint.set_color_rgba8(14, 22, 38, 118);
         fill_rounded_rect(pixmap, &paint, g.x0, g.y0, g.w, g.h, g.r);
         // Borde translúcido sutil que define los bordes sobre cualquier fondo
         paint.set_color_rgba8(255, 255, 255, 34);
@@ -742,8 +749,18 @@ pub fn draw(
             stroke_path(pixmap, &paint, &border, 1.0);
         }
     } else {
-        paint.set_color_rgba8(0, 0, 0, 255);
+        paint.set_color_rgba8(12, 18, 30, 255);
         fill_rounded_rect(pixmap, &paint, g.x0, g.y0, g.w, g.h, g.r);
+        paint.set_color_rgba8(132, 171, 225, 38);
+        if let Some(border) = rounded_rect_path(
+            g.x0 + 0.5,
+            g.y0 + 0.5,
+            (g.w - 1.0).max(1.0),
+            (g.h - 1.0).max(1.0),
+            (g.r - 0.5).max(0.0),
+        ) {
+            stroke_path(pixmap, &paint, &border, 1.0);
+        }
     }
 
     if notice.is_none() {
@@ -908,7 +925,7 @@ pub fn draw(
         TimeArea {
             cur_x: px,
             rem_x: px + pw - 38.0 * s,
-            y: g.y0 + (78.0 + HEADER_HEIGHT) * s,
+            y: g.y0 + (88.0 + HEADER_HEIGHT) * s,
             current: ti.current,
             remaining: ti.remaining,
             alpha: g.alpha,
@@ -1051,6 +1068,16 @@ pub(crate) fn draw_notice_icon(
 ) {
     let line = 1.8 * s;
     match icon {
+        NoticeIcon::Music => {
+            let mut pb = PathBuilder::new();
+            pb.move_to(cx - 3.0 * s, cy + 5.0 * s);
+            pb.line_to(cx - 3.0 * s, cy - 6.0 * s);
+            pb.line_to(cx + 7.0 * s, cy - 8.0 * s);
+            pb.line_to(cx + 7.0 * s, cy + 3.0 * s);
+            stroke(pixmap, paint, pb, line);
+            fill_circle(pixmap, paint, cx - 5.5 * s, cy + 5.0 * s, 3.0 * s);
+            fill_circle(pixmap, paint, cx + 4.5 * s, cy + 3.0 * s, 3.0 * s);
+        }
         NoticeIcon::Bluetooth => {
             let mut pb = PathBuilder::new();
             pb.move_to(cx - 5.0 * s, cy - 5.0 * s);
@@ -1415,7 +1442,7 @@ fn draw_bars(pixmap: &mut Pixmap, left: f32, cy: f32, s: f32, c: &Controls, t: f
 fn draw_vertical_volume(pixmap: &mut Pixmap, g: &Geometry, s: f32, level: f32, alpha: f32) {
     let bar_w = 4.0 * s;
     let bar_h = 56.0 * s;
-    let vx = g.x0 + 241.0 * s;
+    let vx = g.x0 + (EXPANDED_COMPACT.0 - 10.0) * s;
     let vy = g.cy() - bar_h / 2.0;
     let radius = bar_w / 2.0;
 
@@ -1456,7 +1483,15 @@ fn draw_button(
         ..Default::default()
     };
 
-    if hovered {
+    if button == Button::PlayPause {
+        paint.set_color_rgba8(
+            66,
+            132,
+            235,
+            (alpha * if hovered { 125.0 } else { 78.0 }) as u8,
+        );
+        fill_circle(pixmap, &paint, cx, cy, 19.0 * s);
+    } else if hovered {
         paint.set_color_rgba8(255, 255, 255, (alpha * 35.0) as u8);
         fill_circle(pixmap, &paint, cx, cy, BUTTON_RADIUS * s);
     }

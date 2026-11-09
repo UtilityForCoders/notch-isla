@@ -3645,6 +3645,23 @@ mod tests {
                     detail: String::new(),
                 }];
             }
+            if std::env::var_os("NOTCH_PREVIEW_MEDIA").is_some() {
+                app.set_media(Some(NowPlaying {
+                    title: "Bad Apple!!".into(),
+                    artist: "nomico".into(),
+                    album: String::new(),
+                    playing: false,
+                    cover: None,
+                    timeline: Some(media::Timeline {
+                        position: 267.0,
+                        duration: 319.0,
+                        read_at: Instant::now(),
+                    }),
+                    app_icon: None,
+                    app_id: String::new(),
+                    sessions: (0, 1),
+                }));
+            }
             app.presence.reset(1.0);
             app.spring.reset(1.0);
             APP.with(|cell| *cell.borrow_mut() = Some(app));
@@ -3791,8 +3808,8 @@ mod tests {
             });
             assert!(
                 app.hit_at(
-                    bounds.0 + bounds.2 - 33.0 * app.scale,
-                    bounds.1 + 20.0 * app.scale
+                    bounds.0 + bounds.2 - 50.0 * app.scale,
+                    bounds.1 + 26.0 * app.scale
                 ) == Some(Hit::Battery)
             );
             assert!(app.low_battery_items().iter().any(|item| matches!(
