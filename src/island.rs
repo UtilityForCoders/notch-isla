@@ -738,16 +738,15 @@ pub fn draw(
         ..Default::default()
     };
 
-    let (opaque, tint, border_color) = color.palette();
     let ([r, g_color, b], alpha) = if translucent {
-        (tint, 118)
+        (color.blend(13, 18), 118)
     } else {
-        (opaque, 255)
+        (color.blend(8, 14), 255)
     };
     paint.set_color_rgba8(r, g_color, b, alpha);
     fill_rounded_rect(pixmap, &paint, g.x0, g.y0, g.w, g.h, g.r);
 
-    let [r, g_color, b] = border_color;
+    let [r, g_color, b] = color.blend(255, 48);
     paint.set_color_rgba8(r, g_color, b, if translucent { 34 } else { 38 });
     if let Some(border) = rounded_rect_path(
         g.x0 + 0.5,
@@ -845,13 +844,13 @@ pub fn draw(
                     paint.set_color_rgba8(255, 255, 255, (g.alpha * 70.0 * (1.0 - t)) as u8);
                     fill_circle(pixmap, &paint, cx, cy, BUTTON_RADIUS * s * (0.9 + 0.6 * t));
                     let k = press_scale(t);
-                    draw_button(pixmap, button, c, cx, cy, s * k, g.alpha);
+                    draw_button(pixmap, button, c, cx, cy, s * k, g.alpha, color);
                 }
-                _ => draw_button(pixmap, button, c, cx, cy, s, g.alpha),
+                _ => draw_button(pixmap, button, c, cx, cy, s, g.alpha, color),
             }
         }
         if let Some(progress) = c.progress {
-            draw_progress(pixmap, &g, c.seek_hover.is_some(), progress);
+            draw_progress(pixmap, &g, c.seek_hover.is_some(), progress, color);
             if let Some((fraction, label)) = &c.seek_hover {
                 // Punto donde caería el salto; el tiempo lo escribe DirectWrite encima.
                 let (bar_x, bar_cy, bar_w) = g.progress_bar();
@@ -1324,7 +1323,13 @@ fn draw_session_dots(pixmap: &mut Pixmap, g: &Geometry, index: usize, count: usi
 
 /// Barra inferior: pista gris y nivel `fraction` en blanco.
 /// `thick` la engrosa cuando el mouse está encima.
-fn draw_progress(pixmap: &mut Pixmap, g: &Geometry, thick: bool, fraction: f32) {
+fn draw_progress(
+    pixmap: &mut Pixmap,
+    g: &Geometry,
+    thick: bool,
+    fraction: f32,
+    color: crate::settings::IslandColor,
+) {
     let (bar_x, bar_cy, bar_w) = g.progress_bar();
     let h = if thick {
         PROGRESS_THICK.1
@@ -1339,7 +1344,8 @@ fn draw_progress(pixmap: &mut Pixmap, g: &Geometry, thick: bool, fraction: f32) 
     paint.set_color_rgba8(255, 255, 255, (g.alpha * 48.0) as u8);
     fill_rounded_rect(pixmap, &paint, bar_x, y, bar_w, h, h / 2.0);
 
-    paint.set_color_rgba8(255, 255, 255, (g.alpha * 255.0) as u8);
+    let [r, g_color, b] = color.blend(255, 42);
+    paint.set_color_rgba8(r, g_color, b, (g.alpha * 255.0) as u8);
     let filled = (bar_w * fraction.clamp(0.0, 1.0)).max(h);
     fill_rounded_rect(pixmap, &paint, bar_x, y, filled, h, h / 2.0);
 }
@@ -1434,6 +1440,7 @@ fn draw_vertical_volume(pixmap: &mut Pixmap, g: &Geometry, s: f32, level: f32, a
 
 /// Íconos blancos del reproductor; el botón de letra indica si está activa.
 /// El círculo tenue de fondo resalta el botón bajo el mouse.
+#[allow(clippy::too_many_arguments)]
 fn draw_button(
     pixmap: &mut Pixmap,
     button: Button,
@@ -1442,6 +1449,7 @@ fn draw_button(
     cy: f32,
     s: f32,
     alpha: f32,
+    color: crate::settings::IslandColor,
 ) {
     let a = (alpha * 255.0) as u8;
     let hovered = c.hovered == Some(button);
@@ -1451,18 +1459,15 @@ fn draw_button(
     };
 
     if button == Button::PlayPause {
-        paint.set_color_rgba8(
-            66,
-            132,
-            235,
-            (alpha * if hovered { 125.0 } else { 78.0 }) as u8,
-        );
+        let [r, g, b] = color.blend(35, 55);
+        paint.set_color_rgba8(r, g, b, (alpha * if hovered { 125.0 } else { 78.0 }) as u8);
         fill_circle(pixmap, &paint, cx, cy, 19.0 * s);
     } else if hovered {
         paint.set_color_rgba8(255, 255, 255, (alpha * 35.0) as u8);
         fill_circle(pixmap, &paint, cx, cy, BUTTON_RADIUS * s);
     }
 
+    let [r, g, b] = color.blend(255, 42);
     match button {
         Button::Lyrics => {
             let bubble_a = if c.lyrics_active {
@@ -1470,7 +1475,7 @@ fn draw_button(
             } else {
                 (alpha * 125.0) as u8
             };
-            paint.set_color_rgba8(255, 255, 255, bubble_a);
+            paint.set_color_rgba8(r, g, b, bubble_a);
 
             let bw = 16.0 * s;
             let bh = 11.5 * s;
@@ -1542,7 +1547,7 @@ fn draw_button(
             }
         }
         Button::PlayPause => {
-            paint.set_color_rgba8(255, 255, 255, a);
+            paint.set_color_rgba8(r, g, b, a);
             if c.playing {
                 let bar_w = 3.6 * s;
                 let bar_h = 13.0 * s;
@@ -1570,14 +1575,14 @@ fn draw_button(
             }
         }
         Button::Prev => {
-            paint.set_color_rgba8(255, 255, 255, a);
+            paint.set_color_rgba8(r, g, b, a);
             let tri_w = 6.0 * s;
             let tri_h = 10.0 * s;
             fill_triangle(pixmap, &paint, cx + 1.0 * s, cy, -tri_w, tri_h);
             fill_triangle(pixmap, &paint, cx + 7.5 * s, cy, -tri_w, tri_h);
         }
         Button::Next => {
-            paint.set_color_rgba8(255, 255, 255, a);
+            paint.set_color_rgba8(r, g, b, a);
             let tri_w = 6.0 * s;
             let tri_h = 10.0 * s;
             fill_triangle(pixmap, &paint, cx - 7.5 * s, cy, tri_w, tri_h);
@@ -1821,7 +1826,16 @@ mod tests {
                 let mut c = controls();
                 c.lyrics_available = available;
                 for (button, x, y) in buttons {
-                    draw_button(&mut image, button, &c, x, y, scale, 1.0);
+                    draw_button(
+                        &mut image,
+                        button,
+                        &c,
+                        x,
+                        y,
+                        scale,
+                        1.0,
+                        crate::settings::IslandColor::default(),
+                    );
                     assert!(
                         hit_test(
                             w as f32,

@@ -2368,6 +2368,7 @@ impl App {
                     self.page,
                     self.workspace_hover,
                     &panel,
+                    self.settings.island_color,
                 );
                 if let Some(areas) = areas.as_mut() {
                     areas.labels = labels;
@@ -3552,13 +3553,14 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                         with_app(|app| app.preview_blur_radius(radius));
                         true
                     }
-                    Command::IslandColor(color) => {
-                        settings.island_color = color;
-                        settings.save();
-                        with_app(|app| {
-                            app.settings.island_color = color;
-                            app.redraw();
-                        });
+                    Command::ChooseIslandColor => {
+                        if let Some(color) = settings_ui::choose_color(settings.island_color) {
+                            with_app(|app| {
+                                app.settings.island_color = color;
+                                app.settings.save();
+                                app.redraw();
+                            });
+                        }
                         true
                     }
                     Command::TogglePinnedExpanded => {

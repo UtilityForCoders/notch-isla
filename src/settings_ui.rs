@@ -471,6 +471,30 @@ impl Panel {
     }
 }
 
+pub fn choose_color(color: crate::settings::IslandColor) -> Option<crate::settings::IslandColor> {
+    use windows::Win32::Foundation::COLORREF;
+    use windows::Win32::UI::Controls::Dialogs::{
+        ChooseColorW, CC_FULLOPEN, CC_RGBINIT, CHOOSECOLORW,
+    };
+
+    let [r, g, b] = color.0;
+    let mut custom = [COLORREF(0xFFFFFF); 16];
+    let mut dialog = CHOOSECOLORW {
+        lStructSize: std::mem::size_of::<CHOOSECOLORW>() as u32,
+        hwndOwner: HWND(WINDOW.load(Ordering::SeqCst) as *mut _),
+        rgbResult: COLORREF(u32::from_le_bytes([r, g, b, 0])),
+        lpCustColors: custom.as_mut_ptr(),
+        Flags: CC_RGBINIT | CC_FULLOPEN,
+        ..Default::default()
+    };
+    if unsafe { ChooseColorW(&mut dialog) }.as_bool() {
+        let [r, g, b, _] = dialog.rgbResult.0.to_le_bytes();
+        Some(crate::settings::IslandColor([r, g, b]))
+    } else {
+        None
+    }
+}
+
 /// Ventana independiente: permanece abierta al cambiar opciones y se libera por completo al cerrar.
 pub fn show<F>(categories: Vec<Category>, mut command: F) -> Result<()>
 where

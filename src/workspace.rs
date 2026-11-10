@@ -80,6 +80,7 @@ pub fn draw(
     page: Page,
     hovered: Option<Hit>,
     state: &ShareState,
+    color: crate::settings::IslandColor,
 ) -> Vec<LabelArea> {
     let (left, top, width, _, _) = bounds;
     let mut paint = Paint {
@@ -88,7 +89,8 @@ pub fn draw(
     };
     let mut labels = Vec::new();
     // Una sola pista para las pestañas; solo la selección tiene un fondo destacado.
-    paint.set_color_rgba8(27, 39, 60, (150.0 * alpha) as u8);
+    let [r, g, b] = color.blend(23, 17);
+    paint.set_color_rgba8(r, g, b, (150.0 * alpha) as u8);
     island::fill_rounded_rect(
         pixmap,
         &paint,
@@ -101,14 +103,17 @@ pub fn draw(
     for (hit, [x, y, w, h]) in regions(width / scale, page) {
         let active = matches!(hit, Hit::Tab(tab) if tab == page);
         let hover = hovered == Some(hit);
-        let (r, g, b, opacity) = if active {
-            (49, 104, 181, 185)
+        let ([r, g, b], opacity) = if active {
+            (color.blend(35, 48), 185)
         } else if hover {
-            (55, 71, 96, 220)
+            (color.blend(42, 25), 220)
         } else if matches!(hit, Hit::Share(ShareAction::Files | ShareAction::Clipboard)) {
-            (31, 44, 65, 220)
+            (color.blend(25, 20), 220)
         } else {
-            (29, 40, 59, if matches!(hit, Hit::Tab(_)) { 0 } else { 150 })
+            (
+                color.blend(24, 17),
+                if matches!(hit, Hit::Tab(_)) { 0 } else { 150 },
+            )
         };
         paint.set_color_rgba8(r, g, b, (opacity as f32 * alpha) as u8);
         island::fill_rounded_rect(
@@ -136,7 +141,8 @@ pub fn draw(
             _ => continue,
         };
         if let Some(icon) = icon {
-            paint.set_color_rgba8(116, 190, 252, (alpha * 255.0) as u8);
+            let [r, g, b] = color.blend(255, 42);
+            paint.set_color_rgba8(r, g, b, (alpha * 255.0) as u8);
             island::draw_notice_icon(
                 pixmap,
                 &paint,

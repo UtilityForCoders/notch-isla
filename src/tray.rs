@@ -24,7 +24,7 @@ use crate::hotkey::{self, Hotkey};
 use crate::menu::{self, Item};
 use crate::monitors::{self, Monitor};
 use crate::routing::Output;
-use crate::settings::{IslandColor, Settings};
+use crate::settings::Settings;
 use crate::{autostart, island};
 
 /// Mensaje que Windows nos manda cuando hay clics sobre el ícono.
@@ -100,7 +100,7 @@ pub enum Command {
     ToggleExpandOnHover,
     TogglePinnedExpanded,
     BlurRadius(u32),
-    IslandColor(IslandColor),
+    ChooseIslandColor,
 }
 
 /// Lo que el menú necesita saber para marcar las opciones actuales.
@@ -298,19 +298,11 @@ fn build_settings_items(state: &MenuState) -> Vec<Item> {
         "Activar desenfoque",
         settings.translucent,
     )];
-    items.push(Item::Group {
-        label: "Color del notch".into(),
-        items: IslandColor::OPTIONS
-            .into_iter()
-            .map(|(color, label)| {
-                action(
-                    CMD_ISLAND_COLOR + color as usize,
-                    label,
-                    settings.island_color == color,
-                )
-            })
-            .collect(),
-    });
+    items.push(action(
+        CMD_ISLAND_COLOR,
+        &format!("Color del notch · #{:06X}", settings.island_color.rgb()),
+        false,
+    ));
     blur.push(Item::Slider {
         id: CMD_BLUR_RADIUS,
         label: format!("Intensidad: {} %", settings.blur_radius * 100 / 40),
@@ -389,17 +381,13 @@ fn id_to_command(id: usize, state: &MenuState) -> Option<Command> {
         CMD_TRANSLUCENT => Some(Command::ToggleTranslucent),
         CMD_EXPAND_ON_HOVER => Some(Command::ToggleExpandOnHover),
         CMD_PIN_EXPANDED => Some(Command::TogglePinnedExpanded),
+        CMD_ISLAND_COLOR => Some(Command::ChooseIslandColor),
         CMD_HOTKEY_CHANGE => Some(Command::ChangeHotkey),
         CMD_HOTKEY_DEFAULT => Some(Command::SetHotkey(Some(hotkey::DEFAULT))),
         CMD_HOTKEY_OFF => Some(Command::SetHotkey(None)),
         _ => {
             if let Some(i) = pick(CMD_BLUR_RADIUS, 41) {
                 Some(Command::BlurRadius(i as u32))
-            } else if let Some((color, _)) = IslandColor::OPTIONS
-                .into_iter()
-                .find(|(color, _)| CMD_ISLAND_COLOR + *color as usize == id)
-            {
-                Some(Command::IslandColor(color))
             } else if let Some(i) = pick(CMD_MONITOR, state.monitors.len()) {
                 Some(Command::Monitor(i))
             } else {
@@ -454,7 +442,7 @@ fn categories(state: &MenuState) -> Vec<crate::settings_ui::Category> {
             Item::Separator => continue,
             Item::Label(_) => 6,
             Item::Group { label, .. } => match label.as_str() {
-                "Pantalla" | "Desenfoque del fondo" | "Color del notch" => 1,
+                "Pantalla" | "Desenfoque del fondo" => 1,
                 "Mostrar letra de la canción" => 2,
                 "Dispositivos y batería" => 3,
                 "Temporizador" => 4,
@@ -462,7 +450,7 @@ fn categories(state: &MenuState) -> Vec<crate::settings_ui::Category> {
             },
             Item::Action { id, .. } => match *id {
                 CMD_EXIT => continue,
-                CMD_CENTER | CMD_HIGH_REFRESH => 1,
+                CMD_CENTER | CMD_HIGH_REFRESH | CMD_ISLAND_COLOR => 1,
                 CMD_REAL_BARS => 2,
                 CMD_NOTICES => 3,
                 CMD_SHARE => 5,
@@ -864,7 +852,13 @@ mod settings_tests {
                     Some(Command::ToggleLyricsIsland) => state.settings.lyrics_island ^= true,
                     Some(Command::ToggleLyricsProjector) => state.settings.lyrics_projector ^= true,
                     Some(Command::BlurRadius(value)) => state.settings.blur_radius = value,
-                    Some(Command::IslandColor(color)) => state.settings.island_color = color,
+                    Some(Command::ChooseIslandColor) => {
+                        if let Some(color) =
+                            crate::settings_ui::choose_color(state.settings.island_color)
+                        {
+                            state.settings.island_color = color;
+                        }
+                    }
                     Some(Command::Timer(minutes)) => state.timer_left = Some(minutes),
                     Some(Command::CancelTimer) => state.timer_left = None,
                     _ => {}
