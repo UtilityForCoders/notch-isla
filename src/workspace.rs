@@ -27,10 +27,18 @@ pub struct ShareState {
     pub status: String,
 }
 
+const TAB_X: f32 = 16.0;
+const TAB_Y: f32 = 12.0;
+const TAB_WIDTH: f32 = 36.0;
+const TAB_HEIGHT: f32 = 28.0;
+
 fn regions(width: f32, page: Page) -> Vec<(Hit, [f32; 4])> {
     let mut regions = vec![
-        (Hit::Tab(Page::Music), [16.0, 12.0, 88.0, 28.0]),
-        (Hit::Tab(Page::Share), [104.0, 12.0, 106.0, 28.0]),
+        (Hit::Tab(Page::Music), [TAB_X, TAB_Y, TAB_WIDTH, TAB_HEIGHT]),
+        (
+            Hit::Tab(Page::Share),
+            [TAB_X + TAB_WIDTH, TAB_Y, TAB_WIDTH, TAB_HEIGHT],
+        ),
     ];
     if page == Page::Share {
         regions.extend([
@@ -94,10 +102,10 @@ pub fn draw(
     island::fill_rounded_rect(
         pixmap,
         &paint,
-        left + 16.0 * scale,
-        top + 12.0 * scale,
-        194.0 * scale,
-        28.0 * scale,
+        left + TAB_X * scale,
+        top + TAB_Y * scale,
+        2.0 * TAB_WIDTH * scale,
+        TAB_HEIGHT * scale,
         10.0 * scale,
     );
     for (hit, [x, y, w, h]) in regions(width / scale, page) {
@@ -125,9 +133,24 @@ pub fn draw(
             h * scale,
             10.0 * scale,
         );
+        if let Hit::Tab(tab) = hit {
+            let [r, g, b] = color.blend(255, 42);
+            paint.set_color_rgba8(r, g, b, (alpha * 255.0) as u8);
+            let icon = match tab {
+                Page::Music => NoticeIcon::Music,
+                Page::Share => NoticeIcon::Share,
+            };
+            island::draw_notice_icon(
+                pixmap,
+                &paint,
+                icon,
+                left + (x + w / 2.0) * scale,
+                top + (y + h / 2.0) * scale,
+                scale * 0.85,
+            );
+            continue;
+        }
         let (label, icon) = match hit {
-            Hit::Tab(Page::Music) => ("Música".to_string(), Some(NoticeIcon::Music)),
-            Hit::Tab(Page::Share) => ("Compartir".to_string(), Some(NoticeIcon::Wireless)),
             Hit::Share(ShareAction::Files) => {
                 ("Elegir archivos…".to_string(), Some(NoticeIcon::Usb))
             }
@@ -161,7 +184,7 @@ pub fn draw(
             w: (w - inset - 10.0) * scale,
             h: 18.0 * scale,
             alpha,
-            strong: active,
+            strong: false,
             scroll: false,
         });
         if hit == Hit::Share(ShareAction::Receive) {

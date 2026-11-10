@@ -373,6 +373,7 @@ pub struct LyricsArea {
 #[derive(Clone, Copy, PartialEq)]
 pub enum NoticeIcon {
     Music,
+    Share,
     Mouse,
     Gamepad,
     Speaker,
@@ -1053,6 +1054,17 @@ pub(crate) fn draw_notice_icon(
             pb.line_to(cx + 5.0 * s, cy - 5.0 * s);
             pb.line_to(cx - 5.0 * s, cy + 5.0 * s);
             stroke(pixmap, paint, pb, line);
+        }
+        NoticeIcon::Share => {
+            let nodes = [(-7.0, 0.0), (6.0, -7.0), (6.0, 7.0)];
+            let mut path = PathBuilder::new();
+            path.move_to(cx + 6.0 * s, cy - 7.0 * s);
+            path.line_to(cx - 7.0 * s, cy);
+            path.line_to(cx + 6.0 * s, cy + 7.0 * s);
+            stroke(pixmap, paint, path, line);
+            for (x, y) in nodes {
+                fill_circle(pixmap, paint, cx + x * s, cy + y * s, 3.0 * s);
+            }
         }
         NoticeIcon::Wireless => {
             let mut pb = PathBuilder::new();
