@@ -1369,6 +1369,12 @@ impl App {
         self.redraw();
     }
 
+    /// Previsualiza la intensidad sin cambiar la decisión de activar el desenfoque.
+    fn preview_blur_radius(&mut self, radius: u32) {
+        self.settings.blur_radius = radius;
+        self.redraw();
+    }
+
     fn hidden_by_fullscreen(&self) -> bool {
         self.fullscreen && self.settings.hide_fullscreen
     }
@@ -3580,12 +3586,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                     }
                     Command::BlurRadius(radius) => {
                         settings.blur_radius = radius;
-                        settings.translucent = true;
-                        with_app(|app| {
-                            app.settings.blur_radius = radius;
-                            app.settings.translucent = true;
-                            app.redraw();
-                        });
+                        with_app(|app| app.preview_blur_radius(radius));
                         true
                     }
                     Command::TogglePinnedExpanded => {
@@ -4001,6 +4002,20 @@ mod tests {
                 app.edge_strip(),
                 "quitar la fijación debe recuperar el reposo"
             );
+            app.reveal();
+            app.preview_blur_radius(32);
+            assert!(!app.settings.translucent);
+            assert!(app.backdrop.as_ref().is_none_or(|bg| !bg.is_shown()));
+            let mut appearance = app.settings.clone();
+            appearance.translucent = true;
+            app.apply_settings(appearance.clone());
+            app.preview_blur_radius(8);
+            assert!(app.settings.translucent);
+            appearance.translucent = false;
+            app.apply_settings(appearance);
+            app.preview_blur_radius(24);
+            assert!(!app.settings.translucent);
+            assert!(app.backdrop.as_ref().is_none_or(|bg| !bg.is_shown()));
             app.set_timer(None);
             drop(app);
             let _ = DestroyWindow(hwnd);
