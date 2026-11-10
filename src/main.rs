@@ -2146,16 +2146,12 @@ impl App {
         let reshaping = self.notice_spring.value != notice_shape;
         let strip = self.edge_strip();
         let playing = (self.visible || strip) && self.media.as_ref().is_some_and(|m| m.playing);
-        let bars = self.visible
-            && playing
-            && island::mini_alpha(self.spring.value) > 0.0
-            && !self.battery_low
-            && self.update.is_none();
         let show_player = notice.is_none()
             && self.page == workspace::Page::Music
             && self.spring.value > island::EXPANDED_CONTENT_START
             && self.notice_spring.value < 1.0;
         let show_island_lyrics = show_player && self.lyrics_spring.value > 0.01;
+        let bars = self.visible && playing && show_player && self.presence.value > 0.01;
         // Se escucha el audio de la app solo mientras se ven las barras.
         let listen = self
             .media
@@ -3911,16 +3907,32 @@ mod tests {
                 ..media
             });
             app.reveal();
+            app.select_page(workspace::Page::Music);
             app.presence.reset(1.0);
             app.spring.reset(0.0);
+            assert!(!app.render().bars);
+            app.spring.reset(1.0);
             assert!(
                 app.render().bars,
-                "la píldora recupera las barras de sonido"
+                "el reproductor muestra las barras de audio"
             );
-            app.spring.reset(1.0);
+            app.battery_low = true;
+            assert!(
+                app.render().bars,
+                "el aviso de batería no sustituye las barras"
+            );
+            app.battery_low = false;
+            app.select_page(workspace::Page::Share);
             assert!(!app.render().bars);
+            app.select_page(workspace::Page::Music);
+            app.media.as_mut().unwrap().playing = false;
+            assert!(!app.render().bars, "la pausa no debe animar las barras");
+            app.media.as_mut().unwrap().playing = true;
             app.end_linger();
-            app.end_linger();
+            assert!(
+                !app.render().bars,
+                "la línea de reposo no debe capturar audio"
+            );
             assert!(
                 app.edge_strip(),
                 "el reposo siempre vuelve a la línea superior"

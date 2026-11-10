@@ -2,7 +2,7 @@
 //!
 //! La isla es un cuadro flotante con las cuatro esquinas redondeadas, separada del borde superior
 //! de la pantalla por `TOP_GAP` (sin tocar el techo).
-//! Contraída muestra una mini carátula y barras de audio en una píldora compacta.
+//! En reposo queda una línea superior; al abrirse muestra directamente el reproductor.
 //! Expandida muestra una tarjeta completa flotante: reproductor con tiempos y controles a la izquierda,
 //! y letra sincronizada a la derecha.
 
@@ -11,8 +11,8 @@ use tiny_skia::{
 };
 
 /// (ancho, alto, radio de las esquinas)
-/// Contraída: píldora flotante compacta.
-const COLLAPSED: (f32, f32, f32) = (88.0, 34.0, 17.0);
+/// Línea desde la que empieza la animación de apertura.
+const RESTING: (f32, f32, f32) = (88.0, 3.0, 1.5);
 
 /// Expandida compacta (sin letra): tarjeta flotante con reproductor.
 pub const EXPANDED_COMPACT: (f32, f32, f32) = (284.0, 216.0, 24.0);
@@ -66,7 +66,7 @@ const EDGE_STRIP_H: f32 = 3.0;
 
 /// Ancho en píxeles físicos de la línea del borde (el de la isla contraída).
 pub fn edge_strip_width(scale: f32) -> f32 {
-    COLLAPSED.0 * scale
+    RESTING.0 * scale
 }
 
 /// Línea de tiempo en el borde superior, donde estaba la isla contraída: indica que sigue ahí.
@@ -178,7 +178,7 @@ pub fn indicator_hit_test(
     y: f32,
 ) -> Option<Hit> {
     let g = geometry(max_w, max_h, scale, p, presence, shape);
-    if presence < 0.9 {
+    if presence < 0.9 || g.alpha < 1.0 {
         return None;
     }
     for (shown, hit, battery) in [
@@ -197,6 +197,9 @@ pub fn indicator_hit_test(
 }
 
 fn draw_indicators(pixmap: &mut Pixmap, g: &Geometry, p: f32, indicators: Indicators) {
+    if g.alpha <= 0.0 {
+        return;
+    }
     let mut paint = Paint {
         anti_alias: true,
         ..Default::default()
@@ -416,14 +419,6 @@ fn press_scale(t: f32) -> f32 {
     1.0 - 0.2 * (1.0 - u).powi(2) * (3.0 * std::f32::consts::PI * u).cos()
 }
 
-/// Hasta qué progreso de expansión se ve el indicador de la isla contraída.
-const MINI_FADE: f32 = 0.35;
-
-/// Opacidad del indicador (mini carátula y barras) para un progreso dado.
-pub fn mini_alpha(p: f32) -> f32 {
-    (1.0 - p.max(0.0) / MINI_FADE).clamp(0.0, 1.0)
-}
-
 /// Dónde van título y artista (píxeles físicos): columna horizontal, centro vertical de la
 /// fila y opacidad.
 pub struct TextArea {
@@ -492,9 +487,9 @@ fn geometry(
     let p = p.clamp(-0.1, 1.1);
     let lerp = |a: f32, b: f32| a + (b - a) * p;
     let (expanded_w, expanded_h) = expanded_size((lyrics_p, notice_p));
-    let w = (lerp(COLLAPSED.0, expanded_w) * scale).clamp(1.0, max_w);
-    let h = lerp(COLLAPSED.1, expanded_h) * scale;
-    let gap = TOP_GAP * scale;
+    let w = (lerp(RESTING.0, expanded_w) * scale).clamp(1.0, max_w);
+    let h = lerp(RESTING.1, expanded_h) * scale;
+    let gap = TOP_GAP * scale * p.clamp(0.0, 1.0);
 
     // Lo que queda por encima de y = 0 no se dibuja: así entra y sale por el borde superior.
     // Al posarse (presence = 1.0), y0 queda exactamente en `gap` (separada del techo, flotando).
@@ -506,7 +501,7 @@ fn geometry(
         y0,
         w,
         h,
-        r: (lerp(COLLAPSED.2, EXPANDED_LYRICS.2) * scale).clamp(0.0, (w / 2.0).min(h / 2.0)),
+        r: (lerp(RESTING.2, EXPANDED_LYRICS.2) * scale).clamp(0.0, (w / 2.0).min(h / 2.0)),
         alpha: ((p - EXPANDED_CONTENT_START) / (1.0 - EXPANDED_CONTENT_START)).clamp(0.0, 1.0),
         scale,
     }
@@ -776,44 +771,6 @@ pub fn draw(
         draw_indicators(pixmap, &g, p, indicators);
     }
 
-    // Indicador de la isla contraída: mini carátula y barras de audio centradas en la píldora flotante
-    let mini = mini_alpha(p);
-    if let (Some(c), true) = (&controls, mini > 0.0) {
-        let size = 22.0 * s;
-        let spacing = 10.0 * s;
-        let bars_w = 4.0 * 3.0 * s + 3.0 * 2.5 * s;
-        let reserved = indicators.battery_low || indicators.update;
-        let total_w = if reserved {
-            size
-        } else {
-            size + spacing + bars_w
-        };
-        let start_x = g.x0 + (g.w - total_w) / 2.0;
-        draw_cover(
-            pixmap,
-            cover,
-            start_x,
-            g.cy() - size / 2.0,
-            size,
-            size / 2.0,
-            mini,
-        );
-        if !reserved {
-            draw_bars(pixmap, start_x + size + spacing, g.cy(), s, c, t, mini);
-        }
-    }
-
-    if controls.is_none() && mini > 0.0 {
-        paint.set_color_rgba8(120, 190, 255, (mini * 235.0) as u8);
-        draw_notice_icon(
-            pixmap,
-            &paint,
-            NoticeIcon::Wireless,
-            g.x0 + g.w / 2.0,
-            g.cy(),
-            s * 0.8,
-        );
-    }
     if g.alpha <= 0.0 {
         return None;
     }
@@ -857,6 +814,15 @@ pub fn draw(
     );
 
     if let Some(c) = &controls {
+        draw_bars(
+            pixmap,
+            g.x0 + (EXPANDED_COMPACT.0 - COVER_PAD_X - 20.0) * s,
+            cover_y + size / 2.0,
+            s,
+            c,
+            t,
+            g.alpha,
+        );
         let (index, count) = c.sessions;
         if c.cover_hovered && count > 1 {
             paint.set_color_rgba8(255, 255, 255, (g.alpha * 40.0) as u8);
@@ -922,7 +888,7 @@ pub fn draw(
     let (text_x, text_w) = text_column(&g, s);
     let title_area = TextArea {
         x: text_x,
-        w: text_w,
+        w: (text_w - if controls.is_some() { 32.0 * s } else { 0.0 }).max(0.0),
         cy: g.y0 + (COVER_PAD_TOP + HEADER_HEIGHT + COVER_SIZE / 2.0) * s,
         alpha: g.alpha,
     };
@@ -1419,10 +1385,10 @@ fn draw_cover(
 /// Velocidades (rad/s) de las dos ondas que mueven cada barra; distintas para que no vayan al compás.
 const BAR_SPEEDS: [(f32, f32); 4] = [(7.1, 3.3), (9.3, 4.7), (6.2, 5.9), (8.4, 2.8)];
 
-/// Barras de audio a la derecha de la mini carátula en la isla contraída. En pausa quedan quietas y bajas.
+/// Barras de audio junto al título en el reproductor. En pausa quedan quietas y bajas.
 fn draw_bars(pixmap: &mut Pixmap, left: f32, cy: f32, s: f32, c: &Controls, t: f32, alpha: f32) {
     let (bar_w, gap) = (3.0 * s, 2.5 * s);
-    let (min_h, max_h) = (3.0 * s, 14.0 * s);
+    let (min_h, max_h) = (3.0 * s, 22.0 * s);
 
     let mut paint = Paint {
         anti_alias: true,
@@ -1787,6 +1753,68 @@ mod tests {
     }
 
     #[test]
+    fn barras_reales_ocupan_su_espacio_en_el_reproductor() {
+        for scale in [1.0, 1.25, 2.0] {
+            let (w, h) = window_size();
+            let (w, h) = ((w * scale).ceil() as u32, (h * scale).ceil() as u32);
+            for lyrics in [0.0, 1.0] {
+                for (page, p, playing, changes) in [
+                    (crate::workspace::Page::Music, 1.0, true, true),
+                    (crate::workspace::Page::Music, 1.0, false, false),
+                    (crate::workspace::Page::Music, 0.0, true, false),
+                    (crate::workspace::Page::Share, 1.0, true, false),
+                ] {
+                    let render = |level| {
+                        let mut image = Pixmap::new(w, h).unwrap();
+                        let mut c = controls();
+                        c.playing = playing;
+                        c.levels = Some([level; 4]);
+                        let areas = draw(
+                            &mut image,
+                            scale,
+                            p,
+                            1.0,
+                            (lyrics, 0.0),
+                            Some(c),
+                            Indicators::default(),
+                            None,
+                            None,
+                            None,
+                            0.0,
+                            None,
+                            None,
+                            false,
+                            page,
+                        );
+                        (image, areas)
+                    };
+                    let (quiet, _) = render(0.0);
+                    let (loud, areas) = render(1.0);
+                    let mut changed = false;
+                    for (i, (a, b)) in quiet.pixels().iter().zip(loud.pixels()).enumerate() {
+                        if a == b {
+                            continue;
+                        }
+                        changed = true;
+                        let x = (i as u32 % w) as f32;
+                        let y = (i as u32 / w) as f32;
+                        let text = &areas.as_ref().unwrap().text;
+                        let g = geometry(w as f32, h as f32, scale, p, 1.0, (lyrics, 0.0));
+                        let (_, top, size) = g.cover_rect();
+                        assert!(x > text.x + text.w, "las barras invaden el título");
+                        assert!(x < g.x0 + (EXPANDED_COMPACT.0 - COVER_PAD_X) * scale);
+                        assert!(
+                            y >= top && y <= top + size,
+                            "las barras invaden los controles"
+                        );
+                    }
+                    assert_eq!(changed, changes);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn letra_solo_se_dibuja_y_recibe_clics_cuando_esta_disponible() {
         for scale in [1.0, 1.25, 1.5, 2.0] {
             let (w, h) = window_size();
@@ -1928,7 +1956,7 @@ mod tests {
                             indicators,
                             x,
                             y
-                        ) == Some(hit)
+                        ) == if g.alpha >= 1.0 { Some(hit) } else { None }
                     );
                 }
             }
