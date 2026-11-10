@@ -516,7 +516,6 @@ fn isla_con_desenfoque_sigue_ocultandose_y_recibiendo_clics() {
                             })
                         });
                         if let Some((x, y)) = button {
-                            app.expanded_by_click = true;
                             let point = LPARAM(((y << 16) | x) as isize);
                             wndproc(hwnd, WM_LBUTTONDOWN, WPARAM(1), point);
                             wndproc(hwnd, WM_LBUTTONUP, WPARAM(0), point);
