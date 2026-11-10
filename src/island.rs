@@ -64,12 +64,12 @@ pub fn window_size() -> (f32, f32) {
 /// Alto de la línea de tiempo que queda pegada al borde superior cuando la isla se oculta sola.
 const EDGE_STRIP_H: f32 = 3.0;
 
-/// Ancho en píxeles físicos de la línea del borde (el de la isla contraída).
+/// Ancho en píxeles físicos de la línea del borde superior.
 pub fn edge_strip_width(scale: f32) -> f32 {
     RESTING.0 * scale
 }
 
-/// Línea de tiempo en el borde superior, donde estaba la isla contraída: indica que sigue ahí.
+/// Línea de tiempo en el borde superior: indica que la isla sigue disponible.
 /// Tocar la línea con el mouse la hace volver; todo su ancho recibe el mouse.
 /// `progress`: avance si la app lo informa; `update`: marca una versión nueva con un segmento azul.
 pub fn draw_edge_strip(
@@ -441,7 +441,7 @@ struct Geometry {
 }
 
 impl Geometry {
-    /// Centro vertical de la isla: ahí se alinea el indicador de la isla contraída.
+    /// Centro vertical de la isla.
     fn cy(&self) -> f32 {
         self.y0 + self.h / 2.0
     }
@@ -535,7 +535,7 @@ fn expanded_size((lyrics_p, notice_p): (f32, f32)) -> (f32, f32) {
 /// Rectángulo (x0, y0, x1, y1, píxeles físicos) donde `draw` puede pintar algo en este cuadro:
 /// la isla con un margen para lo que asoma de ella (el recorte de
 /// la letra). Fuera de él la ventana queda transparente, así que basta con limpiar, copiar y
-/// mandar a Windows esta zona: contraída es una parte mínima de la ventana.
+/// mandar a Windows esta zona: en reposo es una parte mínima de la ventana.
 pub fn bounds(
     max_w: f32,
     max_h: f32,
@@ -688,7 +688,7 @@ pub fn seek_fraction(
     ((x - bx) / bw.max(1.0)).clamp(0.0, 1.0)
 }
 
-/// Dibuja la isla con progreso `p` (0 = contraída, 1 = expandida; puede pasarse un poco por el rebote).
+/// Dibuja la isla con progreso `p` (0 = línea, 1 = expandida; puede pasarse un poco por el rebote).
 /// `presence` = cuánto ha entrado en pantalla (ver `geometry`). `t` = segundos, para animar
 /// las barras de audio. `shape` = (`lyrics_p`, `notice_p`), como en `geometry`.
 /// Devuelve dónde dibujar el texto, o `None` si el contenido aún no se ve.
@@ -907,7 +907,7 @@ pub fn draw(
         }
     });
 
-    // Áreas de texto: letras a la derecha (sólo si no está encogida y hay letra)
+    // Áreas de texto: letras a la derecha cuando hay letra disponible
     let lyrics_area = if lyrics_p > 0.01 {
         lyrics_info.and_then(|li| {
             if li.lines.is_empty() && li.status.is_none() {
@@ -1904,7 +1904,7 @@ mod tests {
         start.elapsed().as_secs_f64() * 1000.0 / runs as f64
     }
 
-    /// Cuánto cuesta dibujar: contraída (30 cuadros por segundo con las barras) y expandida.
+    /// Cuánto cuesta dibujar la línea y el reproductor extendido con barras.
     /// Con margen de sobra para equipos lentos; sin optimizar (tests en debug), 20 veces más.
     #[test]
     fn dibujar_un_cuadro_es_barato() {

@@ -8,7 +8,7 @@ Notch Isla no tiene telemetría, estadísticas de uso, anuncios ni cuentas.
 
 Se conecta a internet solo para dos cosas. **Actualizaciones**: un minuto después de abrirse y luego cada 6 horas, la app pide a GitHub (`api.github.com`) el número de la última versión publicada. Si hay una versión nueva y la app está instalada, descarga su instalador desde `github.com` a la carpeta temporal; solo se instala si haces clic en el aviso. Las peticiones no llevan datos tuyos, solo el nombre y la versión de la app. Como cualquier conexión, GitHub ve tu dirección IP; se aplica la [declaración de privacidad de GitHub](https://docs.github.com/es/site-policy/privacy-policies/github-general-privacy-statement).
 
-**Letra de la canción (opcional, apagada por defecto)**: si activas alguna de las opciones de **Mostrar letra de la canción** en el menú de la bandeja (con la isla expandida o encogida), por cada canción nueva la app pide su letra sincronizada a [LRCLIB](https://lrclib.net) (`lrclib.net`), una base de letras pública y gratuita. Para eso envía el **título, el artista, el álbum y la duración** de la canción que suena; LRCLIB también ve tu dirección IP. No se envía nada más ni se identifica tu cuenta de ninguna app. La letra se guarda solo en memoria mientras la app está abierta. Si no activas ninguna de las dos, no se hace ninguna consulta.
+**Letra de la canción (opcional, apagada por defecto)**: si activas alguna de las opciones de **Mostrar letra de la canción** en Configuración (con la isla expandida o bajo la línea de reposo), por cada canción nueva la app pide su letra sincronizada a [LRCLIB](https://lrclib.net) (`lrclib.net`), una base de letras pública y gratuita. Para eso envía el **título, el artista, el álbum y la duración** de la canción que suena; LRCLIB también ve tu dirección IP. No se envía nada más ni se identifica tu cuenta de ninguna app. La letra se guarda solo en memoria mientras la app está abierta. Si no activas ninguna de las dos, no se hace ninguna consulta.
 
 Para funcionar, la app usa información que ya está en tu PC, solo en memoria y mientras está abierta:
 
@@ -17,7 +17,7 @@ Para funcionar, la app usa información que ya está en tu PC, solo en memoria y
 - **Volumen**: el de la app que suena o el general, solo se lee y se cambia cuando giras la rueda del mouse sobre la isla.
 - **Salidas de audio**: sus nombres, para el aviso de cambio de salida y para el menú de salida por app.
 - **Batería de periféricos**: nombres, identificadores locales, nivel y estado de carga que Windows o los receptores compatibles comunican. Las lecturas y el historial de avisos se mantienen solo en memoria. Se consulta el servicio de batería Bluetooth LE cuando es necesario; no se emparejan dispositivos ni se envía esta información a internet.
-- **Sonido de la app que suena** (si está activado **Barras con el sonido real**, que viene activado): mientras se ven las barras de la isla, se lee lo que suena por los parlantes (no el micrófono) solo para calcular la altura de las barras. Se procesa en memoria y se descarta al instante: no se graba, no se guarda y no se envía.
+- **Sonido de la app que suena** (si está activado **Barras con el sonido real**, que viene activado): mientras se ven las barras del reproductor extendido, se lee lo que suena por los parlantes (no el micrófono) solo para calcular la altura de las barras. Se procesa en memoria y se descarta al instante: no se graba, no se guarda y no se envía.
 
 Lo que la app escribe en tu PC:
 

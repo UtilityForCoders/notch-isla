@@ -22,11 +22,11 @@ pub struct Settings {
     pub notices: bool,
     pub battery_notices: bool,
     pub connection_notices: bool,
-    /// Letra sincronizada dentro de la isla expandida y en el proyector bajo la isla encogida.
+    /// Letra sincronizada dentro de la isla expandida y en el proyector bajo la línea de reposo.
     /// Se activan por separado; apagadas si no se activan (la letra se pide a lrclib.net).
     pub lyrics_island: bool,
     pub lyrics_projector: bool,
-    /// Las barras de la isla siguen el sonido real de la app (si no, una animación).
+    /// Las barras del reproductor siguen el sonido real de la app (si no, una animación).
     pub real_bars: bool,
     /// Atajo para mostrar u ocultar la isla; `None` = desactivado.
     pub hotkey: Option<Hotkey>,

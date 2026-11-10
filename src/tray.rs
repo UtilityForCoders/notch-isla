@@ -82,7 +82,7 @@ pub enum Command {
     ToggleFullscreen,
     /// Letra dentro de la isla expandida.
     ToggleLyricsIsland,
-    /// Letra en el proyector bajo la isla encogida.
+    /// Letra en el proyector bajo la línea de reposo.
     ToggleLyricsProjector,
     ToggleRealBars,
     CheckUpdates,
@@ -266,7 +266,7 @@ fn build_settings_items(state: &MenuState) -> Vec<Item> {
             action(CMD_LYRICS, "Con la isla expandida", settings.lyrics_island),
             action(
                 CMD_LYRICS_PROJECTOR,
-                "Con la isla encogida",
+                "Con la línea de reposo",
                 settings.lyrics_projector,
             ),
         ],

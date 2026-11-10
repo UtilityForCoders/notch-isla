@@ -6,7 +6,7 @@
 //! segundo separa graves, medios y agudos con una transformada de Fourier y deja los 4 niveles
 //! listos para la isla. El audio se procesa en memoria y se descarta: no se guarda ni se envía.
 //!
-//! Solo corre mientras se ven las barras (música sonando, isla contraída y a la vista); en
+//! Solo corre mientras se ven las barras (música sonando, reproductor extendido y a la vista); en
 //! cualquier otro caso el hilo termina y la CPU vuelve a 0 %.
 
 use std::f32::consts::PI;
