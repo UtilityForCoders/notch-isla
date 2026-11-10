@@ -2338,6 +2338,7 @@ impl App {
             time_info,
             lyrics_info,
             blur_active,
+            self.settings.island_color,
             self.page,
         );
         if notice.is_none() {
@@ -3551,6 +3552,15 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                         with_app(|app| app.preview_blur_radius(radius));
                         true
                     }
+                    Command::IslandColor(color) => {
+                        settings.island_color = color;
+                        settings.save();
+                        with_app(|app| {
+                            app.settings.island_color = color;
+                            app.redraw();
+                        });
+                        true
+                    }
                     Command::TogglePinnedExpanded => {
                         settings.pinned_expanded = !settings.pinned_expanded;
                         settings.save();
@@ -4358,6 +4368,7 @@ mod tests {
                     status: None,
                 }),
                 false,
+                crate::settings::IslandColor::default(),
                 workspace::Page::Music,
             )
             .unwrap();

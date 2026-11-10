@@ -710,6 +710,7 @@ pub fn draw(
     time_info: Option<TimeInfo>,
     lyrics_info: Option<LyricsInfo>,
     translucent: bool,
+    color: crate::settings::IslandColor,
     page: crate::workspace::Page,
 ) -> Option<LayoutAreas> {
     let g = geometry(
@@ -737,34 +738,25 @@ pub fn draw(
         ..Default::default()
     };
 
-    // Tinte sobre el fondo desenfocado del compositor; opaco si no está disponible.
-    if translucent {
-        paint.set_color_rgba8(14, 22, 38, 118);
-        fill_rounded_rect(pixmap, &paint, g.x0, g.y0, g.w, g.h, g.r);
-        // Borde translúcido sutil que define los bordes sobre cualquier fondo
-        paint.set_color_rgba8(255, 255, 255, 34);
-        if let Some(border) = rounded_rect_path(
-            g.x0 + 0.5,
-            g.y0 + 0.5,
-            (g.w - 1.0).max(1.0),
-            (g.h - 1.0).max(1.0),
-            (g.r - 0.5).max(0.0),
-        ) {
-            stroke_path(pixmap, &paint, &border, 1.0);
-        }
+    let (opaque, tint, border_color) = color.palette();
+    let ([r, g_color, b], alpha) = if translucent {
+        (tint, 118)
     } else {
-        paint.set_color_rgba8(12, 18, 30, 255);
-        fill_rounded_rect(pixmap, &paint, g.x0, g.y0, g.w, g.h, g.r);
-        paint.set_color_rgba8(132, 171, 225, 38);
-        if let Some(border) = rounded_rect_path(
-            g.x0 + 0.5,
-            g.y0 + 0.5,
-            (g.w - 1.0).max(1.0),
-            (g.h - 1.0).max(1.0),
-            (g.r - 0.5).max(0.0),
-        ) {
-            stroke_path(pixmap, &paint, &border, 1.0);
-        }
+        (opaque, 255)
+    };
+    paint.set_color_rgba8(r, g_color, b, alpha);
+    fill_rounded_rect(pixmap, &paint, g.x0, g.y0, g.w, g.h, g.r);
+
+    let [r, g_color, b] = border_color;
+    paint.set_color_rgba8(r, g_color, b, if translucent { 34 } else { 38 });
+    if let Some(border) = rounded_rect_path(
+        g.x0 + 0.5,
+        g.y0 + 0.5,
+        (g.w - 1.0).max(1.0),
+        (g.h - 1.0).max(1.0),
+        (g.r - 0.5).max(0.0),
+    ) {
+        stroke_path(pixmap, &paint, &border, 1.0);
     }
 
     if notice.is_none() {
@@ -1784,6 +1776,7 @@ mod tests {
                             None,
                             None,
                             false,
+                            crate::settings::IslandColor::default(),
                             page,
                         );
                         (image, areas)
@@ -1898,6 +1891,7 @@ mod tests {
                 None,
                 None,
                 false,
+                crate::settings::IslandColor::default(),
                 crate::workspace::Page::Music,
             );
         }
@@ -2023,6 +2017,7 @@ mod tests {
                         None,
                         None,
                         false,
+                        crate::settings::IslandColor::default(),
                         crate::workspace::Page::Music,
                     );
                     let (x0, y0, x1, y1) = bounds(pw as f32, ph as f32, scale, p, presence, shape);

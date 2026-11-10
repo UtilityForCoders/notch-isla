@@ -24,7 +24,7 @@ use crate::hotkey::{self, Hotkey};
 use crate::menu::{self, Item};
 use crate::monitors::{self, Monitor};
 use crate::routing::Output;
-use crate::settings::Settings;
+use crate::settings::{IslandColor, Settings};
 use crate::{autostart, island};
 
 /// Mensaje que Windows nos manda cuando hay clics sobre el ícono.
@@ -61,6 +61,7 @@ const CMD_TIMER: usize = 300;
 const CMD_OUTPUT_DEFAULT: usize = 400;
 const CMD_OUTPUT: usize = 401;
 const CMD_BLUR_RADIUS: usize = 500;
+const CMD_ISLAND_COLOR: usize = 600;
 
 /// Duraciones del temporizador en minutos.
 pub const TIMER_MINUTES: [u32; 6] = [5, 10, 15, 25, 45, 60];
@@ -99,6 +100,7 @@ pub enum Command {
     ToggleExpandOnHover,
     TogglePinnedExpanded,
     BlurRadius(u32),
+    IslandColor(IslandColor),
 }
 
 /// Lo que el menú necesita saber para marcar las opciones actuales.
@@ -296,6 +298,19 @@ fn build_settings_items(state: &MenuState) -> Vec<Item> {
         "Activar desenfoque",
         settings.translucent,
     )];
+    items.push(Item::Group {
+        label: "Color del notch".into(),
+        items: IslandColor::OPTIONS
+            .into_iter()
+            .map(|(color, label)| {
+                action(
+                    CMD_ISLAND_COLOR + color as usize,
+                    label,
+                    settings.island_color == color,
+                )
+            })
+            .collect(),
+    });
     blur.push(Item::Slider {
         id: CMD_BLUR_RADIUS,
         label: format!("Intensidad: {} %", settings.blur_radius * 100 / 40),
@@ -380,6 +395,11 @@ fn id_to_command(id: usize, state: &MenuState) -> Option<Command> {
         _ => {
             if let Some(i) = pick(CMD_BLUR_RADIUS, 41) {
                 Some(Command::BlurRadius(i as u32))
+            } else if let Some((color, _)) = IslandColor::OPTIONS
+                .into_iter()
+                .find(|(color, _)| CMD_ISLAND_COLOR + *color as usize == id)
+            {
+                Some(Command::IslandColor(color))
             } else if let Some(i) = pick(CMD_MONITOR, state.monitors.len()) {
                 Some(Command::Monitor(i))
             } else {
@@ -434,7 +454,7 @@ fn categories(state: &MenuState) -> Vec<crate::settings_ui::Category> {
             Item::Separator => continue,
             Item::Label(_) => 6,
             Item::Group { label, .. } => match label.as_str() {
-                "Pantalla" | "Desenfoque del fondo" => 1,
+                "Pantalla" | "Desenfoque del fondo" | "Color del notch" => 1,
                 "Mostrar letra de la canción" => 2,
                 "Dispositivos y batería" => 3,
                 "Temporizador" => 4,
@@ -844,6 +864,7 @@ mod settings_tests {
                     Some(Command::ToggleLyricsIsland) => state.settings.lyrics_island ^= true,
                     Some(Command::ToggleLyricsProjector) => state.settings.lyrics_projector ^= true,
                     Some(Command::BlurRadius(value)) => state.settings.blur_radius = value,
+                    Some(Command::IslandColor(color)) => state.settings.island_color = color,
                     Some(Command::Timer(minutes)) => state.timer_left = Some(minutes),
                     Some(Command::CancelTimer) => state.timer_left = None,
                     _ => {}

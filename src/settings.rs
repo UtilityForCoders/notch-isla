@@ -12,8 +12,42 @@ use crate::hotkey::{self, Hotkey};
 
 const KEY: PCWSTR = w!("Software\\NotchIsla");
 
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub enum IslandColor {
+    #[default]
+    Blue = 0,
+    Neutral = 1,
+    Purple = 2,
+    Red = 3,
+    Green = 4,
+    Amber = 5,
+}
+
+impl IslandColor {
+    pub const OPTIONS: [(Self, &'static str); 6] = [
+        (Self::Blue, "Azul"),
+        (Self::Neutral, "Gris neutro"),
+        (Self::Purple, "Morado"),
+        (Self::Red, "Rojo"),
+        (Self::Green, "Verde"),
+        (Self::Amber, "Ámbar"),
+    ];
+
+    pub fn palette(self) -> ([u8; 3], [u8; 3], [u8; 3]) {
+        match self {
+            Self::Blue => ([12, 18, 30], [14, 22, 38], [132, 171, 225]),
+            Self::Neutral => ([20, 20, 20], [25, 25, 25], [190, 190, 190]),
+            Self::Purple => ([23, 15, 32], [29, 19, 40], [187, 149, 225]),
+            Self::Red => ([32, 14, 17], [40, 18, 22], [225, 144, 151]),
+            Self::Green => ([13, 27, 20], [16, 34, 25], [139, 205, 167]),
+            Self::Amber => ([30, 22, 13], [38, 28, 16], [221, 181, 121]),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Settings {
+    pub island_color: IslandColor,
     /// Pantalla elegida (nombre de dispositivo, como "\\.\DISPLAY2"); vacío = la principal.
     pub monitor: String,
     /// Se esconde mientras hay una app a pantalla completa.
@@ -58,6 +92,13 @@ impl Settings {
         // Antes había una sola opción de letra: quien la tenía activada conserva las dos.
         let lyrics = read_dword(w!("Lyrics")).is_some_and(|v| v != 0);
         Self {
+            island_color: read_dword(w!("IslandColor"))
+                .and_then(|id| {
+                    IslandColor::OPTIONS
+                        .iter()
+                        .find(|(color, _)| *color as u32 == id)
+                })
+                .map_or_else(IslandColor::default, |(color, _)| *color),
             monitor: read_string(w!("Monitor")).unwrap_or_default(),
             hide_fullscreen: read_dword(w!("HideFullscreen")).is_none_or(|v| v != 0),
             notices: read_dword(w!("Notices")).is_none_or(|v| v != 0),
@@ -77,6 +118,7 @@ impl Settings {
     }
 
     pub fn save(&self) {
+        write_dword(w!("IslandColor"), self.island_color as u32);
         write_string(w!("Monitor"), &self.monitor);
         write_dword(w!("HideFullscreen"), self.hide_fullscreen as u32);
         write_dword(w!("Notices"), self.notices as u32);
