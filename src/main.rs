@@ -107,6 +107,8 @@ const CAPTURE_MS: u32 = 10_000;
 /// enseguida, no se cierra.
 const COLLAPSE_TIMER: usize = 7;
 const COLLAPSE_DELAY_MS: u32 = 800;
+/// Tiempo para ver la píldora contraída antes de volver a la línea de reposo.
+const COMPACT_HIDE_DELAY_MS: u32 = 3000;
 /// Comprobación periódica de pantalla completa (juegos y apps que no avisan por Explorer).
 const FULLSCREEN_TIMER: usize = 8;
 const FULLSCREEN_CHECK_MS: u32 = 500;
@@ -1225,6 +1227,24 @@ impl App {
         self.aim_expansion(expand);
     }
 
+    /// Al dejar de fijar los controles, recuperar también el regreso automático al reposo.
+    fn set_pinned_expanded(&mut self, pinned: bool) {
+        self.settings.pinned_expanded = pinned;
+        self.lingering = false;
+        if pinned {
+            self.reveal();
+            unsafe {
+                let _ = KillTimer(Some(self.hwnd), COLLAPSE_TIMER);
+            }
+        } else if !self.hovered {
+            self.expanded_by_click = false;
+            unsafe {
+                SetTimer(Some(self.hwnd), COLLAPSE_TIMER, COMPACT_HIDE_DELAY_MS, None);
+            }
+        }
+        self.update_expansion();
+    }
+
     /// Lleva la isla a expandida o contraída, cada una con su movimiento: al expandirse, rápido
     /// y con un pequeño rebote; al encogerse, más lento y sin rebote, frenando suave al final.
     fn aim_expansion(&mut self, expand: bool) {
@@ -1418,7 +1438,7 @@ impl App {
         if !self.hovered && !self.settings.pinned_expanded {
             self.lingering = true;
             unsafe {
-                SetTimer(Some(self.hwnd), COLLAPSE_TIMER, 3000, None);
+                SetTimer(Some(self.hwnd), COLLAPSE_TIMER, COMPACT_HIDE_DELAY_MS, None);
             }
         }
     }
@@ -1788,11 +1808,7 @@ impl App {
         if seek {
             self.seek(fraction);
         }
-        // Si se soltó fuera de la isla, Windows avisa enseguida que el mouse ya no está.
-        if self.hovered {
-            self.hovered = false;
-            self.set_hovered(true);
-        }
+        self.restore_hover_tracking();
         self.redraw();
     }
 
@@ -1962,6 +1978,33 @@ impl App {
         self.redraw();
     }
 
+    /// La captura puede consumir WM_MOUSELEAVE durante el arrastre. Al soltar, comprobar
+    /// la posición real y rearmar el seguimiento para poder volver a la línea de reposo.
+    fn restore_hover_tracking(&mut self) {
+        let mut cursor = POINT::default();
+        if unsafe { GetCursorPos(&mut cursor) }.is_err() {
+            return;
+        }
+        let (x, y, w, h, _) = island::backdrop_geometry(
+            self.surface.width as f32,
+            self.surface.height as f32,
+            self.scale,
+            self.spring.value,
+            self.presence.value,
+            self.shape(),
+        );
+        let cx = (cursor.x - self.pos.x) as f32;
+        let cy = (cursor.y - self.pos.y) as f32;
+        let inside = cx >= x && cx <= x + w && cy >= y && cy <= y + h;
+        if inside && self.hovered {
+            self.hovered = false;
+        }
+        self.set_hovered(inside);
+        if !inside {
+            self.set_hover(None);
+        }
+    }
+
     fn set_hovered(&mut self, hovered: bool) {
         // Mientras sale de la pantalla no responde al mouse.
         if self.hovered == hovered || (hovered && !self.visible) {
@@ -1974,8 +2017,13 @@ impl App {
             && !self.settings.pinned_expanded
             && (self.expanded_by_click || self.settings.expand_on_hover);
         unsafe {
-            if self.lingering {
-                SetTimer(Some(self.hwnd), COLLAPSE_TIMER, COLLAPSE_DELAY_MS, None);
+            if !hovered && self.visible && !self.settings.pinned_expanded {
+                let delay = if self.lingering {
+                    COLLAPSE_DELAY_MS
+                } else {
+                    COMPACT_HIDE_DELAY_MS
+                };
+                SetTimer(Some(self.hwnd), COLLAPSE_TIMER, delay, None);
             } else {
                 let _ = KillTimer(Some(self.hwnd), COLLAPSE_TIMER);
             }
@@ -1996,9 +2044,10 @@ impl App {
         self.update_expansion();
     }
 
-    /// Terminó la espera tras salir el mouse: ahora sí se encoge.
+    /// Primero vuelve de los controles a la píldora; después deja solo la línea superior.
     fn end_linger(&mut self) {
         if self.tray_menu_open
+            || self.notice.is_some()
             || (self.page == workspace::Page::Share && share_ui::panel_state().busy)
         {
             unsafe {
@@ -2009,13 +2058,24 @@ impl App {
         unsafe {
             let _ = KillTimer(Some(self.hwnd), COLLAPSE_TIMER);
         }
+        if self.hovered {
+            self.lingering = false;
+            self.update_expansion();
+            return;
+        }
+        let was_expanded = self.spring.target() > 0.0;
         self.lingering = false;
         self.expanded_by_click = false;
-        if !self.settings.pinned_expanded {
+        if !self.hovered && !self.settings.pinned_expanded && !was_expanded {
             self.idle_hidden = true;
             self.update_visibility();
         }
         self.update_expansion();
+        if was_expanded && !self.hovered && !self.settings.pinned_expanded {
+            unsafe {
+                SetTimer(Some(self.hwnd), COLLAPSE_TIMER, COMPACT_HIDE_DELAY_MS, None);
+            }
+        }
     }
 
     fn start_animation(&mut self) {
@@ -2901,13 +2961,8 @@ fn open_island_menu(hwnd: HWND, app_id: Option<&str>, is_centered: bool, pinned_
         tray::IslandMenuChoice::Share => share_ui::open(hwnd),
         tray::IslandMenuChoice::TogglePinnedExpanded => {
             with_app(|app| {
-                app.settings.pinned_expanded = !app.settings.pinned_expanded;
+                app.set_pinned_expanded(!app.settings.pinned_expanded);
                 app.settings.save();
-                if app.settings.pinned_expanded {
-                    app.reveal();
-                } else if !app.hovered {
-                }
-                app.update_expansion();
             });
         }
         tray::IslandMenuChoice::Center => {
@@ -2984,9 +3039,9 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                     app.drag_island_to();
                     return;
                 }
-                // La franja espera un clic: pasar el mouse no muestra la isla contraída.
+                // Recuperar la píldora; la preferencia decide si también abre los controles.
                 if app.idle_hidden {
-                    return;
+                    app.reveal();
                 }
                 if app.dragging.is_some() {
                     app.drag_to(x);
@@ -3037,6 +3092,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                     if drag.has_moved {
                         app.settings.save();
                     }
+                    app.restore_hover_tracking();
                 }
             });
             LRESULT(0)
@@ -3068,6 +3124,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                     unsafe {
                         let _ = ReleaseCapture();
                     }
+                    app.restore_hover_tracking();
                     if drag.has_moved {
                         let mut pt = POINT::default();
                         unsafe {
@@ -3082,10 +3139,9 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                         app.end_notice();
                         return;
                     }
-                    // Un clic en la franja abre directamente los controles.
+                    // Un clic en la franja recupera primero la píldora contraída.
                     if app.idle_hidden {
                         app.reveal();
-                        app.expanded_by_click = true;
                         app.set_hovered(true);
                         app.update_expansion();
                         return;
@@ -3536,11 +3592,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                         settings.pinned_expanded = !settings.pinned_expanded;
                         settings.save();
                         with_app(|app| {
-                            app.settings.pinned_expanded = settings.pinned_expanded;
-                            if settings.pinned_expanded {
-                                app.reveal();
-                            }
-                            app.update_expansion();
+                            app.set_pinned_expanded(settings.pinned_expanded);
                         });
                         true
                     }
@@ -3740,6 +3792,8 @@ mod tests {
             settings.lyrics_projector = false;
             settings.high_refresh = false;
             settings.pinned_expanded = false;
+            settings.expand_on_hover = false;
+            settings.real_bars = false;
             let mut app = App::new(hwnd, monitors::find(""), settings).unwrap();
             app.tray.remove();
             app.pos = POINT {
@@ -3778,7 +3832,7 @@ mod tests {
             };
             let key = lyrics::key(&media.title, &media.artist);
             app.lyrics.insert(key.clone(), Vec::new());
-            app.set_media(Some(media));
+            app.set_media(Some(media.clone()));
             assert_eq!(app.lyrics_spring.target(), 0.0);
             assert!(app.settings.lyrics_island);
             app.set_lyrics(lyrics::Lyrics {
@@ -3846,6 +3900,106 @@ mod tests {
             assert!(
                 timer_for(&motion, false, FRAME_MS).is_none(),
                 "la píldora sin música no debe animarse continuamente"
+            );
+            app.toggle_hidden();
+            APP.with(|cell| *cell.borrow_mut() = Some(app));
+            // Pasar el puntero sobre la línea recupera la píldora sin abrir los controles.
+            wndproc(hwnd, WM_MOUSEMOVE, WPARAM(0), LPARAM(0));
+            with_app(|app| {
+                assert!(app.visible && !app.idle_hidden && app.hovered);
+                assert_eq!(app.spring.target(), 0.0);
+                app.end_linger();
+                assert!(
+                    app.visible,
+                    "un temporizador vencido no oculta bajo el puntero"
+                );
+                app.toggle_hidden();
+                app.begin_drag_island(None);
+            });
+            // El clic sobre la línea también debe pasar primero por la píldora.
+            wndproc(hwnd, WM_LBUTTONUP, WPARAM(0), LPARAM(0));
+            with_app(|app| {
+                assert!(app.visible && !app.idle_hidden);
+                assert_eq!(app.spring.target(), 0.0);
+                app.begin_drag_island(None);
+            });
+            wndproc(hwnd, WM_LBUTTONUP, WPARAM(0), LPARAM(0));
+            with_app(|app| {
+                assert_eq!(app.spring.target(), 1.0);
+                app.end_linger();
+                assert_eq!(app.spring.target(), 1.0);
+            });
+            wndproc(hwnd, WM_MOUSELEAVE, WPARAM(0), LPARAM(0));
+            wndproc(hwnd, WM_TIMER, WPARAM(COLLAPSE_TIMER), LPARAM(0));
+            with_app(|app| {
+                assert!(
+                    app.visible && !app.idle_hidden,
+                    "debe verse el estado encogido"
+                );
+                assert_eq!(app.spring.target(), 0.0);
+            });
+            wndproc(hwnd, WM_TIMER, WPARAM(COLLAPSE_TIMER), LPARAM(0));
+            with_app(|app| {
+                assert!(app.idle_hidden && app.edge_strip());
+                app.settings.expand_on_hover = true;
+            });
+            wndproc(hwnd, WM_MOUSEMOVE, WPARAM(0), LPARAM(0));
+            with_app(|app| {
+                assert_eq!(app.spring.target(), 1.0);
+                app.spring.reset(1.0);
+                app.begin_drag_island(None);
+            });
+            // Si WM_MOUSELEAVE llega durante la captura, al soltar se recupera la espera.
+            wndproc(hwnd, WM_MOUSELEAVE, WPARAM(0), LPARAM(0));
+            with_app(|app| assert!(app.hovered));
+            let _ = ReleaseCapture();
+            wndproc(hwnd, WM_CAPTURECHANGED, WPARAM(0), LPARAM(0));
+            with_app(|app| {
+                assert!(!app.hovered && app.lingering);
+                app.end_linger();
+                assert!(app.visible);
+                assert_eq!(app.spring.target(), 0.0);
+                app.end_linger();
+                assert!(app.idle_hidden && app.edge_strip());
+                app.settings.expand_on_hover = false;
+                app.reveal();
+                app.set_hovered(true);
+            });
+            wndproc(hwnd, WM_MOUSELEAVE, WPARAM(0), LPARAM(0));
+            wndproc(hwnd, WM_TIMER, WPARAM(COLLAPSE_TIMER), LPARAM(0));
+            with_app(|app| assert!(app.idle_hidden && app.edge_strip()));
+            let mut app = APP.with(|cell| cell.borrow_mut().take().unwrap());
+            app.battery_low = false;
+            app.low_battery_devices.clear();
+            app.media = Some(NowPlaying {
+                playing: true,
+                ..media
+            });
+            app.reveal();
+            app.presence.reset(1.0);
+            app.spring.reset(0.0);
+            assert!(
+                app.render().bars,
+                "la píldora recupera las barras de sonido"
+            );
+            app.spring.reset(1.0);
+            assert!(!app.render().bars);
+            app.end_linger();
+            app.end_linger();
+            assert!(
+                app.edge_strip(),
+                "el reposo siempre vuelve a la línea superior"
+            );
+            app.set_pinned_expanded(true);
+            assert!(app.visible && app.spring.target() == 1.0);
+            app.end_linger();
+            assert!(app.visible);
+            app.set_pinned_expanded(false);
+            assert_eq!(app.spring.target(), 0.0);
+            app.end_linger();
+            assert!(
+                app.edge_strip(),
+                "quitar la fijación debe recuperar el reposo"
             );
             app.set_timer(None);
             drop(app);
