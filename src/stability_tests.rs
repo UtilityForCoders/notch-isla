@@ -37,7 +37,6 @@ fn isla_con_desenfoque_sigue_ocultandose_y_recibiendo_clics() {
         let mut settings = Settings::load();
         settings.high_refresh = true;
         settings.translucent = true;
-        settings.hide_delay = 1;
         settings.hide_fullscreen = false;
         settings.real_bars = false;
         settings.lyrics_island = false;
@@ -86,7 +85,6 @@ fn isla_con_desenfoque_sigue_ocultandose_y_recibiendo_clics() {
         if animation_bench {
             let monitor = monitors::find("");
             app.hz = monitors::refresh_rate(monitor);
-            app.settings.hide_delay = 0;
             app.settings.lyrics_island = true;
             app.lyrics_spring.reset(1.0);
             app.lyrics.insert(
@@ -171,7 +169,6 @@ fn isla_con_desenfoque_sigue_ocultandose_y_recibiendo_clics() {
         }
         if drag_bench {
             with_app(|app| {
-                app.settings.hide_delay = 0;
                 app.pos.y = 0;
                 app.presence.reset(1.0);
                 app.spring.reset(1.0);

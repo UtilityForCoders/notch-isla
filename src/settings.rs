@@ -14,8 +14,6 @@ const KEY: PCWSTR = w!("Software\\NotchIsla");
 
 #[derive(Clone)]
 pub struct Settings {
-    /// Preferencia heredada, conservada por compatibilidad con versiones anteriores.
-    pub hide_delay: u32,
     /// Pantalla elegida (nombre de dispositivo, como "\\.\DISPLAY2"); vacío = la principal.
     pub monitor: String,
     /// Se esconde mientras hay una app a pantalla completa.
@@ -60,7 +58,6 @@ impl Settings {
         // Antes había una sola opción de letra: quien la tenía activada conserva las dos.
         let lyrics = read_dword(w!("Lyrics")).is_some_and(|v| v != 0);
         Self {
-            hide_delay: read_dword(w!("HideDelay")).unwrap_or(3),
             monitor: read_string(w!("Monitor")).unwrap_or_default(),
             hide_fullscreen: read_dword(w!("HideFullscreen")).is_none_or(|v| v != 0),
             notices: read_dword(w!("Notices")).is_none_or(|v| v != 0),
@@ -80,7 +77,6 @@ impl Settings {
     }
 
     pub fn save(&self) {
-        write_dword(w!("HideDelay"), self.hide_delay);
         write_string(w!("Monitor"), &self.monitor);
         write_dword(w!("HideFullscreen"), self.hide_fullscreen as u32);
         write_dword(w!("Notices"), self.notices as u32);
