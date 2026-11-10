@@ -333,7 +333,7 @@ unsafe fn owned_path(path: PWSTR) -> PathBuf {
     value
 }
 
-fn clipboard_text(hwnd: HWND) -> Option<String> {
+pub(crate) fn clipboard_text(hwnd: HWND) -> Option<String> {
     // CF_UNICODETEXT, leído únicamente al elegir la acción.
     const UNICODE_TEXT: u32 = 13;
     unsafe {

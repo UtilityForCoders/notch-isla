@@ -6,6 +6,7 @@ mod audio;
 mod autostart;
 mod backdrop;
 mod battery;
+mod color_picker;
 mod frame_wait;
 mod fullscreen;
 mod hotkey;
@@ -3553,14 +3554,12 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                         with_app(|app| app.preview_blur_radius(radius));
                         true
                     }
-                    Command::ChooseIslandColor => {
-                        if let Some(color) = settings_ui::choose_color(settings.island_color) {
-                            with_app(|app| {
-                                app.settings.island_color = color;
-                                app.settings.save();
-                                app.redraw();
-                            });
-                        }
+                    Command::IslandColor(color) => {
+                        with_app(|app| {
+                            app.settings.island_color = color;
+                            app.settings.save();
+                            app.redraw();
+                        });
                         true
                     }
                     Command::TogglePinnedExpanded => {

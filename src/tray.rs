@@ -61,7 +61,7 @@ const CMD_TIMER: usize = 300;
 const CMD_OUTPUT_DEFAULT: usize = 400;
 const CMD_OUTPUT: usize = 401;
 const CMD_BLUR_RADIUS: usize = 500;
-const CMD_ISLAND_COLOR: usize = 600;
+pub(crate) const CMD_ISLAND_COLOR: usize = 600;
 
 /// Duraciones del temporizador en minutos.
 pub const TIMER_MINUTES: [u32; 6] = [5, 10, 15, 25, 45, 60];
@@ -100,7 +100,7 @@ pub enum Command {
     ToggleExpandOnHover,
     TogglePinnedExpanded,
     BlurRadius(u32),
-    ChooseIslandColor,
+    IslandColor(crate::settings::IslandColor),
 }
 
 /// Lo que el menú necesita saber para marcar las opciones actuales.
@@ -381,7 +381,6 @@ fn id_to_command(id: usize, state: &MenuState) -> Option<Command> {
         CMD_TRANSLUCENT => Some(Command::ToggleTranslucent),
         CMD_EXPAND_ON_HOVER => Some(Command::ToggleExpandOnHover),
         CMD_PIN_EXPANDED => Some(Command::TogglePinnedExpanded),
-        CMD_ISLAND_COLOR => Some(Command::ChooseIslandColor),
         CMD_HOTKEY_CHANGE => Some(Command::ChangeHotkey),
         CMD_HOTKEY_DEFAULT => Some(Command::SetHotkey(Some(hotkey::DEFAULT))),
         CMD_HOTKEY_OFF => Some(Command::SetHotkey(None)),
@@ -504,21 +503,29 @@ where
         app.show_next_notice();
     });
     let mut appearance_changed = false;
-    let result = crate::settings_ui::show(categories(&state), |id| {
-        let mut close = false;
-        if let Some(id) = id {
-            if let Some(cmd) = id_to_command(id, &state) {
-                appearance_changed |= matches!(cmd, Command::BlurRadius(_));
-                on_command(cmd, &mut state.settings);
-                close = matches!(id, CMD_SHARE | CMD_HOTKEY_CHANGE | CMD_UPDATE);
+    use crate::settings_ui::Change;
+    let result =
+        crate::settings_ui::show(categories(&state), state.settings.island_color, |change| {
+            let mut close = false;
+            match change {
+                Change::Activate(id) => {
+                    if let Some(cmd) = id_to_command(id, &state) {
+                        appearance_changed |= matches!(cmd, Command::BlurRadius(_));
+                        on_command(cmd, &mut state.settings);
+                        close = matches!(id, CMD_SHARE | CMD_HOTKEY_CHANGE | CMD_UPDATE);
+                    }
+                }
+                Change::Color(color) => {
+                    on_command(Command::IslandColor(color), &mut state.settings);
+                }
+                Change::Refresh => {}
             }
-        }
-        crate::with_app(|app| {
-            state.settings = app.settings.clone();
-            state.timer_left = app.countdown_left();
+            crate::with_app(|app| {
+                state.settings = app.settings.clone();
+                state.timer_left = app.countdown_left();
+            });
+            (categories(&state), close)
         });
-        (categories(&state), close)
-    });
     if let Err(error) = result {
         crate::with_app(|app| {
             app.tray
@@ -819,7 +826,7 @@ mod settings_tests {
         actual.dedup();
         assert_eq!(actual.len(), expected.len());
         for id in actual {
-            assert!(id_to_command(id, &state).is_some());
+            assert!(id == CMD_ISLAND_COLOR || id_to_command(id, &state).is_some());
         }
     }
 
@@ -841,8 +848,11 @@ mod settings_tests {
             monitors: &monitors,
             timer_left: None,
         };
-        crate::settings_ui::show(categories(&state), |id| {
-            if let Some(id) = id {
+        use crate::settings_ui::Change;
+        crate::settings_ui::show(categories(&state), state.settings.island_color, |change| {
+            if let Change::Color(color) = change {
+                state.settings.island_color = color;
+            } else if let Change::Activate(id) = change {
                 match id_to_command(id, &state) {
                     Some(Command::ToggleFullscreen) => state.settings.hide_fullscreen ^= true,
                     Some(Command::ToggleExpandOnHover) => state.settings.expand_on_hover ^= true,
@@ -852,13 +862,6 @@ mod settings_tests {
                     Some(Command::ToggleLyricsIsland) => state.settings.lyrics_island ^= true,
                     Some(Command::ToggleLyricsProjector) => state.settings.lyrics_projector ^= true,
                     Some(Command::BlurRadius(value)) => state.settings.blur_radius = value,
-                    Some(Command::ChooseIslandColor) => {
-                        if let Some(color) =
-                            crate::settings_ui::choose_color(state.settings.island_color)
-                        {
-                            state.settings.island_color = color;
-                        }
-                    }
                     Some(Command::Timer(minutes)) => state.timer_left = Some(minutes),
                     Some(Command::CancelTimer) => state.timer_left = None,
                     _ => {}
