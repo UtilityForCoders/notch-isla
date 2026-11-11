@@ -80,7 +80,7 @@ pub struct Projector {
     height: Spring,
     shown: bool,
     last_frame: Instant,
-    backdrop: Option<crate::backdrop::Backdrop>,
+    backdrop: crate::backdrop::LazyBackdrop,
     blur_radius: u32,
     drawn: Option<([f32; 6], bool)>,
     position: Option<(i32, i32)>,
@@ -150,7 +150,7 @@ impl Projector {
                 height: Spring::new(0.0, 260.0, 24.0),
                 shown: false,
                 last_frame: Instant::now(),
-                backdrop: crate::backdrop::Backdrop::new().ok(),
+                backdrop: crate::backdrop::LazyBackdrop::default(),
                 blur_radius: 16,
                 drawn: None,
                 position: None,
@@ -339,7 +339,7 @@ impl Projector {
         let y = DROP * s * self.presence.value.clamp(0.0, 1.0);
 
         let translucent = if translucent {
-            self.backdrop.as_mut().is_some_and(|backdrop| {
+            self.backdrop.get_or_create().is_some_and(|backdrop| {
                 backdrop.show(
                     self.hwnd,
                     (
@@ -354,9 +354,7 @@ impl Projector {
                 )
             })
         } else {
-            if let Some(backdrop) = self.backdrop.as_mut() {
-                backdrop.hide();
-            }
+            self.backdrop.clear();
             false
         };
 

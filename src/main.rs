@@ -591,7 +591,7 @@ struct App {
     /// Proyector de la letra bajo la isla. Se crea la primera vez que hay un verso que mostrar
     /// (con la letra apagada no ocupa memoria); si no se pudiera crear, la isla sigue igual.
     projector: Option<Projector>,
-    backdrop: Option<backdrop::Backdrop>,
+    backdrop: backdrop::LazyBackdrop,
     /// Escucha el audio de la app que suena para las barras reales.
     visualizer: Visualizer,
     /// Frecuencia de refresco de la pantalla actual en Hz (60, 120, 240, etc.).
@@ -677,7 +677,7 @@ impl App {
             lyrics_pending: HashSet::new(),
             lyric_slide: None,
             projector: None,
-            backdrop: backdrop::Backdrop::new().ok(),
+            backdrop: backdrop::LazyBackdrop::default(),
             visualizer: Visualizer::default(),
             hz: monitors::refresh_rate(monitor),
             high_refresh_driver: HighRefreshDriver::new(hwnd),
@@ -2340,7 +2340,7 @@ impl App {
                 self.presence.value,
                 shape,
             );
-            self.backdrop.as_mut().is_some_and(|backdrop| {
+            self.backdrop.get_or_create().is_some_and(|backdrop| {
                 backdrop.show(
                     self.hwnd,
                     (self.pos.x, self.pos.y, sw, sh),
@@ -2349,6 +2349,9 @@ impl App {
                     self.presence.value,
                 )
             })
+        } else if !self.settings.translucent {
+            self.backdrop.clear();
+            false
         } else {
             if let Some(backdrop) = self.backdrop.as_mut() {
                 backdrop.hide();
