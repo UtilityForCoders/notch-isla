@@ -2566,6 +2566,12 @@ impl App {
                 );
             }
         }
+        if !projecting
+            && (!self.settings.lyrics_projector || self.media.as_ref().is_none_or(|m| !m.playing))
+        {
+            // Se conserva durante la transición, y se libera cuando termina de salir.
+            self.projector = None;
+        }
 
         let mut scroll_ms = None;
         if areas.is_some() {
