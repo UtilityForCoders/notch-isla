@@ -1,6 +1,6 @@
 //! Pestañas y acciones del panel principal, compartiendo geometría para dibujo y clics.
 use crate::island::{self, Hit, LabelArea, NoticeIcon};
-use tiny_skia::{Paint, Pixmap};
+use tiny_skia::{FillRule, Paint, PathBuilder, Pixmap, Transform};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Page {
@@ -31,6 +31,39 @@ const TAB_X: f32 = 16.0;
 const TAB_Y: f32 = 12.0;
 const TAB_WIDTH: f32 = 36.0;
 const TAB_HEIGHT: f32 = 28.0;
+
+fn fill_tab(pixmap: &mut Pixmap, paint: &Paint, left: f32, top: f32, scale: f32, tab: Page) {
+    let x = left + TAB_X * scale;
+    let seam = (x + TAB_WIDTH * scale).round();
+    let y = (top + TAB_Y * scale).round();
+    let bottom = (top + (TAB_Y + TAB_HEIGHT) * scale).round();
+    let (outer, inward) = match tab {
+        Page::Music => (x.round(), 1.0),
+        Page::Share => ((x + 2.0 * TAB_WIDTH * scale).round(), -1.0),
+    };
+    let radius = 10.0 * scale;
+    let bend = radius * 0.552_284_8;
+    let corner = outer + inward * radius;
+    let control = corner - inward * bend;
+    let mut path = PathBuilder::new();
+    path.move_to(seam, y);
+    path.line_to(corner, y);
+    path.cubic_to(control, y, outer, y + radius - bend, outer, y + radius);
+    path.line_to(outer, bottom - radius);
+    path.cubic_to(
+        outer,
+        bottom - radius + bend,
+        control,
+        bottom,
+        corner,
+        bottom,
+    );
+    path.line_to(seam, bottom);
+    path.close();
+    if let Some(path) = path.finish() {
+        pixmap.fill_path(&path, paint, FillRule::Winding, Transform::identity(), None);
+    }
+}
 
 fn regions(width: f32, page: Page) -> Vec<(Hit, [f32; 4])> {
     let mut regions = vec![
@@ -96,44 +129,18 @@ pub fn draw(
         ..Default::default()
     };
     let mut labels = Vec::new();
-    // Una sola pista para las pestañas; solo la selección tiene un fondo destacado.
-    let [r, g, b] = color.blend(23, 17);
-    paint.set_color_rgba8(r, g, b, (150.0 * alpha) as u8);
-    island::fill_rounded_rect(
-        pixmap,
-        &paint,
-        left + TAB_X * scale,
-        top + TAB_Y * scale,
-        2.0 * TAB_WIDTH * scale,
-        TAB_HEIGHT * scale,
-        10.0 * scale,
-    );
     for (hit, [x, y, w, h]) in regions(width / scale, page) {
-        let active = matches!(hit, Hit::Tab(tab) if tab == page);
         let hover = hovered == Some(hit);
-        let ([r, g, b], opacity) = if active {
-            (color.blend(35, 48), 185)
-        } else if hover {
-            (color.blend(42, 25), 220)
-        } else if matches!(hit, Hit::Share(ShareAction::Files | ShareAction::Clipboard)) {
-            (color.blend(25, 20), 220)
-        } else {
-            (
-                color.blend(24, 17),
-                if matches!(hit, Hit::Tab(_)) { 0 } else { 150 },
-            )
-        };
-        paint.set_color_rgba8(r, g, b, (opacity as f32 * alpha) as u8);
-        island::fill_rounded_rect(
-            pixmap,
-            &paint,
-            left + x * scale,
-            top + y * scale,
-            w * scale,
-            h * scale,
-            10.0 * scale,
-        );
         if let Hit::Tab(tab) = hit {
+            let ([r, g, b], opacity) = if tab == page {
+                (color.blend(35, 48), 185)
+            } else if hover {
+                (color.blend(42, 25), 220)
+            } else {
+                (color.blend(23, 17), 150)
+            };
+            paint.set_color_rgba8(r, g, b, (opacity as f32 * alpha) as u8);
+            fill_tab(pixmap, &paint, left, top, scale, tab);
             let [r, g, b] = color.blend(255, 42);
             paint.set_color_rgba8(r, g, b, (alpha * 255.0) as u8);
             let icon = match tab {
@@ -150,6 +157,23 @@ pub fn draw(
             );
             continue;
         }
+        let ([r, g, b], opacity) = if hover {
+            (color.blend(42, 25), 220)
+        } else if matches!(hit, Hit::Share(ShareAction::Files | ShareAction::Clipboard)) {
+            (color.blend(25, 20), 220)
+        } else {
+            (color.blend(24, 17), 150)
+        };
+        paint.set_color_rgba8(r, g, b, (opacity as f32 * alpha) as u8);
+        island::fill_rounded_rect(
+            pixmap,
+            &paint,
+            left + x * scale,
+            top + y * scale,
+            w * scale,
+            h * scale,
+            10.0 * scale,
+        );
         let (label, icon) = match hit {
             Hit::Share(ShareAction::Files) => {
                 ("Elegir archivos…".to_string(), Some(NoticeIcon::Usb))
@@ -237,6 +261,36 @@ pub fn draw(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn las_pestañas_cubren_la_union_en_ambos_bordes() {
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            let bounds = (3.3, 4.2, 284.0 * scale, 176.0 * scale, 24.0 * scale);
+            let seam = (bounds.0 + (TAB_X + TAB_WIDTH) * scale).round() as u32;
+            let top = (bounds.1 + TAB_Y * scale).round() as u32;
+            let bottom = (bounds.1 + (TAB_Y + TAB_HEIGHT) * scale).round() as u32 - 1;
+            for (page, other, expected) in [
+                (Page::Music, Page::Share, [185, 220]),
+                (Page::Share, Page::Music, [220, 185]),
+            ] {
+                let mut image = Pixmap::new(600, 360).unwrap();
+                draw(
+                    &mut image,
+                    bounds,
+                    scale,
+                    1.0,
+                    page,
+                    Some(Hit::Tab(other)),
+                    &ShareState::default(),
+                    crate::settings::IslandColor::default(),
+                );
+                for y in [top, bottom] {
+                    assert_eq!(image.pixel(seam - 1, y).unwrap().alpha(), expected[0]);
+                    assert_eq!(image.pixel(seam, y).unwrap().alpha(), expected[1]);
+                }
+            }
+        }
+    }
     #[test]
     fn pestañas_y_acciones_coinciden_a_distintos_dpi() {
         for scale in [1.0, 1.25, 1.5, 2.0] {
