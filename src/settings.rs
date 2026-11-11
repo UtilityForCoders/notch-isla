@@ -43,6 +43,20 @@ impl IslandColor {
         u32::from_be_bytes([0, r, g, b])
     }
 
+    /// Tono claro del color para íconos, rellenos y botones: el mismo matiz llevado al máximo
+    /// brillo y aclarado. Se lee igual de bien con un color oscuro (azul marino) que con uno
+    /// vivo, y un gris o un negro dan blanco.
+    pub fn light(self) -> [u8; 3] {
+        let max = self.0.into_iter().max().unwrap_or(0);
+        if max < 8 {
+            return [255; 3];
+        }
+        self.0.map(|channel| {
+            let full = u16::from(channel) * 255 / u16::from(max);
+            (255 - (255 - full) * 35 / 100) as u8
+        })
+    }
+
     /// Mezcla el color elegido con un gris para mantener legibles fondos e iconos.
     pub fn blend(self, gray: u8, strength: u16) -> [u8; 3] {
         self.0.map(|channel| {

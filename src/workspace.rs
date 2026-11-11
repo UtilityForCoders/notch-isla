@@ -152,15 +152,15 @@ pub fn draw(
         if let Hit::Tab(tab) = hit {
             let alpha = alpha * ((height / scale - y - h) / 8.0).clamp(0.0, 1.0);
             let ([r, g, b], opacity) = if tab == page {
-                (color.blend(35, 48), 185)
+                (color.light(), 52)
             } else if hover {
-                (color.blend(42, 25), 220)
+                (color.light(), 36)
             } else {
-                (color.blend(23, 17), 150)
+                (color.light(), 16)
             };
             paint.set_color_rgba8(r, g, b, (opacity as f32 * alpha) as u8);
             fill_tab(pixmap, &paint, left, top + y * scale, scale, tab);
-            let [r, g, b] = color.blend(255, 42);
+            let [r, g, b] = color.light();
             paint.set_color_rgba8(r, g, b, (alpha * 255.0) as u8);
             let icon = match tab {
                 Page::Music => NoticeIcon::Music,
@@ -177,11 +177,11 @@ pub fn draw(
             continue;
         }
         let ([r, g, b], opacity) = if hover {
-            (color.blend(42, 25), 220)
+            (color.light(), 40)
         } else if matches!(hit, Hit::Share(ShareAction::Files | ShareAction::Clipboard)) {
-            (color.blend(25, 20), 220)
+            (color.light(), 26)
         } else {
-            (color.blend(24, 17), 150)
+            (color.light(), 16)
         };
         paint.set_color_rgba8(r, g, b, (opacity as f32 * alpha) as u8);
         island::fill_rounded_rect(
@@ -207,7 +207,7 @@ pub fn draw(
             _ => continue,
         };
         if let Some(icon) = icon {
-            let [r, g, b] = color.blend(255, 42);
+            let [r, g, b] = color.light();
             paint.set_color_rgba8(r, g, b, (alpha * 255.0) as u8);
             island::draw_notice_icon(
                 pixmap,
@@ -298,7 +298,7 @@ pub fn draw_volume(
     };
     paint.set_color_rgba8(255, 255, 255, (alpha * 55.0) as u8);
     island::fill_rounded_rect(pixmap, &paint, x, y, width, height, height / 2.0);
-    let [r, g, b] = color.blend(255, 42);
+    let [r, g, b] = color.light();
     paint.set_color_rgba8(r, g, b, (alpha * 255.0) as u8);
     island::fill_rounded_rect(pixmap, &paint, x, y, width * level, height, height / 2.0);
 }
@@ -313,8 +313,8 @@ mod tests {
             let bounds = (3.3, 4.2, 284.0 * scale, SHARE_HEIGHT * scale, 24.0 * scale);
             let seam = (bounds.0 + (TAB_X + TAB_WIDTH) * scale).round() as u32;
             for (page, other, expected) in [
-                (Page::Music, Page::Share, [185, 220]),
-                (Page::Share, Page::Music, [220, 185]),
+                (Page::Music, Page::Share, [52, 36]),
+                (Page::Share, Page::Music, [36, 52]),
             ] {
                 let tab_y = if page == Page::Share {
                     SHARE_TAB_Y
