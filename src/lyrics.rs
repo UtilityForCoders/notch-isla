@@ -25,6 +25,18 @@ const HOST: &str = "lrclib.net";
 /// tiempos por palabra; solo limita los versos seguidos de una pausa larga.
 const SECS_PER_SYLLABLE: f32 = 0.35;
 
+/// Segundos antes del verso en que ya cuenta un inicio de sílaba oído: los tiempos de LRC
+/// suelen ir un poco corridos respecto de la voz.
+const VOICE_LEAD: f32 = 0.25;
+
+/// Segundos sin oír la voz al empezar un verso tras los que se deja de esperarla y se usa la
+/// estimación (el detector puede no oírla en una mezcla cargada).
+const VOICE_WAIT: f32 = 0.8;
+
+/// Sílabas de diferencia entre lo oído y la estimación a partir de las cuales no se confía en
+/// el detector (batería o sintetizadores al centro que parecen voz).
+const VOICE_DRIFT: usize = 3;
+
 /// Sílabas de más que dura la última del verso: casi siempre se sostiene.
 const FINAL_HOLD: f32 = 1.0;
 
@@ -155,6 +167,52 @@ pub fn sung(lines: &[Verse], i: usize, t: f32) -> (f32, f32) {
         }
     };
     (pos.clamp(0.0, len), len)
+}
+
+/// Como `sung`, pero guiado por la voz: `onsets` son los segundos de la canción en que se oyó
+/// empezar una sílaba cantada, en orden.
+///
+/// Cada inicio oído en el verso pasa a la sílaba siguiente; la sílaba en curso se pinta en lo
+/// que dura una sílaba normal y espera ahí si la voz se sostiene o calla, hasta poco antes
+/// del verso siguiente. Si el detector no
+/// oye nada al empezar el verso, o cuenta muchas sílabas más o menos que la estimación, se
+/// usa la estimación. Los versos con tiempos por palabra no lo necesitan.
+pub fn sung_guided(lines: &[Verse], i: usize, t: f32, onsets: &[f32]) -> (f32, f32) {
+    let estimate = sung(lines, i, t);
+    let Some(v) = lines.get(i) else {
+        return estimate;
+    };
+    let next = lines.get(i + 1).map_or(f32::MAX, |n| n.start);
+    // Con tiempos por palabra no hace falta; y poco antes del verso siguiente, el verso
+    // termina de pintarse aunque la voz vaya más lenta que lo oído.
+    if !v.words.is_empty() || t >= v.start + (next - v.start) * 0.9 {
+        return estimate;
+    }
+    let mut ends: Vec<u32> = syllables(&v.text, 0).iter().map(|&(at, _)| at).collect();
+    ends.dedup();
+
+    let heard: Vec<f32> = onsets
+        .iter()
+        .copied()
+        .filter(|&o| o >= v.start - VOICE_LEAD && o <= t && o < next - VOICE_LEAD)
+        .collect();
+    let Some(&last) = heard.last() else {
+        // Todavía no se oye la voz: el verso espera, salvo que tarde demasiado.
+        return if t - v.start < VOICE_WAIT {
+            (0.0, estimate.1)
+        } else {
+            estimate
+        };
+    };
+    let estimated_k = ends.partition_point(|&end| (end as f32) <= estimate.0);
+    if (heard.len() - 1).abs_diff(estimated_k) > VOICE_DRIFT {
+        return estimate;
+    }
+    let k = (heard.len() - 1).min(ends.len() - 1);
+    let from = if k == 0 { 0 } else { ends[k - 1] } as f32;
+    let to = ends[k] as f32;
+    let f = ((t - last) / SECS_PER_SYLLABLE).clamp(0.0, 1.0);
+    (from + (to - from) * f, estimate.1)
 }
 
 /// Tramos en que se canta `text` desde la posición UTF-16 `from`: `(dónde termina, peso)`,
@@ -510,6 +568,40 @@ mod tests {
         let fast = parse_lrc("[00:10.00] canción de amor eterno\n[00:11.00] Otro");
         assert_eq!(sung(&fast, 0, 10.9).0, 22.0);
         assert!(sung(&fast, 0, 10.5).0 < 22.0);
+    }
+
+    #[test]
+    fn la_voz_guia_el_verso() {
+        // "ho-la a-mi-go": 5 sílabas.
+        let lines = parse_lrc("[00:10.00] hola amigo\n[00:20.00] Otro");
+        let ends = [2, 4, 6, 8, 10];
+        // Antes de oír la voz, espera al comienzo.
+        assert_eq!(sung_guided(&lines, 0, 10.3, &[]).0, 0.0);
+        // Se oye "ho" a los 10,5 s: se pinta en 0,35 s y espera ahí.
+        assert_eq!(sung_guided(&lines, 0, 10.5, &[10.5]).0, 0.0);
+        assert_eq!(sung_guided(&lines, 0, 10.85, &[10.5]).0, ends[0] as f32);
+        assert_eq!(sung_guided(&lines, 0, 11.4, &[10.5]).0, ends[0] as f32);
+        // Cada inicio pasa a la sílaba siguiente.
+        let heard = [10.5, 11.5, 11.8];
+        assert_eq!(sung_guided(&lines, 0, 12.5, &heard).0, ends[2] as f32);
+        // Los inicios del verso anterior no cuentan.
+        assert_eq!(
+            sung_guided(&lines, 0, 10.85, &[8.0, 10.5]).0,
+            ends[0] as f32
+        );
+    }
+
+    #[test]
+    fn sin_voz_clara_vuelve_a_la_estimacion() {
+        let lines = parse_lrc("[00:10.00] hola amigo\n[00:20.00] Otro");
+        // No se oye nada en 0,8 s: estimación.
+        assert_eq!(sung_guided(&lines, 0, 10.9, &[]), sung(&lines, 0, 10.9));
+        // Muchos inicios de golpe (una batería): no se le cree.
+        let drums: Vec<f32> = (0..8).map(|k| 10.0 + k as f32 * 0.05).collect();
+        assert_eq!(sung_guided(&lines, 0, 10.4, &drums), sung(&lines, 0, 10.4));
+        // Con tiempos por palabra no hace falta.
+        let timed = parse_lrc("[00:10.00] <00:10.00> hola <00:11.00> amigo\n[00:20.00] Otro");
+        assert_eq!(sung_guided(&timed, 0, 10.5, &[]), sung(&timed, 0, 10.5));
     }
 
     #[test]

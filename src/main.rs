@@ -209,6 +209,26 @@ impl LyricSlide {
 /// todo arranca un verso más abajo y sube; al volver al anterior (arrastrando la barra hacia
 /// atrás), arranca uno más arriba y baja. Si ya venía moviéndose, sigue desde donde estaba.
 /// Un salto de varios versos u otra canción se muestra directo, sin animación.
+/// Hasta dónde va cantado el verso `i` en el segundo `secs` de la canción: con "Seguir la voz"
+/// activo, guiado por los inicios de sílaba oídos (pasados de momentos a segundos de la
+/// canción); si no, la estimación por sílabas.
+fn sung_now(
+    visualizer: &visualizer::Visualizer,
+    lines: &[lyrics::Verse],
+    i: usize,
+    secs: f32,
+) -> (f32, f32) {
+    let Some(onsets) = visualizer.onsets() else {
+        return lyrics::sung(lines, i, secs);
+    };
+    let now = Instant::now();
+    let heard: Vec<f32> = onsets
+        .iter()
+        .map(|&at| secs - now.saturating_duration_since(at).as_secs_f32())
+        .collect();
+    lyrics::sung_guided(lines, i, secs, &heard)
+}
+
 fn slide_shift(slide: &mut Option<LyricSlide>, key: &str, index: isize) -> f32 {
     let now = Instant::now();
     match slide {
@@ -2160,14 +2180,25 @@ impl App {
             && self.notice_spring.value < 1.0;
         let show_island_lyrics = show_player && self.lyrics_spring.value > 0.01;
         let bars = self.visible && playing && show_player && self.presence.value > 0.01;
-        // Se escucha el audio de la app solo mientras se ven las barras.
+        // La letra guiada por la voz necesita oír la canción mientras se ve pintándose.
+        let follow_voice = self.settings.lyrics_voice
+            && playing
+            && self.has_current_lyrics()
+            && ((self.settings.lyrics_island && show_island_lyrics)
+                || (self.settings.lyrics_projector
+                    && self.spring.value < 0.4
+                    && !self.hidden_by_fullscreen()));
+        // Se escucha el audio de la app solo mientras se ven las barras o la letra guiada.
         let listen = self
             .media
             .as_ref()
-            .filter(|_| bars && self.settings.real_bars)
+            .filter(|_| (bars && self.settings.real_bars) || follow_voice)
             .map(|m| m.app_id.as_str());
+        self.visualizer.set_voice(follow_voice);
         self.visualizer.set_target(listen);
-        let levels = self.visualizer.levels();
+        // La captura también corre para seguir la voz: las barras solo usan sus niveles si
+        // están en "sonido real".
+        let levels = self.visualizer.levels().filter(|_| self.settings.real_bars);
         let controls = media.map(|m| Controls {
             levels,
             pressed,
@@ -2251,7 +2282,7 @@ impl App {
                         .collect();
                     // El verso que se canta se va pintando al ritmo de la voz.
                     if let Some(i) = current {
-                        let (pos, len) = lyrics::sung(lines, i, secs);
+                        let (pos, len) = sung_now(&self.visualizer, lines, i, secs);
                         info.sung = Some(pos);
                         lyric_painting = m.playing && pos < len;
                     }
@@ -2452,7 +2483,7 @@ impl App {
                     .map(|next| (((next - secs) * 1000.0) as u32).clamp(frame_ms, 5000));
                 let current = lyrics::index_at(lines, secs);
                 if let Some(i) = current {
-                    let (pos, len) = lyrics::sung(lines, i, secs);
+                    let (pos, len) = sung_now(&self.visualizer, lines, i, secs);
                     project_sung = Some(pos);
                     project_painting = m.playing && pos < len;
                 }
@@ -3548,6 +3579,12 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                     }
                     Command::ToggleLyricsProjector => {
                         settings.lyrics_projector = !settings.lyrics_projector;
+                        settings.save();
+                        with_app(|app| app.apply_settings(settings.clone()));
+                        true
+                    }
+                    Command::ToggleLyricsVoice => {
+                        settings.lyrics_voice = !settings.lyrics_voice;
                         settings.save();
                         with_app(|app| app.apply_settings(settings.clone()));
                         true
