@@ -3,7 +3,7 @@
 //!
 //! Funciona como `TrackPopupMenu`: `show` abre una ventana layered junto al cursor, atiende
 //! mensajes hasta que se elige una opción o se cierra, y devuelve la elegida. Los grupos
-//! ("Ocultarse sola tras", "Temporizador"...) abren submenús laterales sin agrandar el menú principal.
+//! ("Pantalla", "Temporizador"...) abren submenús laterales sin agrandar el menú principal.
 //!
 //! Se cierra con Esc, al elegir una opción, al hacer clic fuera (un gancho de mouse que solo
 //! existe mientras el menú está abierto) o si otra ventana pasa al frente.

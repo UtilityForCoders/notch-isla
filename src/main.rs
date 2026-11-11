@@ -6,6 +6,7 @@ mod audio;
 mod autostart;
 mod backdrop;
 mod battery;
+mod color_picker;
 mod frame_wait;
 mod fullscreen;
 mod hotkey;
@@ -107,6 +108,8 @@ const CAPTURE_MS: u32 = 10_000;
 /// enseguida, no se cierra.
 const COLLAPSE_TIMER: usize = 7;
 const COLLAPSE_DELAY_MS: u32 = 800;
+/// Espera al abrir con el atajo sin el puntero sobre los controles.
+const REVEAL_DELAY_MS: u32 = 3000;
 /// Comprobación periódica de pantalla completa (juegos y apps que no avisan por Explorer).
 const FULLSCREEN_TIMER: usize = 8;
 const FULLSCREEN_CHECK_MS: u32 = 500;
@@ -478,7 +481,6 @@ struct App {
     scale: f32,
     spring: Spring,
     hovered: bool,
-    expanded_by_click: bool,
     page: workspace::Page,
     workspace_hover: Option<Hit>,
     /// Consume la liberación del segundo clic después de centrar la isla.
@@ -525,8 +527,6 @@ struct App {
     /// Control del volumen; se crea la primera vez que se gira la rueda.
     volume: Option<Volume>,
     volume_level: f32,
-    /// El nivel mostrado es el de la app que suena (no el general).
-    volume_app: bool,
     /// Hasta cuándo se muestra el nivel de volumen en la isla.
     volume_until: Option<Instant>,
     /// Versión nueva publicada en GitHub, si la hay (se ofrece en el menú de la bandeja).
@@ -603,7 +603,6 @@ impl App {
             scale,
             spring: Spring::new(0.0, EXPAND_SPRING.0, EXPAND_SPRING.1),
             hovered: false,
-            expanded_by_click: false,
             page: workspace::Page::Music,
             workspace_hover: None,
             centering_double_click: false,
@@ -630,7 +629,6 @@ impl App {
             notice_spring: Spring::new(0.0, 260.0, 22.0),
             volume: None,
             volume_level: 0.0,
-            volume_app: false,
             volume_until: None,
             update: None,
             idle_hidden: true,
@@ -1217,12 +1215,24 @@ impl App {
 
     /// El puntero solo expande si se eligió ese modo; un clic abre los controles.
     fn update_expansion(&mut self) {
-        let requested = self.expanded_by_click || self.settings.expand_on_hover;
-        let expand = self.visible
-            && (self.notice.is_some()
-                || self.settings.pinned_expanded
-                || (requested && (self.hovered || self.lingering)));
-        self.aim_expansion(expand);
+        self.aim_expansion(self.visible);
+    }
+
+    /// Al dejar de fijar los controles, recuperar también el regreso automático al reposo.
+    fn set_pinned_expanded(&mut self, pinned: bool) {
+        self.settings.pinned_expanded = pinned;
+        self.lingering = false;
+        if pinned {
+            self.reveal();
+            unsafe {
+                let _ = KillTimer(Some(self.hwnd), COLLAPSE_TIMER);
+            }
+        } else if !self.hovered {
+            unsafe {
+                SetTimer(Some(self.hwnd), COLLAPSE_TIMER, COLLAPSE_DELAY_MS, None);
+            }
+        }
+        self.update_expansion();
     }
 
     /// Lleva la isla a expandida o contraída, cada una con su movimiento: al expandirse, rápido
@@ -1349,6 +1359,12 @@ impl App {
         self.redraw();
     }
 
+    /// Previsualiza la intensidad sin cambiar la decisión de activar el desenfoque.
+    fn preview_blur_radius(&mut self, radius: u32) {
+        self.settings.blur_radius = radius;
+        self.redraw();
+    }
+
     fn hidden_by_fullscreen(&self) -> bool {
         self.fullscreen && self.settings.hide_fullscreen
     }
@@ -1415,10 +1431,11 @@ impl App {
         }
         self.idle_hidden = false;
         self.update_visibility();
+        self.update_expansion();
         if !self.hovered && !self.settings.pinned_expanded {
             self.lingering = true;
             unsafe {
-                SetTimer(Some(self.hwnd), COLLAPSE_TIMER, 3000, None);
+                SetTimer(Some(self.hwnd), COLLAPSE_TIMER, REVEAL_DELAY_MS, None);
             }
         }
     }
@@ -1445,7 +1462,6 @@ impl App {
         };
         if let Some(level) = level {
             self.volume_level = level;
-            self.volume_app = app.is_some();
             self.volume_until = Some(Instant::now() + VOLUME_SHOW);
             self.redraw();
         }
@@ -1545,7 +1561,6 @@ impl App {
                 self.shown = false;
             }
             self.visible = false;
-            self.expanded_by_click = false;
             self.presence.reset(0.0);
             self.high_refresh_driver.set_active(false);
             self.hovered = false;
@@ -1595,7 +1610,6 @@ impl App {
             self.presence.set_target(1.0);
         } else {
             // Sale hacia arriba y a la vez se contrae; la ventana se oculta al terminar (en `tick`).
-            self.expanded_by_click = false;
             self.presence.set_target(0.0);
             self.hovered = false;
             self.lingering = false;
@@ -1688,7 +1702,14 @@ impl App {
                 self.presence.value,
                 self.shape(),
             );
-            if let Some(hit) = workspace::hit_test(bounds, self.scale, self.page, x, y) {
+            if let Some(hit) = workspace::hit_test(
+                bounds,
+                self.scale,
+                self.page,
+                self.shape().empty_music,
+                x,
+                y,
+            ) {
                 return Some(hit);
             }
         }
@@ -1788,11 +1809,7 @@ impl App {
         if seek {
             self.seek(fraction);
         }
-        // Si se soltó fuera de la isla, Windows avisa enseguida que el mouse ya no está.
-        if self.hovered {
-            self.hovered = false;
-            self.set_hovered(true);
-        }
+        self.restore_hover_tracking();
         self.redraw();
     }
 
@@ -1962,6 +1979,33 @@ impl App {
         self.redraw();
     }
 
+    /// La captura puede consumir WM_MOUSELEAVE durante el arrastre. Al soltar, comprobar
+    /// la posición real y rearmar el seguimiento para poder volver a la línea de reposo.
+    fn restore_hover_tracking(&mut self) {
+        let mut cursor = POINT::default();
+        if unsafe { GetCursorPos(&mut cursor) }.is_err() {
+            return;
+        }
+        let (x, y, w, h, _) = island::backdrop_geometry(
+            self.surface.width as f32,
+            self.surface.height as f32,
+            self.scale,
+            self.spring.value,
+            self.presence.value,
+            self.shape(),
+        );
+        let cx = (cursor.x - self.pos.x) as f32;
+        let cy = (cursor.y - self.pos.y) as f32;
+        let inside = cx >= x && cx <= x + w && cy >= y && cy <= y + h;
+        if inside && self.hovered {
+            self.hovered = false;
+        }
+        self.set_hovered(inside);
+        if !inside {
+            self.set_hover(None);
+        }
+    }
+
     fn set_hovered(&mut self, hovered: bool) {
         // Mientras sale de la pantalla no responde al mouse.
         if self.hovered == hovered || (hovered && !self.visible) {
@@ -1969,12 +2013,9 @@ impl App {
         }
         self.hovered = hovered;
         // Al salir sigue expandida un momento (`COLLAPSE_TIMER`); al volver se cancela.
-        self.lingering = !hovered
-            && self.visible
-            && !self.settings.pinned_expanded
-            && (self.expanded_by_click || self.settings.expand_on_hover);
+        self.lingering = !hovered && self.visible && !self.settings.pinned_expanded;
         unsafe {
-            if self.lingering {
+            if !hovered && self.visible && !self.settings.pinned_expanded {
                 SetTimer(Some(self.hwnd), COLLAPSE_TIMER, COLLAPSE_DELAY_MS, None);
             } else {
                 let _ = KillTimer(Some(self.hwnd), COLLAPSE_TIMER);
@@ -1996,9 +2037,10 @@ impl App {
         self.update_expansion();
     }
 
-    /// Terminó la espera tras salir el mouse: ahora sí se encoge.
+    /// Al terminar la espera, vuelve directamente a la línea superior.
     fn end_linger(&mut self) {
         if self.tray_menu_open
+            || self.notice.is_some()
             || (self.page == workspace::Page::Share && share_ui::panel_state().busy)
         {
             unsafe {
@@ -2009,9 +2051,13 @@ impl App {
         unsafe {
             let _ = KillTimer(Some(self.hwnd), COLLAPSE_TIMER);
         }
+        if self.hovered {
+            self.lingering = false;
+            self.update_expansion();
+            return;
+        }
         self.lingering = false;
-        self.expanded_by_click = false;
-        if !self.settings.pinned_expanded {
+        if !self.hovered && !self.settings.pinned_expanded {
             self.idle_hidden = true;
             self.update_visibility();
         }
@@ -2063,9 +2109,13 @@ impl App {
         self.set_timer(timer_for(&motion, moving, frame_ms));
     }
 
-    /// Forma de la isla expandida para `island`: (ancho con letra, forma de aviso).
-    fn shape(&self) -> (f32, f32) {
-        (self.lyrics_spring.value, self.notice_spring.value)
+    fn shape(&self) -> island::Shape {
+        island::Shape {
+            lyrics: self.lyrics_spring.value,
+            notice: self.notice_spring.value,
+            empty_music: self.page == workspace::Page::Music && self.media.is_none(),
+            share: self.page == workspace::Page::Share,
+        }
     }
 
     /// Dibuja el cuadro actual y dice qué sigue moviéndose.
@@ -2104,16 +2154,12 @@ impl App {
         let reshaping = self.notice_spring.value != notice_shape;
         let strip = self.edge_strip();
         let playing = (self.visible || strip) && self.media.as_ref().is_some_and(|m| m.playing);
-        let bars = self.visible
-            && playing
-            && island::mini_alpha(self.spring.value) > 0.0
-            && !self.battery_low
-            && self.update.is_none();
         let show_player = notice.is_none()
             && self.page == workspace::Page::Music
             && self.spring.value > island::EXPANDED_CONTENT_START
             && self.notice_spring.value < 1.0;
         let show_island_lyrics = show_player && self.lyrics_spring.value > 0.01;
+        let bars = self.visible && playing && show_player && self.presence.value > 0.01;
         // Se escucha el audio de la app solo mientras se ven las barras.
         let listen = self
             .media
@@ -2135,7 +2181,6 @@ impl App {
             progress: m
                 .timeline
                 .map(|t| self.dragging.unwrap_or_else(|| t.progress(m.playing))),
-            volume,
             sessions: m.sessions,
             cover_hovered: self.cover_hovered,
             lyrics_active: self.settings.lyrics_island && self.has_current_lyrics(),
@@ -2300,6 +2345,7 @@ impl App {
             time_info,
             lyrics_info,
             blur_active,
+            self.settings.island_color,
             self.page,
         );
         if notice.is_none() {
@@ -2327,11 +2373,27 @@ impl App {
                     self.scale,
                     alpha,
                     self.page,
+                    shape.empty_music,
                     self.workspace_hover,
                     &panel,
+                    self.settings.island_color,
                 );
+                if let Some((level, fade)) = volume.filter(|_| {
+                    self.page == workspace::Page::Music
+                        && bounds.2 >= (island::EXPANDED_COMPACT.0 - 0.5) * self.scale
+                }) {
+                    workspace::draw_volume(
+                        &mut self.surface.pixmap,
+                        bounds,
+                        self.scale,
+                        alpha * fade,
+                        level,
+                        shape.empty_music,
+                        self.settings.island_color,
+                    );
+                }
                 if let Some(areas) = areas.as_mut() {
-                    areas.labels = labels;
+                    areas.labels.extend(labels);
                 }
             }
         }
@@ -2455,11 +2517,7 @@ impl App {
                         &m.title
                     };
                     let mut subtitle = m.artist.clone();
-                    if let Some((level, _)) = volume {
-                        let kind = if self.volume_app { "app" } else { "general" };
-                        let percent = (level * 100.0).round() as u32;
-                        subtitle = format!("Volumen {kind} {percent} %");
-                    } else if let (true, Some(u)) = (self.update_hovered, &self.update) {
+                    if let (true, Some(u)) = (self.update_hovered, &self.update) {
                         // Explica qué hace el botón azul antes de hacer clic.
                         subtitle = u.menu_label();
                     } else if !m.playing {
@@ -2470,7 +2528,7 @@ impl App {
                     }
                     (title.to_string(), subtitle)
                 }
-                (None, None) => ("Tu música".to_string(), "Sin reproducción".to_string()),
+                (None, None) => (String::new(), String::new()),
             };
             scroll_ms = text.draw(
                 self.surface.dib(),
@@ -2901,13 +2959,8 @@ fn open_island_menu(hwnd: HWND, app_id: Option<&str>, is_centered: bool, pinned_
         tray::IslandMenuChoice::Share => share_ui::open(hwnd),
         tray::IslandMenuChoice::TogglePinnedExpanded => {
             with_app(|app| {
-                app.settings.pinned_expanded = !app.settings.pinned_expanded;
+                app.set_pinned_expanded(!app.settings.pinned_expanded);
                 app.settings.save();
-                if app.settings.pinned_expanded {
-                    app.reveal();
-                } else if !app.hovered {
-                }
-                app.update_expansion();
             });
         }
         tray::IslandMenuChoice::Center => {
@@ -2962,7 +3015,6 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             with_app(|app| {
                 app.reveal();
                 app.select_page(workspace::Page::Share);
-                app.expanded_by_click = true;
                 app.set_hovered(true);
                 app.update_expansion();
             });
@@ -2984,9 +3036,12 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                     app.drag_island_to();
                     return;
                 }
-                // La franja espera un clic: pasar el mouse no muestra la isla contraída.
+                // La línea solo abre con el puntero si se eligió expresamente.
                 if app.idle_hidden {
-                    return;
+                    if !app.settings.expand_on_hover {
+                        return;
+                    }
+                    app.reveal();
                 }
                 if app.dragging.is_some() {
                     app.drag_to(x);
@@ -3037,6 +3092,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                     if drag.has_moved {
                         app.settings.save();
                     }
+                    app.restore_hover_tracking();
                 }
             });
             LRESULT(0)
@@ -3068,6 +3124,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                     unsafe {
                         let _ = ReleaseCapture();
                     }
+                    app.restore_hover_tracking();
                     if drag.has_moved {
                         let mut pt = POINT::default();
                         unsafe {
@@ -3082,22 +3139,9 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                         app.end_notice();
                         return;
                     }
-                    // Un clic en la franja abre directamente los controles.
+                    // Un clic en la línea abre directamente los controles.
                     if app.idle_hidden {
                         app.reveal();
-                        app.expanded_by_click = true;
-                        app.set_hovered(true);
-                        app.update_expansion();
-                        return;
-                    }
-                    // El clic que abre los controles no debe activar la carátula o un botón
-                    // que acaba de aparecer bajo el puntero.
-                    if !app.settings.expand_on_hover
-                        && !app.expanded_by_click
-                        && app.spring.value < 0.95
-                        && !matches!(drag.pending_hit, Some(Hit::Battery))
-                    {
-                        app.expanded_by_click = true;
                         app.set_hovered(true);
                         app.update_expansion();
                         return;
@@ -3405,6 +3449,10 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                     }
                 });
                 tray::show_menu(state, |cmd, settings| match cmd {
+                    Command::LinkedDevices => {
+                        share_ui::manage_linked(hwnd);
+                        true
+                    }
                     Command::Share => {
                         unsafe {
                             let _ = PostMessageW(
@@ -3524,10 +3572,13 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                     }
                     Command::BlurRadius(radius) => {
                         settings.blur_radius = radius;
-                        settings.translucent = true;
+                        with_app(|app| app.preview_blur_radius(radius));
+                        true
+                    }
+                    Command::IslandColor(color) => {
                         with_app(|app| {
-                            app.settings.blur_radius = radius;
-                            app.settings.translucent = true;
+                            app.settings.island_color = color;
+                            app.settings.save();
                             app.redraw();
                         });
                         true
@@ -3536,11 +3587,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                         settings.pinned_expanded = !settings.pinned_expanded;
                         settings.save();
                         with_app(|app| {
-                            app.settings.pinned_expanded = settings.pinned_expanded;
-                            if settings.pinned_expanded {
-                                app.reveal();
-                            }
-                            app.update_expansion();
+                            app.set_pinned_expanded(settings.pinned_expanded);
                         });
                         true
                     }
@@ -3548,7 +3595,6 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                         settings.expand_on_hover = !settings.expand_on_hover;
                         settings.save();
                         with_app(|app| {
-                            app.expanded_by_click = false;
                             app.apply_settings(settings.clone());
                             app.update_expansion();
                         });
@@ -3740,6 +3786,8 @@ mod tests {
             settings.lyrics_projector = false;
             settings.high_refresh = false;
             settings.pinned_expanded = false;
+            settings.expand_on_hover = false;
+            settings.real_bars = false;
             let mut app = App::new(hwnd, monitors::find(""), settings).unwrap();
             app.tray.remove();
             app.pos = POINT {
@@ -3778,7 +3826,11 @@ mod tests {
             };
             let key = lyrics::key(&media.title, &media.artist);
             app.lyrics.insert(key.clone(), Vec::new());
-            app.set_media(Some(media));
+            app.set_media(Some(media.clone()));
+            assert!(
+                !app.shape().empty_music,
+                "una sesión en pausa conserva el reproductor"
+            );
             assert_eq!(app.lyrics_spring.target(), 0.0);
             assert!(app.settings.lyrics_island);
             app.set_lyrics(lyrics::Lyrics {
@@ -3794,6 +3846,13 @@ mod tests {
             assert_eq!(app.lyrics_spring.target(), 0.0);
             app.set_media(None);
             assert!(app.visible);
+            assert!(
+                !app.shape().empty_music,
+                "Compartir conserva el alto de sus acciones"
+            );
+            app.select_page(workspace::Page::Music);
+            assert!(app.shape().empty_music);
+            app.select_page(workspace::Page::Share);
             app.spring.reset(1.0);
             app.presence.reset(1.0);
             let bounds = island::backdrop_geometry(
@@ -3805,11 +3864,13 @@ mod tests {
                 app.shape(),
             );
             assert!(
-                app.hit_at(bounds.0 + 40.0 * app.scale, bounds.1 + 20.0 * app.scale)
-                    == Some(Hit::Tab(workspace::Page::Music))
+                app.hit_at(
+                    bounds.0 + 40.0 * app.scale,
+                    bounds.1 + workspace::share_tab_center_y() * app.scale
+                ) == Some(Hit::Tab(workspace::Page::Music))
             );
             assert!(
-                app.hit_at(bounds.0 + 70.0 * app.scale, bounds.1 + 60.0 * app.scale)
+                app.hit_at(bounds.0 + 70.0 * app.scale, bounds.1 + 53.0 * app.scale)
                     == Some(Hit::Share(workspace::ShareAction::Files))
             );
             app.battery_low = true;
@@ -3827,7 +3888,7 @@ mod tests {
             assert!(
                 app.hit_at(
                     bounds.0 + bounds.2 - 50.0 * app.scale,
-                    bounds.1 + 26.0 * app.scale
+                    bounds.1 + 14.0 * app.scale
                 ) == Some(Hit::Battery)
             );
             assert!(app.low_battery_items().iter().any(|item| matches!(
@@ -3847,6 +3908,105 @@ mod tests {
                 timer_for(&motion, false, FRAME_MS).is_none(),
                 "la píldora sin música no debe animarse continuamente"
             );
+            app.toggle_hidden();
+            APP.with(|cell| *cell.borrow_mut() = Some(app));
+            wndproc(hwnd, WM_MOUSEMOVE, WPARAM(0), LPARAM(0));
+            with_app(|app| {
+                assert!(app.idle_hidden && app.edge_strip());
+                app.begin_drag_island(None);
+            });
+            wndproc(hwnd, WM_LBUTTONUP, WPARAM(0), LPARAM(0));
+            with_app(|app| {
+                assert!(app.visible && app.hovered);
+                assert_eq!(app.spring.target(), 1.0);
+                app.end_linger();
+                assert!(app.visible, "no cerrar bajo el puntero");
+            });
+            wndproc(hwnd, WM_MOUSELEAVE, WPARAM(0), LPARAM(0));
+            wndproc(hwnd, WM_TIMER, WPARAM(COLLAPSE_TIMER), LPARAM(0));
+            with_app(|app| {
+                assert!(app.idle_hidden && app.edge_strip());
+                app.settings.expand_on_hover = true;
+            });
+            wndproc(hwnd, WM_MOUSEMOVE, WPARAM(0), LPARAM(0));
+            with_app(|app| {
+                assert!(app.visible);
+                assert_eq!(app.spring.target(), 1.0);
+                app.spring.reset(1.0);
+                app.begin_drag_island(None);
+            });
+            wndproc(hwnd, WM_MOUSELEAVE, WPARAM(0), LPARAM(0));
+            with_app(|app| assert!(app.hovered));
+            let _ = ReleaseCapture();
+            wndproc(hwnd, WM_CAPTURECHANGED, WPARAM(0), LPARAM(0));
+            with_app(|app| {
+                assert!(!app.hovered && app.lingering);
+                app.end_linger();
+                assert!(app.idle_hidden && app.edge_strip());
+            });
+            let mut app = APP.with(|cell| cell.borrow_mut().take().unwrap());
+            app.battery_low = false;
+            app.low_battery_devices.clear();
+            app.media = Some(NowPlaying {
+                playing: true,
+                ..media
+            });
+            app.reveal();
+            app.select_page(workspace::Page::Music);
+            app.presence.reset(1.0);
+            app.spring.reset(0.0);
+            assert!(!app.render().bars);
+            app.spring.reset(1.0);
+            assert!(
+                app.render().bars,
+                "el reproductor muestra las barras de audio"
+            );
+            app.battery_low = true;
+            assert!(
+                app.render().bars,
+                "el aviso de batería no sustituye las barras"
+            );
+            app.battery_low = false;
+            app.select_page(workspace::Page::Share);
+            assert!(!app.render().bars);
+            app.select_page(workspace::Page::Music);
+            app.media.as_mut().unwrap().playing = false;
+            assert!(!app.render().bars, "la pausa no debe animar las barras");
+            app.media.as_mut().unwrap().playing = true;
+            app.end_linger();
+            assert!(
+                !app.render().bars,
+                "la línea de reposo no debe capturar audio"
+            );
+            assert!(
+                app.edge_strip(),
+                "el reposo siempre vuelve a la línea superior"
+            );
+            app.set_pinned_expanded(true);
+            assert!(app.visible && app.spring.target() == 1.0);
+            app.end_linger();
+            assert!(app.visible);
+            app.set_pinned_expanded(false);
+            assert_eq!(app.spring.target(), 1.0);
+            app.end_linger();
+            assert!(
+                app.edge_strip(),
+                "quitar la fijación debe recuperar el reposo"
+            );
+            app.reveal();
+            app.preview_blur_radius(32);
+            assert!(!app.settings.translucent);
+            assert!(app.backdrop.as_ref().is_none_or(|bg| !bg.is_shown()));
+            let mut appearance = app.settings.clone();
+            appearance.translucent = true;
+            app.apply_settings(appearance.clone());
+            app.preview_blur_radius(8);
+            assert!(app.settings.translucent);
+            appearance.translucent = false;
+            app.apply_settings(appearance);
+            app.preview_blur_radius(24);
+            assert!(!app.settings.translucent);
+            assert!(app.backdrop.as_ref().is_none_or(|bg| !bg.is_shown()));
             app.set_timer(None);
             drop(app);
             let _ = DestroyWindow(hwnd);
@@ -4086,7 +4246,7 @@ mod tests {
         let (lw, lh) = island::window_size();
         let (w, h) = ((lw * scale).ceil() as u32, (lh * scale).ceil() as u32);
         let zone = |p: f32| {
-            let b = island::bounds(w as f32, h as f32, scale, p, 1.0, (0.0, 0.0));
+            let b = island::bounds(w as f32, h as f32, scale, p, 1.0, island::Shape::default());
             Area::new(b, w, h)
         };
         let collapsed = zone(0.0).pixels() as f32 / (w * h) as f32;
@@ -4212,14 +4372,16 @@ mod tests {
                 scale,
                 1.0,
                 1.0,
-                (1.0, 0.0),
+                island::Shape {
+                    lyrics: 1.0,
+                    ..Default::default()
+                },
                 Some(island::Controls {
                     playing: true,
                     hovered: None,
                     seek_hover: None,
                     accent: [200, 120, 60],
                     progress: Some(0.4),
-                    volume: None,
                     sessions: (0, 1),
                     cover_hovered: false,
                     pressed: None,
@@ -4243,13 +4405,24 @@ mod tests {
                     status: None,
                 }),
                 false,
+                crate::settings::IslandColor::default(),
                 workspace::Page::Music,
             )
             .unwrap();
             surface.copy_to_dib();
             let mid = Instant::now();
             let island = Area::new(
-                island::bounds(w as f32, h as f32, scale, 1.0, 1.0, (1.0, 0.0)),
+                island::bounds(
+                    w as f32,
+                    h as f32,
+                    scale,
+                    1.0,
+                    1.0,
+                    island::Shape {
+                        lyrics: 1.0,
+                        ..Default::default()
+                    },
+                ),
                 w,
                 h,
             );
@@ -4417,7 +4590,10 @@ mod tests {
                 scale,
                 expanded,
                 1.0,
-                (lyrics, 0.0),
+                island::Shape {
+                    lyrics,
+                    ..Default::default()
+                },
             );
             let (min_x, max_x) = island_bounds(&rc, width, visible_width, scale);
             let left_gap = min_x as f32 + left - rc.left as f32;

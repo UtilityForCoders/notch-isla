@@ -54,6 +54,7 @@ const CMD_BATTERY_REFRESH: usize = 21;
 const CMD_CONNECTION_NOTICES: usize = 22;
 const CMD_SHARE: usize = 23;
 const CMD_SETTINGS: usize = 24;
+const CMD_LINKED_DEVICES: usize = 25;
 /// Las opciones de los submenús van numeradas a partir de estas bases.
 const CMD_MONITOR: usize = 200;
 const CMD_TIMER: usize = 300;
@@ -61,11 +62,13 @@ const CMD_TIMER: usize = 300;
 const CMD_OUTPUT_DEFAULT: usize = 400;
 const CMD_OUTPUT: usize = 401;
 const CMD_BLUR_RADIUS: usize = 500;
+pub(crate) const CMD_ISLAND_COLOR: usize = 600;
 
 /// Duraciones del temporizador en minutos.
 pub const TIMER_MINUTES: [u32; 6] = [5, 10, 15, 25, 45, 60];
 
 pub enum Command {
+    LinkedDevices,
     Share,
     ToggleBatteryNotices,
     ToggleConnectionNotices,
@@ -82,7 +85,7 @@ pub enum Command {
     ToggleFullscreen,
     /// Letra dentro de la isla expandida.
     ToggleLyricsIsland,
-    /// Letra en el proyector bajo la isla encogida.
+    /// Letra en el proyector bajo la línea de reposo.
     ToggleLyricsProjector,
     ToggleRealBars,
     CheckUpdates,
@@ -99,6 +102,7 @@ pub enum Command {
     ToggleExpandOnHover,
     TogglePinnedExpanded,
     BlurRadius(u32),
+    IslandColor(crate::settings::IslandColor),
 }
 
 /// Lo que el menú necesita saber para marcar las opciones actuales.
@@ -266,7 +270,7 @@ fn build_settings_items(state: &MenuState) -> Vec<Item> {
             action(CMD_LYRICS, "Con la isla expandida", settings.lyrics_island),
             action(
                 CMD_LYRICS_PROJECTOR,
-                "Con la isla encogida",
+                "Con la línea de reposo",
                 settings.lyrics_projector,
             ),
         ],
@@ -296,6 +300,11 @@ fn build_settings_items(state: &MenuState) -> Vec<Item> {
         "Activar desenfoque",
         settings.translucent,
     )];
+    items.push(action(
+        CMD_ISLAND_COLOR,
+        &format!("Color del notch · #{:06X}", settings.island_color.rgb()),
+        false,
+    ));
     blur.push(Item::Slider {
         id: CMD_BLUR_RADIUS,
         label: format!("Intensidad: {} %", settings.blur_radius * 100 / 40),
@@ -347,6 +356,7 @@ fn build_settings_items(state: &MenuState) -> Vec<Item> {
     items.push(Item::Separator);
     // Con una versión nueva ya encontrada, la opción de arriba la instala; esta igual consulta.
     items.push(action(CMD_SHARE, "Compartir cerca…", false));
+    items.push(action(CMD_LINKED_DEVICES, "Equipos vinculados…", false));
     items.push(action(CMD_CHECK_UPDATES, "Buscar actualizaciones", false));
     items.push(action(CMD_EXIT, "Salir", false));
     items
@@ -368,6 +378,7 @@ fn id_to_command(id: usize, state: &MenuState) -> Option<Command> {
         CMD_LYRICS_PROJECTOR => Some(Command::ToggleLyricsProjector),
         CMD_REAL_BARS => Some(Command::ToggleRealBars),
         CMD_SHARE => Some(Command::Share),
+        CMD_LINKED_DEVICES => Some(Command::LinkedDevices),
         CMD_CHECK_UPDATES => Some(Command::CheckUpdates),
         CMD_CENTER => Some(Command::Center),
         CMD_HIGH_REFRESH => Some(Command::ToggleHighRefresh),
@@ -442,10 +453,10 @@ fn categories(state: &MenuState) -> Vec<crate::settings_ui::Category> {
             },
             Item::Action { id, .. } => match *id {
                 CMD_EXIT => continue,
-                CMD_CENTER | CMD_HIGH_REFRESH => 1,
+                CMD_CENTER | CMD_HIGH_REFRESH | CMD_ISLAND_COLOR => 1,
                 CMD_REAL_BARS => 2,
                 CMD_NOTICES => 3,
-                CMD_SHARE => 5,
+                CMD_SHARE | CMD_LINKED_DEVICES => 5,
                 CMD_UPDATE | CMD_CHECK_UPDATES => 6,
                 _ => 0,
             },
@@ -496,21 +507,29 @@ where
         app.show_next_notice();
     });
     let mut appearance_changed = false;
-    let result = crate::settings_ui::show(categories(&state), |id| {
-        let mut close = false;
-        if let Some(id) = id {
-            if let Some(cmd) = id_to_command(id, &state) {
-                appearance_changed |= matches!(cmd, Command::BlurRadius(_));
-                on_command(cmd, &mut state.settings);
-                close = matches!(id, CMD_SHARE | CMD_HOTKEY_CHANGE | CMD_UPDATE);
+    use crate::settings_ui::Change;
+    let result =
+        crate::settings_ui::show(categories(&state), state.settings.island_color, |change| {
+            let mut close = false;
+            match change {
+                Change::Activate(id) => {
+                    if let Some(cmd) = id_to_command(id, &state) {
+                        appearance_changed |= matches!(cmd, Command::BlurRadius(_));
+                        on_command(cmd, &mut state.settings);
+                        close = matches!(id, CMD_SHARE | CMD_HOTKEY_CHANGE | CMD_UPDATE);
+                    }
+                }
+                Change::Color(color) => {
+                    on_command(Command::IslandColor(color), &mut state.settings);
+                }
+                Change::Refresh => {}
             }
-        }
-        crate::with_app(|app| {
-            state.settings = app.settings.clone();
-            state.timer_left = app.countdown_left();
+            crate::with_app(|app| {
+                state.settings = app.settings.clone();
+                state.timer_left = app.countdown_left();
+            });
+            (categories(&state), close)
         });
-        (categories(&state), close)
-    });
     if let Err(error) = result {
         crate::with_app(|app| {
             app.tray
@@ -811,7 +830,7 @@ mod settings_tests {
         actual.dedup();
         assert_eq!(actual.len(), expected.len());
         for id in actual {
-            assert!(id_to_command(id, &state).is_some());
+            assert!(id == CMD_ISLAND_COLOR || id_to_command(id, &state).is_some());
         }
     }
 
@@ -833,8 +852,11 @@ mod settings_tests {
             monitors: &monitors,
             timer_left: None,
         };
-        crate::settings_ui::show(categories(&state), |id| {
-            if let Some(id) = id {
+        use crate::settings_ui::Change;
+        crate::settings_ui::show(categories(&state), state.settings.island_color, |change| {
+            if let Change::Color(color) = change {
+                state.settings.island_color = color;
+            } else if let Change::Activate(id) = change {
                 match id_to_command(id, &state) {
                     Some(Command::ToggleFullscreen) => state.settings.hide_fullscreen ^= true,
                     Some(Command::ToggleExpandOnHover) => state.settings.expand_on_hover ^= true,

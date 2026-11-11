@@ -12,10 +12,48 @@ use crate::hotkey::{self, Hotkey};
 
 const KEY: PCWSTR = w!("Software\\NotchIsla");
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct IslandColor(pub [u8; 3]);
+
+impl Default for IslandColor {
+    fn default() -> Self {
+        Self([66, 132, 235])
+    }
+}
+
+impl IslandColor {
+    fn load() -> Self {
+        if let Some(rgb) = read_dword(w!("IslandColorRgb")).filter(|rgb| *rgb <= 0xFFFFFF) {
+            let [_, r, g, b] = rgb.to_be_bytes();
+            return Self([r, g, b]);
+        }
+        // Las versiones anteriores guardaban el número del color predefinido.
+        match read_dword(w!("IslandColor")) {
+            Some(1) => Self([128, 128, 128]),
+            Some(2) => Self([158, 87, 213]),
+            Some(3) => Self([217, 63, 78]),
+            Some(4) => Self([60, 169, 105]),
+            Some(5) => Self([214, 147, 51]),
+            _ => Self::default(),
+        }
+    }
+
+    pub fn rgb(self) -> u32 {
+        let [r, g, b] = self.0;
+        u32::from_be_bytes([0, r, g, b])
+    }
+
+    /// Mezcla el color elegido con un gris para mantener legibles fondos e iconos.
+    pub fn blend(self, gray: u8, strength: u16) -> [u8; 3] {
+        self.0.map(|channel| {
+            ((u16::from(channel) * strength + u16::from(gray) * (100 - strength)) / 100) as u8
+        })
+    }
+}
+
 #[derive(Clone)]
 pub struct Settings {
-    /// Preferencia heredada, conservada por compatibilidad con versiones anteriores.
-    pub hide_delay: u32,
+    pub island_color: IslandColor,
     /// Pantalla elegida (nombre de dispositivo, como "\\.\DISPLAY2"); vacío = la principal.
     pub monitor: String,
     /// Se esconde mientras hay una app a pantalla completa.
@@ -24,11 +62,11 @@ pub struct Settings {
     pub notices: bool,
     pub battery_notices: bool,
     pub connection_notices: bool,
-    /// Letra sincronizada dentro de la isla expandida y en el proyector bajo la isla encogida.
+    /// Letra sincronizada dentro de la isla expandida y en el proyector bajo la línea de reposo.
     /// Se activan por separado; apagadas si no se activan (la letra se pide a lrclib.net).
     pub lyrics_island: bool,
     pub lyrics_projector: bool,
-    /// Las barras de la isla siguen el sonido real de la app (si no, una animación).
+    /// Las barras del reproductor siguen el sonido real de la app (si no, una animación).
     pub real_bars: bool,
     /// Atajo para mostrar u ocultar la isla; `None` = desactivado.
     pub hotkey: Option<Hotkey>,
@@ -60,7 +98,7 @@ impl Settings {
         // Antes había una sola opción de letra: quien la tenía activada conserva las dos.
         let lyrics = read_dword(w!("Lyrics")).is_some_and(|v| v != 0);
         Self {
-            hide_delay: read_dword(w!("HideDelay")).unwrap_or(3),
+            island_color: IslandColor::load(),
             monitor: read_string(w!("Monitor")).unwrap_or_default(),
             hide_fullscreen: read_dword(w!("HideFullscreen")).is_none_or(|v| v != 0),
             notices: read_dword(w!("Notices")).is_none_or(|v| v != 0),
@@ -80,7 +118,7 @@ impl Settings {
     }
 
     pub fn save(&self) {
-        write_dword(w!("HideDelay"), self.hide_delay);
+        write_dword(w!("IslandColorRgb"), self.island_color.rgb());
         write_string(w!("Monitor"), &self.monitor);
         write_dword(w!("HideFullscreen"), self.hide_fullscreen as u32);
         write_dword(w!("Notices"), self.notices as u32);

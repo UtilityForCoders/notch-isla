@@ -16,8 +16,10 @@ use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
+use crate::color_picker::{Action as PickerAction, Picker};
 use crate::island::{self, LabelArea, LayoutAreas, TextArea};
 use crate::menu::Item;
+use crate::settings::IslandColor;
 use crate::text::TextRenderer;
 use crate::Surface;
 
@@ -37,7 +39,8 @@ const CONTENT_BOTTOM: f32 = 500.0;
 
 enum Event {
     Down(f32, f32),
-    Move(f32),
+    Move(f32, f32),
+    Character(char),
     Up,
     Wheel(f32),
     Key(u32, bool),
@@ -54,12 +57,13 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
     let y = ((lp.0 >> 16) as u16 as i16) as f32;
     let event = match msg {
         WM_LBUTTONDOWN => Some(Event::Down(x, y)),
-        WM_MOUSEMOVE => Some(Event::Move(x)),
+        WM_MOUSEMOVE => Some(Event::Move(x, y)),
         WM_LBUTTONUP | WM_CAPTURECHANGED => Some(Event::Up),
         WM_MOUSEWHEEL => Some(Event::Wheel(((wp.0 >> 16) as u16 as i16) as f32)),
         WM_KEYDOWN => Some(Event::Key(wp.0 as u32, unsafe {
             windows::Win32::UI::Input::KeyboardAndMouse::GetKeyState(0x10) < 0
         })),
+        WM_CHAR => char::from_u32(wp.0 as u32).map(Event::Character),
         WM_DPICHANGED => Some(Event::Dpi),
         WM_CLOSE => Some(Event::Close),
         WM_ERASEBKGND => return LRESULT(1),
@@ -67,7 +71,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
     };
     if let Some(event) = event {
         EVENTS.with_borrow_mut(|events| {
-            if matches!(event, Event::Move(_)) && matches!(events.back(), Some(Event::Move(_))) {
+            if matches!(event, Event::Move(..)) && matches!(events.back(), Some(Event::Move(..))) {
                 events.pop_back();
             }
             events.push_back(event);
@@ -125,6 +129,7 @@ struct Panel {
     scroll: f32,
     focus: usize,
     dragging: Option<usize>,
+    picker: Option<Picker>,
 }
 
 impl Panel {
@@ -422,13 +427,16 @@ impl Panel {
             false,
             0.55
         );
+        if let Some(picker) = &mut self.picker {
+            picker.draw(&mut self.surface.pixmap, &mut labels, s);
+        }
         let areas = LayoutAreas {
             labels,
             text: TextArea {
                 x: 24.0 * s,
                 w: 580.0 * s,
                 cy: 38.0 * s,
-                alpha: 1.0,
+                alpha: if self.picker.is_some() { 0.35 } else { 1.0 },
             },
             time: None,
             lyrics: None,
@@ -471,10 +479,16 @@ impl Panel {
     }
 }
 
+pub enum Change {
+    Refresh,
+    Activate(usize),
+    Color(IslandColor),
+}
+
 /// Ventana independiente: permanece abierta al cambiar opciones y se libera por completo al cerrar.
-pub fn show<F>(categories: Vec<Category>, mut command: F) -> Result<()>
+pub fn show<F>(categories: Vec<Category>, mut color: IslandColor, mut command: F) -> Result<()>
 where
-    F: FnMut(Option<usize>) -> (Vec<Category>, bool),
+    F: FnMut(Change) -> (Vec<Category>, bool),
 {
     unsafe {
         let existing = WINDOW.load(Ordering::SeqCst);
@@ -550,6 +564,7 @@ where
             scroll: 0.0,
             focus: 0,
             dragging: None,
+            picker: None,
         };
         panel.render();
         let _ = ShowWindow(hwnd, SW_SHOW);
@@ -572,11 +587,63 @@ where
                     | crate::update::WM_UPDATE
                     | crate::update::WM_UPDATE_CHECKED
             ) {
-                panel.categories = command(None).0;
+                panel.categories = command(Change::Refresh).0;
                 panel.scroll = panel.scroll.min(panel.max_scroll());
                 panel.render();
             }
             while let Some(event) = EVENTS.with_borrow_mut(|events| events.pop_front()) {
+                if let Some(picker) = &mut panel.picker {
+                    let action = match event {
+                        Event::Close => break 'messages,
+                        Event::Dpi => {
+                            panel.rescale()?;
+                            panel.render();
+                            continue;
+                        }
+                        Event::Down(x, y) => {
+                            let action = picker.press(x / panel.scale, y / panel.scale);
+                            if picker.dragging() {
+                                SetCapture(hwnd);
+                            }
+                            action
+                        }
+                        Event::Move(x, y) if picker.dragging() => {
+                            picker.drag_to(x / panel.scale, y / panel.scale);
+                            PickerAction::Continue
+                        }
+                        Event::Move(..) | Event::Wheel(_) => continue,
+                        Event::Up => {
+                            picker.release();
+                            let _ = ReleaseCapture();
+                            continue;
+                        }
+                        Event::Key(key, _) => picker.key(key),
+                        Event::Character(character) => {
+                            if character == '\u{16}' {
+                                if let Some(text) = crate::share_ui::clipboard_text(hwnd) {
+                                    picker.paste_hex(&text);
+                                }
+                            } else {
+                                picker.character(character);
+                            }
+                            PickerAction::Continue
+                        }
+                    };
+                    match action {
+                        PickerAction::Continue => {}
+                        PickerAction::Cancel => panel.picker = None,
+                        PickerAction::Apply(selected) => {
+                            color = selected;
+                            panel.picker = None;
+                            panel.categories = command(Change::Color(selected)).0;
+                        }
+                    }
+                    if panel.picker.is_none() {
+                        let _ = ReleaseCapture();
+                    }
+                    panel.render();
+                    continue;
+                }
                 let old_category = panel.category;
                 let mut id = None;
                 match event {
@@ -626,7 +693,7 @@ where
                             }
                         }
                     }
-                    Event::Move(x) => {
+                    Event::Move(x, _) => {
                         if let Some(index) = panel.dragging {
                             id = panel.slider_command(index, x / panel.scale);
                             if id.is_none() {
@@ -640,6 +707,7 @@ where
                         panel.dragging = None;
                         let _ = ReleaseCapture();
                     }
+                    Event::Character(_) => continue,
                     Event::Wheel(delta) => {
                         panel.scroll =
                             (panel.scroll - delta / 120.0 * 44.0).clamp(0.0, panel.max_scroll());
@@ -703,10 +771,12 @@ where
                     },
                 }
                 if old_category != panel.category {
-                    panel.categories = command(None).0;
+                    panel.categories = command(Change::Refresh).0;
                 }
-                if let Some(id) = id {
-                    let (categories, close) = command(Some(id));
+                if id == Some(crate::tray::CMD_ISLAND_COLOR) {
+                    panel.picker = Some(Picker::new(color));
+                } else if let Some(id) = id {
+                    let (categories, close) = command(Change::Activate(id));
                     if close {
                         break 'messages;
                     }

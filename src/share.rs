@@ -790,7 +790,7 @@ fn session(
         .ok_or("El equipo debe vincularse antes de enviar contenido.")?;
     let mut offer = read_offer(stream)?;
     // El nombre visible procede de la identidad guardada, nunca del envío entrante.
-    offer.sender = device.name;
+    offer.sender = device.display_name().to_owned();
     if cancelled(cancel) || !store.enabled() || store.known(&certificate).is_none() {
         return Err("Recepción desactivada o equipo olvidado.".into());
     }

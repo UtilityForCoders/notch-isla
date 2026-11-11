@@ -333,7 +333,7 @@ unsafe fn owned_path(path: PWSTR) -> PathBuf {
     value
 }
 
-fn clipboard_text(hwnd: HWND) -> Option<String> {
+pub(crate) fn clipboard_text(hwnd: HWND) -> Option<String> {
     // CF_UNICODETEXT, leído únicamente al elegir la acción.
     const UNICODE_TEXT: u32 = 13;
     unsafe {
@@ -484,14 +484,17 @@ fn choose_device(hwnd: HWND, payload: Payload, peers: Vec<Peer>) {
             .find(|peer| peer.certificate.as_ref() == device.certificate)
         {
             let mut peer = peer.clone();
-            peer.name = device.name.clone();
+            peer.name = device.display_name().to_owned();
             available.push(peer);
             items.push(action(
                 available.len(),
-                format!("{} · Disponible", device.name),
+                format!("{} · Disponible", device.display_name()),
             ));
         } else {
-            items.push(Item::Label(format!("{} · Sin conexión", device.name)));
+            items.push(Item::Label(format!(
+                "{} · Sin conexión",
+                device.display_name()
+            )));
         }
     }
     if available.is_empty() {
@@ -569,7 +572,11 @@ fn choose_pair(hwnd: HWND, peers: Vec<Peer>) {
     });
 }
 
-fn manage_devices(peers: Vec<Peer>) {
+pub fn manage_linked(hwnd: HWND) {
+    manage_devices(hwnd, None);
+}
+
+fn manage_devices(hwnd: HWND, peers: Option<&[Peer]>) {
     let Some(store) = store() else {
         return;
     };
@@ -577,31 +584,50 @@ fn manage_devices(peers: Vec<Peer>) {
     let devices = store.devices();
     let mut items = vec![Item::Label("Tus dispositivos".into())];
     for (index, device) in devices.iter().enumerate() {
-        let online = peers
-            .iter()
-            .any(|peer| peer.certificate.as_ref() == device.certificate);
+        let name = device.display_name();
+        let label = match peers {
+            Some(peers)
+                if peers
+                    .iter()
+                    .any(|peer| peer.certificate.as_ref() == device.certificate) =>
+            {
+                format!("{name} · Disponible")
+            }
+            Some(_) => format!("{name} · Sin conexión"),
+            None => name.to_owned(),
+        };
         items.push(Item::Group {
-            label: format!(
-                "{} · {}",
-                device.name,
-                if online {
-                    "Disponible"
-                } else {
-                    "Sin conexión"
-                }
-            ),
-            items: vec![action(index + 1, "Olvidar equipo")],
+            label,
+            items: vec![
+                action(index * 2 + 1, "Cambiar nombre…"),
+                action(index * 2 + 2, "Olvidar equipo"),
+            ],
         });
     }
     if devices.is_empty() {
         items.push(Item::Label("Todavía no hay equipos vinculados".into()));
     }
-    if let Some(device) = menu::show(items)
-        .and_then(|id| id.checked_sub(1))
-        .and_then(|index| devices.get(index))
-    {
+    let Some(index) = menu::show(items).and_then(|id| id.checked_sub(1)) else {
+        return;
+    };
+    let Some(device) = devices.get(index / 2) else {
+        return;
+    };
+    if index % 2 == 0 {
+        match crate::share_preview::edit_device_name(hwnd, device.display_name()) {
+            Ok(Some(name)) => match store.rename(&device.certificate, &name) {
+                Ok(()) => notify("Nombre del equipo guardado"),
+                Err(error) => notify(&format!("No se pudo guardar el nombre. {error}")),
+            },
+            Ok(None) => {}
+            Err(error) => notify(&format!("No se pudo abrir el editor de nombre. {error}")),
+        }
+    } else {
         match store.forget(&device.certificate) {
-            Ok(()) => notify(&format!("{} ya no es un equipo de confianza.", device.name)),
+            Ok(()) => notify(&format!(
+                "{} ya no es un equipo de confianza.",
+                device.display_name()
+            )),
             Err(error) => notify(&format!("No se pudo olvidar el equipo. {error}")),
         }
     }
@@ -666,7 +692,7 @@ pub fn on_event(hwnd: HWND) {
                     Ok(peers) => match search {
                         Search::Send(payload) => choose_device(hwnd, payload, peers),
                         Search::Pair => choose_pair(hwnd, peers),
-                        Search::Manage => manage_devices(peers),
+                        Search::Manage => manage_devices(hwnd, Some(&peers)),
                     },
                     Err(error) => notify(&format!("No se pudo buscar equipos. {error}")),
                 }

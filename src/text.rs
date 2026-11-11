@@ -13,18 +13,18 @@ use windows::Win32::Graphics::Direct2D::Common::{
 };
 use windows::Win32::Graphics::Direct2D::{
     D2D1CreateFactory, ID2D1Factory, ID2D1RenderTarget, ID2D1SolidColorBrush,
-    D2D1_ANTIALIAS_MODE_ALIASED, D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE,
-    D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_FEATURE_LEVEL_DEFAULT, D2D1_RENDER_TARGET_PROPERTIES,
-    D2D1_RENDER_TARGET_TYPE_SOFTWARE, D2D1_RENDER_TARGET_USAGE_NONE, D2D1_ROUNDED_RECT,
-    D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE,
+    D2D1_ANTIALIAS_MODE_ALIASED, D2D1_DRAW_TEXT_OPTIONS_CLIP, D2D1_DRAW_TEXT_OPTIONS_NONE,
+    D2D1_ELLIPSE, D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_FEATURE_LEVEL_DEFAULT,
+    D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_SOFTWARE, D2D1_RENDER_TARGET_USAGE_NONE,
+    D2D1_ROUNDED_RECT, D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE,
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWriteCreateFactory, IDWriteFactory, IDWriteTextFormat, IDWriteTextLayout,
     DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
     DWRITE_FONT_WEIGHT, DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_WEIGHT_REGULAR,
-    DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_HIT_TEST_METRICS, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
-    DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_METRICS, DWRITE_WORD_WRAPPING_NO_WRAP,
-    DWRITE_WORD_WRAPPING_WRAP,
+    DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_HIT_TEST_METRICS, DWRITE_LINE_SPACING_METHOD_UNIFORM,
+    DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_METRICS,
+    DWRITE_WORD_WRAPPING_NO_WRAP, DWRITE_WORD_WRAPPING_WRAP,
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Imaging::{
@@ -44,6 +44,7 @@ const SCROLL_PAUSE: f32 = 1.5;
 /// Tamaño lógico de letra del verso que se canta (negrita) y de los demás.
 const LYRIC_BOLD_SIZE: f32 = 15.5;
 const LYRIC_SIZE: f32 = 12.5;
+const LYRIC_LINE_SPACING: f32 = 1.25;
 /// Lugar de cada verso del carrusel según su distancia al que se canta (de -2 a 3): borde
 /// superior respecto del centro de la columna, opacidad y tamaño de letra, en píxeles lógicos.
 /// Entre dos lugares se interpola: así los versos suben, crecen y se aclaran de forma continua.
@@ -129,14 +130,8 @@ impl TextRenderer {
             let title = make_format(&dwrite, DWRITE_FONT_WEIGHT_SEMI_BOLD, 14.5 * scale)?;
             let subtitle = make_format(&dwrite, DWRITE_FONT_WEIGHT_REGULAR, 12.0 * scale)?;
             let time = make_format(&dwrite, DWRITE_FONT_WEIGHT_REGULAR, 11.5 * scale)?;
-            let lyric_current = make_format_wrapped(
-                &dwrite,
-                DWRITE_FONT_WEIGHT_BOLD,
-                LYRIC_BOLD_SIZE * scale,
-                true,
-            )?;
-            let lyric_secondary =
-                make_format(&dwrite, DWRITE_FONT_WEIGHT_REGULAR, LYRIC_SIZE * scale)?;
+            let lyric_current = make_carousel_format(&dwrite, scale, true)?;
+            let lyric_secondary = make_carousel_format(&dwrite, scale, false)?;
 
             let label = make_format(&dwrite, DWRITE_FONT_WEIGHT_REGULAR, 12.0 * scale)?;
             let label_strong = make_format(&dwrite, DWRITE_FONT_WEIGHT_SEMI_BOLD, 12.0 * scale)?;
@@ -177,13 +172,8 @@ impl TextRenderer {
             make_format(&self.dwrite, DWRITE_FONT_WEIGHT_SEMI_BOLD, 14.5 * scale),
             make_format(&self.dwrite, DWRITE_FONT_WEIGHT_REGULAR, 12.0 * scale),
             make_format(&self.dwrite, DWRITE_FONT_WEIGHT_REGULAR, 11.5 * scale),
-            make_format_wrapped(
-                &self.dwrite,
-                DWRITE_FONT_WEIGHT_BOLD,
-                LYRIC_BOLD_SIZE * scale,
-                true,
-            ),
-            make_format(&self.dwrite, DWRITE_FONT_WEIGHT_REGULAR, LYRIC_SIZE * scale),
+            make_carousel_format(&self.dwrite, scale, true),
+            make_carousel_format(&self.dwrite, scale, false),
         ) {
             self.title = title;
             self.subtitle = subtitle;
@@ -405,12 +395,12 @@ impl TextRenderer {
                 let cy = lyrics.cy;
                 let a = lyrics.alpha;
 
-                if lw > 1.0 && a > 0.001 {
+                if lw > 1.0 && a > 0.001 && lyrics.half_height > 0.0 {
                     let clip = D2D_RECT_F {
                         left: lx,
-                        top: cy - 70.0 * s,
+                        top: cy - lyrics.half_height,
                         right: lx + lw,
-                        bottom: cy + 70.0 * s,
+                        bottom: cy + lyrics.half_height,
                     };
                     self.target
                         .PushAxisAlignedClip(&clip, D2D1_ANTIALIAS_MODE_ALIASED);
@@ -465,11 +455,16 @@ impl TextRenderer {
                                 if full <= 0.001 {
                                     continue;
                                 }
-                                let (format, natural, h) = if is_bold {
-                                    (&self.lyric_current, LYRIC_BOLD_SIZE, 44.0)
+                                let (format, natural) = if is_bold {
+                                    (&self.lyric_current, LYRIC_BOLD_SIZE)
                                 } else {
-                                    (&self.lyric_secondary, LYRIC_SIZE, 20.0)
+                                    (&self.lyric_secondary, LYRIC_SIZE)
                                 };
+                                let rows = lyric_rows(pos, top, size, is_bold);
+                                if rows == 0.0 {
+                                    continue;
+                                }
+                                let h = rows * natural * s * LYRIC_LINE_SPACING;
                                 if let Some(line) = cached_line(
                                     &self.dwrite,
                                     format,
@@ -481,7 +476,7 @@ impl TextRenderer {
                                         &self.target,
                                         &self.brush,
                                         line,
-                                        (lx, cy + top * s, lw, h * s),
+                                        (lx, cy + top * s, lw, h),
                                         size / natural,
                                         (1.0, 1.0, 1.0, a * base * weight),
                                         sung.map(|p| (p, full)),
@@ -650,9 +645,17 @@ fn signature(areas: &LayoutAreas, title: &str, subtitle: &str) -> u64 {
             .for_each(&mut f);
     }
     if let Some(l) = &areas.lyrics {
-        [l.x, l.w, l.cy, l.shift, l.alpha, l.sung.unwrap_or(-1.0)]
-            .into_iter()
-            .for_each(&mut f);
+        [
+            l.x,
+            l.w,
+            l.cy,
+            l.half_height,
+            l.shift,
+            l.alpha,
+            l.sung.unwrap_or(-1.0),
+        ]
+        .into_iter()
+        .for_each(&mut f);
     }
     if let Some(s) = &areas.seek {
         [s.x, s.bar_cy, s.min_x, s.max_x, s.alpha]
@@ -768,6 +771,34 @@ fn lyric_slot(pos: f32) -> Option<(f32, f32, f32)> {
     Some((lerp(a.0, b.0), lerp(a.1, b.1), lerp(a.2, b.2)))
 }
 
+fn lyric_rows(pos: f32, top: f32, size: f32, bold: bool) -> f32 {
+    let next_top = lyric_slot(pos + 1.0).map_or(top + 17.0, |slot| slot.0);
+    ((next_top - top - 2.0) / (size * LYRIC_LINE_SPACING))
+        .floor()
+        .clamp(0.0, if bold { 2.0 } else { 1.0 })
+}
+
+fn make_carousel_format(
+    dwrite: &IDWriteFactory,
+    scale: f32,
+    bold: bool,
+) -> Result<IDWriteTextFormat> {
+    let (weight, size) = if bold {
+        (DWRITE_FONT_WEIGHT_BOLD, LYRIC_BOLD_SIZE * scale)
+    } else {
+        (DWRITE_FONT_WEIGHT_REGULAR, LYRIC_SIZE * scale)
+    };
+    let format = make_format_wrapped(dwrite, weight, size, bold)?;
+    unsafe {
+        format.SetLineSpacing(
+            DWRITE_LINE_SPACING_METHOD_UNIFORM,
+            size * LYRIC_LINE_SPACING,
+            size,
+        )?;
+    }
+    Ok(format)
+}
+
 /// Verso maquetado en negrita o normal. Al subir el carrusel los textos solo cambian de lugar,
 /// así que casi siempre ya está guardado; si no, se maqueta y se olvida el más viejo.
 fn cached_line<'a>(
@@ -825,7 +856,7 @@ fn draw_lyric(
             Vector2 { X: x, Y: y },
             &line.layout,
             brush,
-            D2D1_DRAW_TEXT_OPTIONS_NONE,
+            D2D1_DRAW_TEXT_OPTIONS_CLIP,
         );
         if let Some((pos, alpha)) = sung.filter(|&(pos, _)| pos > 0.0) {
             brush.SetColor(&D2D1_COLOR_F { r, g, b, a: alpha });
@@ -845,7 +876,7 @@ fn draw_lyric(
                     Vector2 { X: x, Y: y },
                     &line.layout,
                     brush,
-                    D2D1_DRAW_TEXT_OPTIONS_NONE,
+                    D2D1_DRAW_TEXT_OPTIONS_CLIP,
                 );
                 target.PopAxisAlignedClip();
             }
@@ -1076,6 +1107,71 @@ mod tests {
         // Fuera de la columna no se dibuja.
         assert_eq!(lyric_slot(-2.5), None);
         assert_eq!(lyric_slot(5.5), None);
+    }
+
+    #[test]
+    fn un_verso_largo_no_invade_el_renglon_siguiente() {
+        use crate::island::LyricsArea;
+        use windows::Win32::System::Com::{
+            CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED,
+        };
+
+        unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok().unwrap() };
+        let mut renderer = TextRenderer::new(1.0).unwrap();
+        let (width, height) = (160, 140);
+        let mut dib = vec![0; (width * height * 4) as usize];
+        let cy = 68.0;
+        let areas = LayoutAreas {
+            labels: Vec::new(),
+            text: TextArea {
+                x: 0.0,
+                w: 0.0,
+                cy: 0.0,
+                alpha: 0.0,
+            },
+            time: None,
+            lyrics: Some(LyricsArea {
+                x: 8.0,
+                w: 100.0,
+                cy,
+                half_height: 64.0,
+                lines: vec![(0, "Un verso muy largo que ocupa varias líneas ".repeat(6))],
+                shift: 0.0,
+                sung: Some(12.0),
+                status: None,
+                alpha: 1.0,
+            }),
+            seek: None,
+        };
+        renderer.draw(
+            &mut dib,
+            width,
+            height,
+            (0, 0, width, height),
+            &areas,
+            "",
+            "",
+            0.0,
+        );
+        let rows = dib.chunks_exact((width * 4) as usize);
+        assert!(
+            rows.clone().skip(68).take(20).any(|row| row
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .any(|px| px[3] != 0)),
+            "se conservan dos renglones"
+        );
+        assert!(
+            rows.skip((cy + 24.0) as usize).all(|row| row
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|px| px[3] == 0)),
+            "el verso no invade el siguiente"
+        );
+        drop(renderer);
+        unsafe { CoUninitialize() };
     }
 
     #[test]
