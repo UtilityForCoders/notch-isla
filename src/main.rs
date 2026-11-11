@@ -35,7 +35,7 @@ mod update;
 mod visualizer;
 mod workspace;
 
-use std::cell::RefCell;
+use std::cell::{OnceCell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -513,7 +513,7 @@ struct App {
     /// Reloj de las barras de audio.
     started: Instant,
     /// Si DirectWrite fallara, la isla sigue funcionando sin texto.
-    text: Option<TextRenderer>,
+    text: OnceCell<Option<TextRenderer>>,
     media: Option<NowPlaying>,
     /// Botón bajo el mouse, para resaltarlo.
     hovered_button: Option<Button>,
@@ -633,7 +633,7 @@ impl App {
             last_tick: Instant::now(),
             last_vsync: None,
             started: Instant::now(),
-            text: TextRenderer::new(scale).ok(),
+            text: OnceCell::new(),
             media: None,
             hovered_button: None,
             seek_hover: None,
@@ -1406,7 +1406,7 @@ impl App {
             self.monitor_bounds = monitor_bounds;
             self.scale = scale;
             self.x_spring.reset(pos.x as f32);
-            if let Some(text) = self.text.as_mut() {
+            if let Some(Some(text)) = self.text.get_mut() {
                 text.set_scale(scale);
             }
             if let Some(projector) = self.projector.as_mut() {
@@ -2230,10 +2230,13 @@ impl App {
             && self.media.as_ref().is_some_and(|m| m.timeline.is_some()))
             || volume.is_some();
         // Ancho del texto del aviso, para centrar ícono y texto en la isla.
-        let notice_text_w = match (notice, self.text.as_mut()) {
-            (Some(n), Some(text)) => text.measure(&n.title, &n.subtitle),
-            _ => 0.0,
-        };
+        let notice_text_w = notice.map_or(0.0, |n| {
+            self.text.get_or_init(|| TextRenderer::new(self.scale).ok());
+            self.text
+                .get_mut()
+                .and_then(Option::as_mut)
+                .map_or(0.0, |text| text.measure(&n.title, &n.subtitle))
+        });
         let time_info = media
             .filter(|_| show_player)
             .and_then(|m| m.timeline)
@@ -2565,7 +2568,10 @@ impl App {
         }
 
         let mut scroll_ms = None;
-        if let (Some(areas), Some(text)) = (areas, self.text.as_mut()) {
+        if areas.is_some() {
+            self.text.get_or_init(|| TextRenderer::new(self.scale).ok());
+        }
+        if let (Some(areas), Some(Some(text))) = (areas, self.text.get_mut()) {
             let (title, subtitle) = match (notice, media) {
                 (Some(n), _) => (n.title.clone(), n.subtitle.clone()),
                 (None, Some(m)) => {
@@ -3885,6 +3891,7 @@ mod tests {
                 rect
             };
             let resting = window_rect();
+            assert!(app.text.get().is_none());
             app.reveal();
             app.presence.reset(1.0);
             app.spring.reset(1.0);
