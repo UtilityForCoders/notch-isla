@@ -846,7 +846,7 @@ pub fn draw(
     if let Some(c) = &controls {
         draw_bars(
             pixmap,
-            g.x0 + (EXPANDED_COMPACT.0 - COVER_PAD_X - 28.0) * s,
+            g.x0 + (EXPANDED_COMPACT.0 - COVER_PAD_X - 22.0) * s,
             cover_y + size / 2.0,
             s,
             c,
