@@ -1702,7 +1702,14 @@ impl App {
                 self.presence.value,
                 self.shape(),
             );
-            if let Some(hit) = workspace::hit_test(bounds, self.scale, self.page, x, y) {
+            if let Some(hit) = workspace::hit_test(
+                bounds,
+                self.scale,
+                self.page,
+                self.shape().empty_music,
+                x,
+                y,
+            ) {
                 return Some(hit);
             }
         }
@@ -2365,6 +2372,7 @@ impl App {
                     self.scale,
                     alpha,
                     self.page,
+                    shape.empty_music,
                     self.workspace_hover,
                     &panel,
                     self.settings.island_color,
@@ -2379,6 +2387,7 @@ impl App {
                         self.scale,
                         alpha * fade,
                         level,
+                        shape.empty_music,
                         self.settings.island_color,
                     );
                 }
@@ -3850,11 +3859,13 @@ mod tests {
                 app.shape(),
             );
             assert!(
-                app.hit_at(bounds.0 + 40.0 * app.scale, bounds.1 + 20.0 * app.scale)
-                    == Some(Hit::Tab(workspace::Page::Music))
+                app.hit_at(
+                    bounds.0 + 40.0 * app.scale,
+                    bounds.1 + workspace::tab_center_y(false) * app.scale
+                ) == Some(Hit::Tab(workspace::Page::Music))
             );
             assert!(
-                app.hit_at(bounds.0 + 70.0 * app.scale, bounds.1 + 60.0 * app.scale)
+                app.hit_at(bounds.0 + 70.0 * app.scale, bounds.1 + 24.0 * app.scale)
                     == Some(Hit::Share(workspace::ShareAction::Files))
             );
             app.battery_low = true;
@@ -3872,7 +3883,7 @@ mod tests {
             assert!(
                 app.hit_at(
                     bounds.0 + bounds.2 - 50.0 * app.scale,
-                    bounds.1 + 26.0 * app.scale
+                    bounds.1 + 14.0 * app.scale
                 ) == Some(Hit::Battery)
             );
             assert!(app.low_battery_items().iter().any(|item| matches!(

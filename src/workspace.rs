@@ -28,15 +28,20 @@ pub struct ShareState {
 }
 
 const TAB_X: f32 = 16.0;
-const TAB_Y: f32 = 12.0;
+const TAB_Y: f32 = 108.0;
+const EMPTY_TAB_Y: f32 = 16.0;
 const TAB_WIDTH: f32 = 36.0;
 const TAB_HEIGHT: f32 = 28.0;
+
+pub fn tab_center_y(empty_music: bool) -> f32 {
+    (if empty_music { EMPTY_TAB_Y } else { TAB_Y }) + TAB_HEIGHT / 2.0
+}
 
 fn fill_tab(pixmap: &mut Pixmap, paint: &Paint, left: f32, top: f32, scale: f32, tab: Page) {
     let x = left + TAB_X * scale;
     let seam = (x + TAB_WIDTH * scale).round();
-    let y = (top + TAB_Y * scale).round();
-    let bottom = (top + (TAB_Y + TAB_HEIGHT) * scale).round();
+    let y = top.round();
+    let bottom = (top + TAB_HEIGHT * scale).round();
     let (outer, inward) = match tab {
         Page::Music => (x.round(), 1.0),
         Page::Share => ((x + 2.0 * TAB_WIDTH * scale).round(), -1.0),
@@ -65,32 +70,33 @@ fn fill_tab(pixmap: &mut Pixmap, paint: &Paint, left: f32, top: f32, scale: f32,
     }
 }
 
-fn regions(width: f32, page: Page) -> Vec<(Hit, [f32; 4])> {
+fn regions(width: f32, page: Page, empty_music: bool) -> Vec<(Hit, [f32; 4])> {
+    let tab_y = tab_center_y(empty_music) - TAB_HEIGHT / 2.0;
     let mut regions = vec![
-        (Hit::Tab(Page::Music), [TAB_X, TAB_Y, TAB_WIDTH, TAB_HEIGHT]),
+        (Hit::Tab(Page::Music), [TAB_X, tab_y, TAB_WIDTH, TAB_HEIGHT]),
         (
             Hit::Tab(Page::Share),
-            [TAB_X + TAB_WIDTH, TAB_Y, TAB_WIDTH, TAB_HEIGHT],
+            [TAB_X + TAB_WIDTH, tab_y, TAB_WIDTH, TAB_HEIGHT],
         ),
     ];
     if page == Page::Share {
         regions.extend([
             (
                 Hit::Share(ShareAction::Files),
-                [20.0, 46.0, width - 40.0, 32.0],
+                [20.0, 10.0, width - 88.0, 28.0],
             ),
             (
                 Hit::Share(ShareAction::Clipboard),
-                [20.0, 84.0, width - 40.0, 32.0],
+                [20.0, 42.0, width - 40.0, 28.0],
             ),
-            (Hit::Share(ShareAction::Pair), [20.0, 122.0, 78.0, 28.0]),
+            (Hit::Share(ShareAction::Pair), [20.0, 76.0, 78.0, 26.0]),
             (
                 Hit::Share(ShareAction::Devices),
-                [104.0, 122.0, width - 166.0, 28.0],
+                [104.0, 76.0, width - 166.0, 26.0],
             ),
             (
                 Hit::Share(ShareAction::Receive),
-                [width - 56.0, 122.0, 36.0, 28.0],
+                [width - 56.0, 76.0, 36.0, 26.0],
             ),
         ]);
     }
@@ -101,12 +107,13 @@ pub fn hit_test(
     bounds: (f32, f32, f32, f32, f32),
     scale: f32,
     page: Page,
+    empty_music: bool,
     x: f32,
     y: f32,
 ) -> Option<Hit> {
     let (left, top, width, _, _) = bounds;
     let (x, y) = ((x - left) / scale, (y - top) / scale);
-    regions(width / scale, page)
+    regions(width / scale, page, empty_music)
         .into_iter()
         .find(|(_, [rx, ry, w, h])| x >= *rx && x <= rx + w && y >= *ry && y <= ry + h)
         .map(|(hit, _)| hit)
@@ -119,19 +126,21 @@ pub fn draw(
     scale: f32,
     alpha: f32,
     page: Page,
+    empty_music: bool,
     hovered: Option<Hit>,
     state: &ShareState,
     color: crate::settings::IslandColor,
 ) -> Vec<LabelArea> {
-    let (left, top, width, _, _) = bounds;
+    let (left, top, width, height, _) = bounds;
     let mut paint = Paint {
         anti_alias: true,
         ..Default::default()
     };
     let mut labels = Vec::new();
-    for (hit, [x, y, w, h]) in regions(width / scale, page) {
+    for (hit, [x, y, w, h]) in regions(width / scale, page, empty_music) {
         let hover = hovered == Some(hit);
         if let Hit::Tab(tab) = hit {
+            let alpha = alpha * ((height / scale - y - h) / 8.0).clamp(0.0, 1.0);
             let ([r, g, b], opacity) = if tab == page {
                 (color.blend(35, 48), 185)
             } else if hover {
@@ -140,7 +149,7 @@ pub fn draw(
                 (color.blend(23, 17), 150)
             };
             paint.set_color_rgba8(r, g, b, (opacity as f32 * alpha) as u8);
-            fill_tab(pixmap, &paint, left, top, scale, tab);
+            fill_tab(pixmap, &paint, left, top + y * scale, scale, tab);
             let [r, g, b] = color.blend(255, 42);
             paint.set_color_rgba8(r, g, b, (alpha * 255.0) as u8);
             let icon = match tab {
@@ -246,9 +255,9 @@ pub fn draw(
         };
         labels.push(LabelArea {
             text: status.to_string(),
-            x: left + 20.0 * scale,
-            y: top + 154.0 * scale,
-            w: width - 40.0 * scale,
+            x: left + 100.0 * scale,
+            y: top + (TAB_Y + 6.0) * scale,
+            w: width - 120.0 * scale,
             h: 16.0 * scale,
             alpha: alpha * 0.7,
             strong: false,
@@ -264,11 +273,12 @@ pub fn draw_volume(
     scale: f32,
     alpha: f32,
     level: f32,
+    empty_music: bool,
     color: crate::settings::IslandColor,
 ) {
     let (left, top, _, _, _) = bounds;
     let x = left + (TAB_X + 2.0 * TAB_WIDTH + 12.0) * scale;
-    let y = top + (TAB_Y + TAB_HEIGHT / 2.0 - 2.0) * scale;
+    let y = top + (if empty_music { 44.0 } else { 64.0 }) * scale;
     let width = 96.0 * scale;
     let height = 4.0 * scale;
     let level = level.clamp(0.0, 1.0);
@@ -305,6 +315,7 @@ mod tests {
                     scale,
                     1.0,
                     page,
+                    false,
                     Some(Hit::Tab(other)),
                     &ShareState::default(),
                     crate::settings::IslandColor::default(),
@@ -327,10 +338,10 @@ mod tests {
                 island::EXPANDED_COMPACT.1 * scale,
                 24.0 * scale,
             );
-            let regions = regions(width, Page::Share);
+            let regions = regions(width, Page::Share, false);
             for (index, (_, [x, y, w, h])) in regions.iter().enumerate() {
                 assert!(*x >= 16.0 && x + w <= width - 16.0);
-                assert!(*y >= 12.0 && y + h <= island::EXPANDED_COMPACT.1 - 16.0);
+                assert!(*y >= 10.0 && y + h <= island::EXPANDED_COMPACT.1 - 12.0);
                 for (_, [ox, oy, ow, oh]) in &regions[index + 1..] {
                     assert!(x + w <= *ox || ox + ow <= *x || y + h <= *oy || oy + oh <= *y);
                 }
@@ -341,6 +352,7 @@ mod tests {
                         bounds,
                         scale,
                         Page::Share,
+                        false,
                         bounds.0 + (x + w / 2.0) * scale,
                         bounds.1 + (y + h / 2.0) * scale
                     ) == Some(hit)
@@ -350,6 +362,7 @@ mod tests {
                 bounds,
                 scale,
                 Page::Music,
+                false,
                 bounds.0 + 60.0 * scale,
                 bounds.1 + 100.0 * scale
             )
@@ -361,9 +374,10 @@ mod tests {
                 scale,
                 1.0,
                 0.68,
+                false,
                 crate::settings::IslandColor::default(),
             );
-            let y = (bounds.1 + 26.0 * scale) as u32;
+            let y = (bounds.1 + 66.0 * scale) as u32;
             for (x, expected) in [(94.0, 0), (110.0, 255), (185.0, 55), (200.0, 0)] {
                 let x = (bounds.0 + x * scale) as u32;
                 assert_eq!(image.pixel(x, y).unwrap().alpha(), expected);

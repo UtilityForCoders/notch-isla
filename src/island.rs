@@ -15,11 +15,11 @@ use tiny_skia::{
 const RESTING: (f32, f32, f32) = (88.0, 3.0, 1.5);
 
 /// Expandida compacta (sin letra): tarjeta flotante con reproductor.
-pub const EXPANDED_COMPACT: (f32, f32, f32) = (264.0, 176.0, 24.0);
+pub const EXPANDED_COMPACT: (f32, f32, f32) = (264.0, 148.0, 24.0);
 
 /// Expandida amplia (con letra sincronizada): tarjeta completa con reproductor y letra.
 pub const EXPANDED_LYRICS: (f32, f32, f32) = (500.0, EXPANDED_COMPACT.1, 24.0);
-const EMPTY_MUSIC_HEIGHT: f32 = 94.0;
+pub const EMPTY_MUSIC_HEIGHT: f32 = 60.0;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Shape {
@@ -36,17 +36,15 @@ const NOTICE_ICON: (f32, f32, f32) = (9.0, 38.0, 9.0);
 
 /// Separación lógica entre el borde superior de la pantalla y la isla flotante (sin tocar el techo).
 const TOP_GAP: f32 = 8.0;
-pub const HEADER_HEIGHT: f32 = 44.0;
 pub const EXPANDED_CONTENT_START: f32 = 0.45;
 
 /// Medidas del panel izquierdo de reproducción (píxeles lógicos).
 const COVER_PAD_X: f32 = 20.0;
 /// Margen superior lógico de la carátula dentro del reproductor.
-const COVER_PAD_TOP: f32 = 4.0;
+const COVER_PAD_TOP: f32 = 16.0;
 /// Lado lógico de la carátula expandida.
 const COVER_SIZE: f32 = 48.0;
-const PROGRESS_Y: f32 = HEADER_HEIGHT + COVER_PAD_TOP + COVER_SIZE + 18.0;
-const CONTROLS_Y: f32 = PROGRESS_Y + 30.0;
+const PROGRESS_Y: f32 = COVER_PAD_TOP + COVER_SIZE + 18.0;
 /// Radio lógico de las esquinas de la carátula.
 const COVER_RADIUS: f32 = 10.0;
 /// Ancho lógico reservado al reproductor, independiente del panel de letra.
@@ -172,7 +170,7 @@ fn indicator_center(g: &Geometry, p: f32, battery: bool) -> (f32, f32) {
     } else {
         g.x1() - (14.0 + 10.0 * p) * s
     };
-    (x, g.y0 + ((17.0 + 9.0 * p) * s).min(g.h / 2.0))
+    (x, g.y0 + ((17.0 - 3.0 * p) * s).min(g.h / 2.0))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -465,7 +463,7 @@ impl Geometry {
         let s = self.scale;
         (
             self.x0 + COVER_PAD_X * s,
-            self.y0 + (COVER_PAD_TOP + HEADER_HEIGHT) * s,
+            self.y0 + COVER_PAD_TOP * s,
             COVER_SIZE * s,
         )
     }
@@ -604,13 +602,15 @@ fn button_centers(
     s: f32,
     lyrics_available: bool,
 ) -> impl Iterator<Item = (Button, f32, f32)> {
-    let px = g.x0 + COVER_PAD_X * s;
-    let pw = PLAYER_W * s;
-    let cy = g.y0 + CONTROLS_Y * s;
-    let lyrics_cx = px + 14.0 * s;
-    let inset = if lyrics_available { 44.0 * s } else { 0.0 };
-    let media_cx = px + inset + (pw - inset) / 2.0;
-    let gap = 40.0 * s;
+    let cy = g.y0 + crate::workspace::tab_center_y(false) * s;
+    let lyrics_cx = g.x0 + 233.0 * s;
+    let media_cx = g.x0
+        + if lyrics_available {
+            152.0 * s
+        } else {
+            171.0 * s
+        };
+    let gap = 38.0 * s;
     [
         (Button::Lyrics, lyrics_cx, cy),
         (Button::Prev, media_cx - gap, cy),
@@ -807,17 +807,14 @@ pub fn draw(
         });
     }
     if shape.empty_music {
-        let y = g.y0 + 66.0 * s;
-        let alpha = g.alpha * ((g.h / s - 76.0) / 12.0).clamp(0.0, 1.0);
-        let [r, green, b] = color.blend(255, 42);
-        paint.set_color_rgba8(r, green, b, (alpha * 220.0) as u8);
-        draw_notice_icon(pixmap, &paint, NoticeIcon::Music, g.x0 + 32.0 * s, y, s);
+        let y = g.y0 + crate::workspace::tab_center_y(true) * s;
+        let alpha = g.alpha * ((g.h / s - 39.0) / 12.0).clamp(0.0, 1.0);
         return Some(LayoutAreas {
             labels: vec![LabelArea {
                 text: "Sin reproducción".into(),
-                x: g.x0 + 53.0 * s,
+                x: g.x0 + 102.0 * s,
                 y: y - 10.0 * s,
-                w: (EXPANDED_COMPACT.0 - 73.0) * s,
+                w: (EXPANDED_COMPACT.0 - 122.0) * s,
                 h: 20.0 * s,
                 alpha,
                 strong: false,
@@ -881,14 +878,15 @@ pub fn draw(
     let mut seek = None;
     if let Some(c) = &controls {
         for (button, cx, cy) in button_centers(&g, s, c.lyrics_available) {
+            let alpha = g.alpha * ((g.y0 + g.h - cy) / s - 19.0).clamp(0.0, 7.0) / 7.0;
             match c.pressed {
                 Some((pressed, t)) if pressed == button => {
-                    paint.set_color_rgba8(255, 255, 255, (g.alpha * 70.0 * (1.0 - t)) as u8);
+                    paint.set_color_rgba8(255, 255, 255, (alpha * 70.0 * (1.0 - t)) as u8);
                     fill_circle(pixmap, &paint, cx, cy, BUTTON_RADIUS * s * (0.9 + 0.6 * t));
                     let k = press_scale(t);
-                    draw_button(pixmap, button, c, cx, cy, s * k, g.alpha, color);
+                    draw_button(pixmap, button, c, cx, cy, s * k, alpha, color);
                 }
-                _ => draw_button(pixmap, button, c, cx, cy, s, g.alpha, color),
+                _ => draw_button(pixmap, button, c, cx, cy, s, alpha, color),
             }
         }
         if let Some(progress) = c.progress {
@@ -913,10 +911,17 @@ pub fn draw(
 
     // Áreas de texto: título/artista
     let (text_x, text_w) = text_column(&g, s);
+    let title_inset = if indicators.battery_low { 42.0 } else { 34.0 };
     let title_area = TextArea {
         x: text_x,
-        w: (text_w - if controls.is_some() { 34.0 * s } else { 0.0 }).max(0.0),
-        cy: g.y0 + (COVER_PAD_TOP + HEADER_HEIGHT + COVER_SIZE / 2.0) * s,
+        w: (text_w
+            - if controls.is_some() {
+                title_inset * s
+            } else {
+                0.0
+            })
+        .max(0.0),
+        cy: g.y0 + (COVER_PAD_TOP + COVER_SIZE / 2.0) * s,
         alpha: g.alpha,
     };
 
@@ -945,8 +950,8 @@ pub fn draw(
                 Some(LyricsArea {
                     x: lyrics_x,
                     w: lyrics_w,
-                    cy: g.y0 + HEADER_HEIGHT * s + (g.h - HEADER_HEIGHT * s) / 2.0,
-                    half_height: ((g.h - (HEADER_HEIGHT + 8.0) * s) / 2.0).clamp(0.0, 70.0 * s),
+                    cy: g.y0 + g.h / 2.0,
+                    half_height: (g.h / 2.0 - 14.0 * s).clamp(0.0, 70.0 * s),
                     lines: li.lines,
                     shift: li.shift,
                     sung: li.sung,
@@ -1884,9 +1889,6 @@ mod tests {
                             y
                         ) == Some(Hit::Button(button))
                     );
-                    if button == Button::PlayPause && !available {
-                        assert!((x - (g.x0 + g.w / 2.0)).abs() < 0.01);
-                    }
                 }
                 assert_eq!(
                     image
