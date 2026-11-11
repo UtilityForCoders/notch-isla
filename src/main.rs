@@ -495,6 +495,7 @@ impl Drop for HighRefreshDriver {
 struct App {
     hwnd: HWND,
     surface: Surface,
+    max_surface_height: u32,
     /// Posición de la ventana en pantalla (píxeles físicos).
     pos: POINT,
     monitor_bounds: RECT,
@@ -614,10 +615,12 @@ struct PendingAudioNotice {
 
 impl App {
     fn new(hwnd: HWND, monitor: HMONITOR, settings: Settings) -> Result<Self> {
-        let (surface, pos, scale, monitor_bounds) = layout_for(monitor, settings.offset_x)?;
+        let (surface, max_surface_height, pos, scale, monitor_bounds) =
+            layout_for(monitor, settings.offset_x)?;
         Ok(Self {
             hwnd,
             surface,
+            max_surface_height,
             pos,
             monitor_bounds,
             scale,
@@ -825,7 +828,7 @@ impl App {
         }
         let bottom = island::bottom(
             self.surface.width as f32,
-            self.surface.height as f32,
+            self.max_surface_height as f32,
             self.scale,
             self.spring.value,
             self.presence.value,
@@ -1394,10 +1397,11 @@ impl App {
     fn relayout(&mut self) {
         let monitor = monitors::find(&self.settings.monitor);
         self.hz = monitors::refresh_rate(monitor);
-        if let Ok((surface, pos, scale, monitor_bounds)) =
+        if let Ok((surface, max_surface_height, pos, scale, monitor_bounds)) =
             layout_for(monitor, self.settings.offset_x)
         {
             self.surface = surface;
+            self.max_surface_height = max_surface_height;
             self.pos = pos;
             self.monitor_bounds = monitor_bounds;
             self.scale = scale;
@@ -1702,7 +1706,7 @@ impl App {
         };
         if let Some(hit) = island::indicator_hit_test(
             self.surface.width as f32,
-            self.surface.height as f32,
+            self.max_surface_height as f32,
             self.scale,
             self.spring.value,
             self.presence.value,
@@ -1716,7 +1720,7 @@ impl App {
         if self.spring.value >= 1.0 && self.notice_spring.value <= 0.001 {
             let bounds = island::backdrop_geometry(
                 self.surface.width as f32,
-                self.surface.height as f32,
+                self.max_surface_height as f32,
                 self.scale,
                 self.spring.value,
                 self.presence.value,
@@ -1739,7 +1743,7 @@ impl App {
         let media = self.media.as_ref()?;
         island::hit_test(
             self.surface.width as f32,
-            self.surface.height as f32,
+            self.max_surface_height as f32,
             self.scale,
             self.spring.value,
             self.presence.value,
@@ -1803,7 +1807,7 @@ impl App {
     fn drag_to(&mut self, x: f32) {
         let fraction = island::seek_fraction(
             self.surface.width as f32,
-            self.surface.height as f32,
+            self.max_surface_height as f32,
             self.scale,
             self.spring.value,
             self.presence.value,
@@ -1895,7 +1899,7 @@ impl App {
     fn clamp_island_x(&self, x: i32) -> i32 {
         let (_, _, visible_width, _, _) = island::backdrop_geometry(
             self.surface.width as f32,
-            self.surface.height as f32,
+            self.max_surface_height as f32,
             self.scale,
             self.spring.value,
             self.presence.value,
@@ -2008,7 +2012,7 @@ impl App {
         }
         let (x, y, w, h, _) = island::backdrop_geometry(
             self.surface.width as f32,
-            self.surface.height as f32,
+            self.max_surface_height as f32,
             self.scale,
             self.spring.value,
             self.presence.value,
@@ -2303,7 +2307,7 @@ impl App {
         self.pos.x = self.clamp_island_x(self.x_spring.value.round() as i32);
         // Solo se trabaja la zona donde se dibuja ahora y donde se dibujó antes (para borrarlo):
         // con la isla contraída es una parte mínima de la ventana.
-        let (sw, sh) = (self.surface.width, self.surface.height);
+        let (sw, sh) = (self.surface.width, self.max_surface_height);
         let mut drawn = Area::new(
             island::bounds(
                 sw as f32,
@@ -2323,6 +2327,26 @@ impl App {
                 sh,
             ));
         }
+        let height = surface_height(drawn.y1, self.scale, sh);
+        let current = self.surface.height;
+        // Crece cuando hace falta; espera a que termine la animación para encogerse.
+        let settled = [
+            &self.spring,
+            &self.presence,
+            &self.lyrics_spring,
+            &self.notice_spring,
+        ]
+        .iter()
+        .all(|spring| spring.value == spring.target());
+        if height > current || (height < current && settled) {
+            if let Ok(surface) = Surface::new(sw, height) {
+                self.surface = surface;
+            }
+        }
+        let sh = self.surface.height;
+        drawn.y0 = drawn.y0.min(sh);
+        drawn.y1 = drawn.y1.min(sh);
+        let first_frame = self.surface.drawn.is_none();
         let dirty = match self.surface.drawn {
             Some(previous) => previous.union(drawn),
             None => self.surface.full(),
@@ -2516,7 +2540,7 @@ impl App {
         if let Some(projector) = self.projector.as_mut() {
             let island_bottom = island::bottom(
                 self.surface.width as f32,
-                self.surface.height as f32,
+                self.max_surface_height as f32,
                 self.scale,
                 self.spring.value,
                 self.presence.value,
@@ -2611,7 +2635,7 @@ impl App {
             crKey: COLORREF(0),
             pblend: &blend,
             dwFlags: ULW_ALPHA,
-            prcDirty: if dirty.is_empty() {
+            prcDirty: if first_frame || dirty.is_empty() {
                 std::ptr::null()
             } else {
                 &rect
@@ -2703,7 +2727,7 @@ fn island_bounds(rc: &RECT, width: u32, visible_width: f32, scale: f32) -> (i32,
 }
 
 /// Calcula escala, superficie de dibujo y posición (arriba al centro, con desplazamiento opcional) para un monitor.
-fn layout_for(monitor: HMONITOR, offset_x: i32) -> Result<(Surface, POINT, f32, RECT)> {
+fn layout_for(monitor: HMONITOR, offset_x: i32) -> Result<(Surface, u32, POINT, f32, RECT)> {
     let mut info = MONITORINFO {
         cbSize: std::mem::size_of::<MONITORINFO>() as u32,
         ..Default::default()
@@ -2727,7 +2751,18 @@ fn layout_for(monitor: HMONITOR, offset_x: i32) -> Result<(Surface, POINT, f32, 
         x: target_x.clamp(min_x, max_x),
         y: rc.top,
     };
-    Ok((Surface::new(width, height)?, pos, scale, rc))
+    let surface = Surface::new(width, surface_height(0, scale, height))?;
+    Ok((surface, height, pos, scale, rc))
+}
+
+/// Escalones para que el mapa de bits no se reasigne en cada cuadro de la animación.
+fn surface_height(required: u32, scale: f32, max_height: u32) -> u32 {
+    [16.0, 64.0, 112.0]
+        .into_iter()
+        .map(|logical| (logical * scale).ceil() as u32)
+        .find(|&height| height >= required)
+        .unwrap_or(max_height)
+        .min(max_height)
 }
 
 /// Mapa de bits en memoria que Windows usa para pintar la ventana layered.
@@ -3844,10 +3879,30 @@ mod tests {
             app.update_visibility();
             assert!(app.shown && !app.visible && app.edge_strip());
             assert_eq!(app.spring.target(), 0.0);
+            let window_rect = || {
+                let mut rect = RECT::default();
+                windows::Win32::UI::WindowsAndMessaging::GetWindowRect(hwnd, &mut rect).unwrap();
+                rect
+            };
+            let resting = window_rect();
             app.reveal();
+            app.presence.reset(1.0);
+            app.spring.reset(1.0);
+            app.render();
             assert!(app.visible);
+            let expanded = window_rect();
+            assert_eq!((expanded.left, expanded.top), (resting.left, resting.top));
+            assert!(expanded.bottom > resting.bottom);
             app.end_linger();
             assert!(app.idle_hidden && !app.visible && app.edge_strip());
+            app.presence.reset(0.0);
+            app.spring.reset(0.0);
+            app.render();
+            assert_eq!(
+                window_rect(),
+                resting,
+                "la ventana recupera el alto de la franja"
+            );
             app.reveal();
             let media = NowPlaying {
                 title: "Prueba local".into(),
@@ -3897,7 +3952,7 @@ mod tests {
             app.presence.reset(1.0);
             let bounds = island::backdrop_geometry(
                 app.surface.width as f32,
-                app.surface.height as f32,
+                app.max_surface_height as f32,
                 app.scale,
                 1.0,
                 1.0,
