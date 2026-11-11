@@ -55,6 +55,7 @@ const CMD_CONNECTION_NOTICES: usize = 22;
 const CMD_SHARE: usize = 23;
 const CMD_SETTINGS: usize = 24;
 const CMD_LINKED_DEVICES: usize = 25;
+const CMD_LYRICS_VOICE: usize = 26;
 /// Las opciones de los submenús van numeradas a partir de estas bases.
 const CMD_MONITOR: usize = 200;
 const CMD_TIMER: usize = 300;
@@ -87,6 +88,8 @@ pub enum Command {
     ToggleLyricsIsland,
     /// Letra en el proyector bajo la línea de reposo.
     ToggleLyricsProjector,
+    /// Letra guiada por la voz (experimental).
+    ToggleLyricsVoice,
     ToggleRealBars,
     CheckUpdates,
     /// Escuchar la próxima combinación de teclas como atajo nuevo.
@@ -273,6 +276,11 @@ fn build_settings_items(state: &MenuState) -> Vec<Item> {
                 "Con la línea de reposo",
                 settings.lyrics_projector,
             ),
+            action(
+                CMD_LYRICS_VOICE,
+                "Seguir la voz (experimental)",
+                settings.lyrics_voice,
+            ),
         ],
     });
     items.push(action(
@@ -376,6 +384,7 @@ fn id_to_command(id: usize, state: &MenuState) -> Option<Command> {
         CMD_CANCEL_TIMER => Some(Command::CancelTimer),
         CMD_LYRICS => Some(Command::ToggleLyricsIsland),
         CMD_LYRICS_PROJECTOR => Some(Command::ToggleLyricsProjector),
+        CMD_LYRICS_VOICE => Some(Command::ToggleLyricsVoice),
         CMD_REAL_BARS => Some(Command::ToggleRealBars),
         CMD_SHARE => Some(Command::Share),
         CMD_LINKED_DEVICES => Some(Command::LinkedDevices),
@@ -475,6 +484,7 @@ pub(crate) fn is_toggle(id: usize) -> bool {
             | CMD_FULLSCREEN
             | CMD_LYRICS
             | CMD_LYRICS_PROJECTOR
+            | CMD_LYRICS_VOICE
             | CMD_REAL_BARS
             | CMD_HIGH_REFRESH
             | CMD_TRANSLUCENT
@@ -865,6 +875,7 @@ mod settings_tests {
                     Some(Command::ToggleHighRefresh) => state.settings.high_refresh ^= true,
                     Some(Command::ToggleLyricsIsland) => state.settings.lyrics_island ^= true,
                     Some(Command::ToggleLyricsProjector) => state.settings.lyrics_projector ^= true,
+                    Some(Command::ToggleLyricsVoice) => state.settings.lyrics_voice ^= true,
                     Some(Command::BlurRadius(value)) => state.settings.blur_radius = value,
                     Some(Command::Timer(minutes)) => state.timer_left = Some(minutes),
                     Some(Command::CancelTimer) => state.timer_left = None,

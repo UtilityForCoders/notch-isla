@@ -66,6 +66,9 @@ pub struct Settings {
     /// Se activan por separado; apagadas si no se activan (la letra se pide a lrclib.net).
     pub lyrics_island: bool,
     pub lyrics_projector: bool,
+    /// Experimental: la letra sin tiempos por palabra avanza con la voz que se oye (ver
+    /// `visualizer::VoiceDetector`). Apagada por defecto.
+    pub lyrics_voice: bool,
     /// Las barras del reproductor siguen el sonido real de la app (si no, una animación).
     pub real_bars: bool,
     /// Atajo para mostrar u ocultar la isla; `None` = desactivado.
@@ -106,6 +109,7 @@ impl Settings {
             connection_notices: read_dword(w!("ConnectionNotices")).is_none_or(|v| v != 0),
             lyrics_island: read_dword(w!("LyricsIsland")).map_or(lyrics, |v| v != 0),
             lyrics_projector: read_dword(w!("LyricsProjector")).map_or(lyrics, |v| v != 0),
+            lyrics_voice: read_dword(w!("LyricsVoice")).is_some_and(|v| v != 0),
             real_bars: read_dword(w!("RealBars")).is_none_or(|v| v != 0),
             hotkey,
             offset_x: read_dword(w!("OffsetX")).map_or(0, |v| v as i32),
@@ -126,6 +130,7 @@ impl Settings {
         write_dword(w!("ConnectionNotices"), self.connection_notices as u32);
         write_dword(w!("LyricsIsland"), self.lyrics_island as u32);
         write_dword(w!("LyricsProjector"), self.lyrics_projector as u32);
+        write_dword(w!("LyricsVoice"), self.lyrics_voice as u32);
         write_dword(w!("RealBars"), self.real_bars as u32);
         write_dword(w!("HotkeyMods"), self.hotkey.map_or(0, |h| h.mods));
         write_dword(w!("HotkeyKey"), self.hotkey.map_or(0, |h| h.vk));
