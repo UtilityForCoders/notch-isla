@@ -15,10 +15,10 @@ use tiny_skia::{
 const RESTING: (f32, f32, f32) = (88.0, 3.0, 1.5);
 
 /// Expandida compacta (sin letra): tarjeta flotante con reproductor.
-pub const EXPANDED_COMPACT: (f32, f32, f32) = (264.0, 148.0, 24.0);
+pub const EXPANDED_COMPACT: (f32, f32, f32) = (290.0, 148.0, 24.0);
 
 /// Expandida amplia (con letra sincronizada): tarjeta completa con reproductor y letra.
-pub const EXPANDED_LYRICS: (f32, f32, f32) = (500.0, EXPANDED_COMPACT.1, 24.0);
+pub const EXPANDED_LYRICS: (f32, f32, f32) = (550.0, EXPANDED_COMPACT.1, 24.0);
 pub const EMPTY_MUSIC_HEIGHT: f32 = 60.0;
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -606,12 +606,14 @@ fn button_centers(
     lyrics_available: bool,
 ) -> impl Iterator<Item = (Button, f32, f32)> {
     let cy = g.y0 + crate::workspace::tab_center_y(false) * s;
-    let lyrics_cx = g.x0 + 233.0 * s;
-    let media_cx = g.x0
-        + if lyrics_available {
-            152.0 * s
+    // Medidos desde el borde derecho del reproductor: siguen pegados a él si cambia el ancho.
+    let right = g.x0 + EXPANDED_COMPACT.0 * s;
+    let lyrics_cx = right - 31.0 * s;
+    let media_cx = right
+        - if lyrics_available {
+            112.0 * s
         } else {
-            171.0 * s
+            93.0 * s
         };
     let gap = 38.0 * s;
     [
@@ -1400,7 +1402,7 @@ fn draw_progress(
     paint.set_color_rgba8(255, 255, 255, (g.alpha * 48.0) as u8);
     fill_rounded_rect(pixmap, &paint, bar_x, y, bar_w, h, h / 2.0);
 
-    let [r, g_color, b] = color.blend(255, 42);
+    let [r, g_color, b] = color.light();
     paint.set_color_rgba8(r, g_color, b, (g.alpha * 255.0) as u8);
     let filled = (bar_w * fraction.clamp(0.0, 1.0)).max(h);
     fill_rounded_rect(pixmap, &paint, bar_x, y, filled, h, h / 2.0);
@@ -1487,15 +1489,15 @@ fn draw_button(
     };
 
     if button == Button::PlayPause {
-        let [r, g, b] = color.blend(35, 55);
-        paint.set_color_rgba8(r, g, b, (alpha * if hovered { 125.0 } else { 78.0 }) as u8);
+        let [r, g, b] = color.light();
+        paint.set_color_rgba8(r, g, b, (alpha * if hovered { 54.0 } else { 34.0 }) as u8);
         fill_circle(pixmap, &paint, cx, cy, 19.0 * s);
     } else if hovered {
         paint.set_color_rgba8(255, 255, 255, (alpha * 35.0) as u8);
         fill_circle(pixmap, &paint, cx, cy, BUTTON_RADIUS * s);
     }
 
-    let [r, g, b] = color.blend(255, 42);
+    let [r, g, b] = color.light();
     match button {
         Button::Lyrics => {
             let bubble_a = if c.lyrics_active {
