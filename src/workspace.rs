@@ -44,20 +44,20 @@ fn regions(width: f32, page: Page) -> Vec<(Hit, [f32; 4])> {
         regions.extend([
             (
                 Hit::Share(ShareAction::Files),
-                [20.0, 56.0, width - 40.0, 42.0],
+                [20.0, 46.0, width - 40.0, 32.0],
             ),
             (
                 Hit::Share(ShareAction::Clipboard),
-                [20.0, 104.0, width - 40.0, 42.0],
+                [20.0, 84.0, width - 40.0, 32.0],
             ),
-            (Hit::Share(ShareAction::Pair), [20.0, 158.0, 88.0, 28.0]),
+            (Hit::Share(ShareAction::Pair), [20.0, 122.0, 88.0, 28.0]),
             (
                 Hit::Share(ShareAction::Devices),
-                [114.0, 158.0, width - 176.0, 28.0],
+                [114.0, 122.0, width - 176.0, 28.0],
             ),
             (
                 Hit::Share(ShareAction::Receive),
-                [width - 56.0, 158.0, 36.0, 28.0],
+                [width - 56.0, 122.0, 36.0, 28.0],
             ),
         ]);
     }
@@ -223,7 +223,7 @@ pub fn draw(
         labels.push(LabelArea {
             text: status.to_string(),
             x: left + 20.0 * scale,
-            y: top + 192.0 * scale,
+            y: top + 154.0 * scale,
             w: width - 40.0 * scale,
             h: 16.0 * scale,
             alpha: alpha * 0.7,
@@ -240,11 +240,17 @@ mod tests {
     #[test]
     fn pestañas_y_acciones_coinciden_a_distintos_dpi() {
         for scale in [1.0, 1.25, 1.5, 2.0] {
-            let bounds = (80.0, 8.0, 284.0 * scale, 216.0 * scale, 24.0 * scale);
+            let bounds = (
+                80.0,
+                8.0,
+                284.0 * scale,
+                island::EXPANDED_COMPACT.1 * scale,
+                24.0 * scale,
+            );
             let regions = regions(284.0, Page::Share);
             for (index, (_, [x, y, w, h])) in regions.iter().enumerate() {
                 assert!(*x >= 16.0 && x + w <= 284.0 - 16.0);
-                assert!(*y >= 12.0 && y + h <= 216.0 - 16.0);
+                assert!(*y >= 12.0 && y + h <= island::EXPANDED_COMPACT.1 - 16.0);
                 for (_, [ox, oy, ow, oh]) in &regions[index + 1..] {
                     assert!(x + w <= *ox || ox + ow <= *x || y + h <= *oy || oy + oh <= *y);
                 }

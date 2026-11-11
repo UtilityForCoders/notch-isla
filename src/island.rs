@@ -15,10 +15,10 @@ use tiny_skia::{
 const RESTING: (f32, f32, f32) = (88.0, 3.0, 1.5);
 
 /// Expandida compacta (sin letra): tarjeta flotante con reproductor.
-pub const EXPANDED_COMPACT: (f32, f32, f32) = (284.0, 216.0, 24.0);
+pub const EXPANDED_COMPACT: (f32, f32, f32) = (284.0, 176.0, 24.0);
 
 /// Expandida amplia (con letra sincronizada): tarjeta completa con reproductor y letra.
-pub const EXPANDED_LYRICS: (f32, f32, f32) = (552.0, 216.0, 24.0);
+pub const EXPANDED_LYRICS: (f32, f32, f32) = (552.0, EXPANDED_COMPACT.1, 24.0);
 
 /// Con un aviso del sistema (salida de audio, temporizador, atajo, actualización): una sola
 /// fila con el ícono y los textos, sin el espacio del reproductor.
@@ -28,15 +28,17 @@ const NOTICE_ICON: (f32, f32, f32) = (9.0, 38.0, 9.0);
 
 /// Separación lógica entre el borde superior de la pantalla y la isla flotante (sin tocar el techo).
 const TOP_GAP: f32 = 8.0;
-pub const HEADER_HEIGHT: f32 = 48.0;
+pub const HEADER_HEIGHT: f32 = 44.0;
 pub const EXPANDED_CONTENT_START: f32 = 0.45;
 
 /// Medidas del panel izquierdo de reproducción (píxeles lógicos).
 const COVER_PAD_X: f32 = 20.0;
 /// Margen superior lógico de la carátula dentro del reproductor.
-const COVER_PAD_TOP: f32 = 14.0;
+const COVER_PAD_TOP: f32 = 4.0;
 /// Lado lógico de la carátula expandida.
-const COVER_SIZE: f32 = 60.0;
+const COVER_SIZE: f32 = 48.0;
+const PROGRESS_Y: f32 = HEADER_HEIGHT + COVER_PAD_TOP + COVER_SIZE + 18.0;
+const CONTROLS_Y: f32 = PROGRESS_Y + 30.0;
 /// Radio lógico de las esquinas de la carátula.
 const COVER_RADIUS: f32 = 10.0;
 /// Ancho lógico reservado al reproductor, independiente del panel de letra.
@@ -361,6 +363,7 @@ pub struct LyricsArea {
     pub x: f32,
     pub w: f32,
     pub cy: f32,
+    pub half_height: f32,
     /// Como en `LyricsInfo`.
     pub lines: Vec<(i32, String)>,
     pub shift: f32,
@@ -468,7 +471,7 @@ impl Geometry {
         let pw = PLAYER_W * s;
         let bar_x = px + 40.0 * s;
         let bar_w = pw - 82.0 * s;
-        let bar_cy = self.y0 + (96.0 + HEADER_HEIGHT) * s;
+        let bar_cy = self.y0 + PROGRESS_Y * s;
         (bar_x, bar_cy, bar_w.max(10.0 * s))
     }
 }
@@ -593,7 +596,7 @@ fn button_centers(
 ) -> impl Iterator<Item = (Button, f32, f32)> {
     let px = g.x0 + COVER_PAD_X * s;
     let pw = PLAYER_W * s;
-    let cy = g.y0 + (134.0 + HEADER_HEIGHT) * s;
+    let cy = g.y0 + CONTROLS_Y * s;
     let lyrics_cx = px + 14.0 * s;
     let inset = if lyrics_available { 44.0 * s } else { 0.0 };
     let media_cx = px + inset + (pw - inset) / 2.0;
@@ -892,7 +895,7 @@ pub fn draw(
         TimeArea {
             cur_x: px,
             rem_x: px + pw - 38.0 * s,
-            y: g.y0 + (88.0 + HEADER_HEIGHT) * s,
+            y: g.y0 + (PROGRESS_Y - 8.0) * s,
             current: ti.current,
             remaining: ti.remaining,
             alpha: g.alpha,
@@ -911,6 +914,7 @@ pub fn draw(
                     x: lyrics_x,
                     w: lyrics_w,
                     cy: g.y0 + HEADER_HEIGHT * s + (g.h - HEADER_HEIGHT * s) / 2.0,
+                    half_height: ((g.h - (HEADER_HEIGHT + 8.0) * s) / 2.0).clamp(0.0, 70.0 * s),
                     lines: li.lines,
                     shift: li.shift,
                     sung: li.sung,

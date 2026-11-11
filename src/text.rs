@@ -405,12 +405,12 @@ impl TextRenderer {
                 let cy = lyrics.cy;
                 let a = lyrics.alpha;
 
-                if lw > 1.0 && a > 0.001 {
+                if lw > 1.0 && a > 0.001 && lyrics.half_height > 0.0 {
                     let clip = D2D_RECT_F {
                         left: lx,
-                        top: cy - 70.0 * s,
+                        top: cy - lyrics.half_height,
                         right: lx + lw,
-                        bottom: cy + 70.0 * s,
+                        bottom: cy + lyrics.half_height,
                     };
                     self.target
                         .PushAxisAlignedClip(&clip, D2D1_ANTIALIAS_MODE_ALIASED);
@@ -650,9 +650,17 @@ fn signature(areas: &LayoutAreas, title: &str, subtitle: &str) -> u64 {
             .for_each(&mut f);
     }
     if let Some(l) = &areas.lyrics {
-        [l.x, l.w, l.cy, l.shift, l.alpha, l.sung.unwrap_or(-1.0)]
-            .into_iter()
-            .for_each(&mut f);
+        [
+            l.x,
+            l.w,
+            l.cy,
+            l.half_height,
+            l.shift,
+            l.alpha,
+            l.sung.unwrap_or(-1.0),
+        ]
+        .into_iter()
+        .for_each(&mut f);
     }
     if let Some(s) = &areas.seek {
         [s.x, s.bar_cy, s.min_x, s.max_x, s.alpha]
