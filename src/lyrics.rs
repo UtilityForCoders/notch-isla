@@ -8,7 +8,8 @@
 //!
 //! Algunas letras traen además el momento de cada palabra (LRC extendido:
 //! "[00:12.40] <00:12.40> Y <00:12.90> soy"): con eso el verso se pinta al ritmo exacto de la
-//! voz. Si no lo traen, se estima repartiendo el tiempo del verso entre sus letras.
+//! voz. Si no lo traen, se estima repartiendo el tiempo del verso entre sus sílabas, con una
+//! pausa breve en las comas y puntos y la última sílaba sostenida.
 
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_APP};
@@ -20,9 +21,15 @@ pub const WM_LYRICS: u32 = WM_APP + 6;
 
 const HOST: &str = "lrclib.net";
 
-/// Segundos que se calculan por letra al estimar cuánto tarda en cantarse un verso sin
+/// Segundos que se calculan por sílaba al estimar cuánto tarda en cantarse un verso sin
 /// tiempos por palabra; solo limita los versos seguidos de una pausa larga.
-const SECS_PER_LETTER: f32 = 0.3;
+const SECS_PER_SYLLABLE: f32 = 0.35;
+
+/// Sílabas de más que dura la última del verso: casi siempre se sostiene.
+const FINAL_HOLD: f32 = 1.0;
+
+/// Sílabas que dura la pausa de una coma o un punto dentro del verso.
+const PUNCT_PAUSE: f32 = 0.5;
 
 /// Letra de una canción: versos en orden. Vacía si LRCLIB no la tiene sincronizada (o no se
 /// pudo consultar).
@@ -104,8 +111,8 @@ pub fn next_start(lines: &[Verse], t: f32) -> Option<f32> {
 ///
 /// Con tiempos por palabra, cada palabra se pinta mientras dura, hasta que empieza la
 /// siguiente: una nota larga se pinta despacio y el resto espera. Sin ellos, el verso se
-/// pinta parejo hasta poco antes del siguiente (o lo que tardaría cantarlo, si después
-/// viene una pausa larga).
+/// pinta sílaba a sílaba hasta poco antes del siguiente (o lo que tardaría cantarlo, si
+/// después viene una pausa larga).
 pub fn sung(lines: &[Verse], i: usize, t: f32) -> (f32, f32) {
     let Some(v) = lines.get(i) else {
         return (0.0, 0.0);
@@ -124,12 +131,18 @@ pub fn sung(lines: &[Verse], i: usize, t: f32) -> (f32, f32) {
     let (last_t, last_at) = marks[marks.len() - 1];
     if last_at < len {
         // Lo que queda después de la última marca: lo que se tardaría en cantarlo, sin pasar
-        // del verso siguiente.
-        let tail = letters(&v.text, last_at as usize) as f32;
-        let end = (last_t + tail * SECS_PER_LETTER)
+        // del verso siguiente, repartido entre sus sílabas.
+        let pieces = syllables(&v.text, last_at as usize);
+        let total: f32 = pieces.iter().map(|&(_, w)| w).sum();
+        let end = (last_t + total * SECS_PER_SYLLABLE)
             .min(v.start + gap * 0.9)
             .max(last_t);
-        marks.push((end, len));
+        let mut acc = 0.0;
+        for (at, w) in pieces {
+            acc += w;
+            let f = if total > 0.0 { acc / total } else { 1.0 };
+            marks.push((last_t + (end - last_t) * f, at as f32));
+        }
     }
 
     let k = marks.partition_point(|&(at, _)| at <= t);
@@ -144,17 +157,121 @@ pub fn sung(lines: &[Verse], i: usize, t: f32) -> (f32, f32) {
     (pos.clamp(0.0, len), len)
 }
 
-/// Letras y números de `text` desde la posición UTF-16 `from` (los espacios y signos casi no
-/// se demoran al cantar).
-fn letters(text: &str, from: usize) -> usize {
-    let mut at = 0;
-    text.chars()
-        .filter(|c| {
-            let skip = at < from;
-            at += c.len_utf16();
-            !skip && c.is_alphanumeric()
-        })
-        .count()
+/// Tramos en que se canta `text` desde la posición UTF-16 `from`: `(dónde termina, peso)`,
+/// en orden. Cada sílaba pesa 1 (la última, más: se sostiene); un tramo que no avanza es la
+/// pausa de una coma o un punto. El último termina al final del texto.
+///
+/// Las sílabas se cuentan por grupos de vocales ("can-ción": 2, "soy": 1), lo que sirve para
+/// las lenguas con alfabeto latino o cirílico; en japonés, chino y coreano cada carácter es
+/// una sílaba. Una palabra sin vocales ("2024", "pfft") cuenta como una.
+fn syllables(text: &str, from: usize) -> Vec<(u32, f32)> {
+    let mut chars = Vec::new();
+    let mut at = 0u32;
+    for c in text.chars() {
+        if at as usize >= from {
+            chars.push((at, c));
+        }
+        at += c.len_utf16() as u32;
+    }
+    let len = at;
+
+    let mut pieces: Vec<(u32, f32)> = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if !in_word(&chars, i) {
+            // La pausa no avanza: el signo se pinta con la sílaba siguiente. Varios signos
+            // seguidos ("...") hacen una sola.
+            if let Some(&(prev, w)) = pieces.last() {
+                if PAUSES.contains(&chars[i].1) && w != PUNCT_PAUSE {
+                    pieces.push((prev, PUNCT_PAUSE));
+                }
+            }
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < chars.len() && in_word(&chars, i) {
+            i += 1;
+        }
+        word_syllables(&chars[start..i], &mut pieces);
+    }
+
+    // Una pausa al final no tiene sentido: el verso ya terminó.
+    while pieces.last().is_some_and(|&(_, w)| w == PUNCT_PAUSE) {
+        pieces.pop();
+    }
+    match pieces.last_mut() {
+        Some(last) => {
+            last.0 = len;
+            last.1 += FINAL_HOLD;
+        }
+        None => pieces.push((len, 0.0)),
+    }
+    pieces
+}
+
+/// Signos que hacen una pausa breve al cantar.
+const PAUSES: [char; 10] = [',', ';', ':', '.', '!', '?', '…', '—', '–', '、'];
+
+/// Si el carácter `i` es parte de una palabra (letras, números y el apóstrofo entre letras:
+/// "don't").
+fn in_word(chars: &[(u32, char)], i: usize) -> bool {
+    let c = chars[i].1;
+    if c.is_alphanumeric() {
+        return true;
+    }
+    matches!(c, '\'' | '’')
+        && i > 0
+        && chars[i - 1].1.is_alphanumeric()
+        && chars.get(i + 1).is_some_and(|&(_, n)| n.is_alphanumeric())
+}
+
+/// Agrega las sílabas de una palabra: cada una termina donde empieza la siguiente. Entre dos
+/// vocales, la mitad de las consonantes va con cada una ("ho-la", "can-to").
+fn word_syllables(word: &[(u32, char)], pieces: &mut Vec<(u32, f32)>) {
+    // Núcleos: grupos de vocales, o un carácter silábico solo.
+    let mut nuclei: Vec<(usize, usize)> = Vec::new();
+    for (k, &(_, c)) in word.iter().enumerate() {
+        if is_syllabic(c) {
+            nuclei.push((k, k + 1));
+        } else if is_vowel(word, k) {
+            match nuclei.last_mut() {
+                Some(n) if n.1 == k && !is_syllabic(word[n.0].1) => n.1 = k + 1,
+                _ => nuclei.push((k, k + 1)),
+            }
+        }
+    }
+    for pair in nuclei.windows(2) {
+        let (end, next) = (pair[0].1, pair[1].0);
+        let cut = end + (next - end) / 2;
+        pieces.push((word[cut].0, 1.0));
+    }
+    let (last_at, last) = word[word.len() - 1];
+    pieces.push((last_at + last.len_utf16() as u32, 1.0));
+}
+
+/// Vocal del alfabeto latino o cirílico. La "y" es vocal salvo antes de otra vocal ("soy",
+/// "my", pero "yo").
+fn is_vowel(word: &[(u32, char)], k: usize) -> bool {
+    let c = word[k].1.to_lowercase().next().unwrap_or(word[k].1);
+    if c == 'y' {
+        return !word.get(k + 1).is_some_and(|&(_, n)| {
+            let n = n.to_lowercase().next().unwrap_or(n);
+            n != 'y' && is_plain_vowel(n)
+        });
+    }
+    is_plain_vowel(c)
+}
+
+fn is_plain_vowel(c: char) -> bool {
+    "aeiouáéíóúàèìòùâêîôûäëïöüãõåæøœаеёиоуыэюяіїєү".contains(c)
+}
+
+/// Carácter que es una sílaba por sí solo: kana japonés, ideogramas chinos y hangul.
+fn is_syllabic(c: char) -> bool {
+    matches!(c,
+        '\u{3040}'..='\u{30FF}' | '\u{3400}'..='\u{4DBF}' | '\u{4E00}'..='\u{9FFF}'
+        | '\u{AC00}'..='\u{D7AF}')
 }
 
 /// Texto LRC de la canción. Primero la búsqueda exacta (título, artista, álbum y duración);
@@ -380,12 +497,46 @@ mod tests {
         assert!((2.0..6.0).contains(&pos), "{pos}");
         assert_eq!(sung(&lines, 0, 53.5).0, 15.0);
 
-        // Sin tiempos por palabra: parejo, y termina antes del verso siguiente.
-        let plain = parse_lrc("[00:10.00] abcd\n[00:20.00] Otro");
+        // Sin tiempos por palabra: por sílabas, y termina antes del verso siguiente.
+        let plain = parse_lrc("[00:10.00] hola\n[00:20.00] Otro");
         assert_eq!(sung(&plain, 0, 10.0).0, 0.0);
-        // 4 letras * 0,3 s = 1,2 s: a la mitad, la mitad del verso.
-        assert!((sung(&plain, 0, 10.6).0 - 2.0).abs() < 1e-3);
+        // "ho" (1 sílaba) y "la" (1 + 1 sostenida) = 3 * 0,35 s: "ho" termina a los 0,35 s.
+        assert!((sung(&plain, 0, 10.35).0 - 2.0).abs() < 1e-3);
+        assert!((sung(&plain, 0, 11.05).0 - 4.0).abs() < 1e-3);
         assert_eq!(sung(&plain, 0, 15.0).0, 4.0);
+
+        // Un verso largo seguido de otro enseguida se acelera para terminar a tiempo (90 %
+        // del hueco).
+        let fast = parse_lrc("[00:10.00] canción de amor eterno\n[00:11.00] Otro");
+        assert_eq!(sung(&fast, 0, 10.9).0, 22.0);
+        assert!(sung(&fast, 0, 10.5).0 < 22.0);
+    }
+
+    #[test]
+    fn cuenta_silabas() {
+        let ends =
+            |text: &str| -> Vec<u32> { syllables(text, 0).iter().map(|&(at, _)| at).collect() };
+        // ho-la, can-ción, soy, yo.
+        assert_eq!(ends("hola"), vec![2, 4]);
+        assert_eq!(ends("hola canción"), vec![2, 4, 8, 12]);
+        assert_eq!(ends("Y soy yo"), vec![1, 5, 8]);
+        // Palabra sin vocales y apóstrofo dentro de la palabra.
+        assert_eq!(ends("2024 don't"), vec![4, 10]);
+        // Cada carácter japonés es una sílaba.
+        assert_eq!(ends("さくら"), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn pausa_en_comas_y_sostiene_el_final() {
+        let pieces = syllables("sí, no...", 0);
+        // "sí", pausa (no avanza), "no" sostenida hasta el final del texto.
+        assert_eq!(
+            pieces,
+            vec![(2, 1.0), (2, PUNCT_PAUSE), (9, 1.0 + FINAL_HOLD)]
+        );
+        // Sin palabras: termina enseguida.
+        assert_eq!(syllables("...", 0), vec![(3, 0.0)]);
+        assert_eq!(syllables("hola", 2), vec![(4, 1.0 + FINAL_HOLD)]);
     }
 
     #[test]
