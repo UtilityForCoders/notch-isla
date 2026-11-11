@@ -19,6 +19,14 @@ pub const EXPANDED_COMPACT: (f32, f32, f32) = (264.0, 176.0, 24.0);
 
 /// Expandida amplia (con letra sincronizada): tarjeta completa con reproductor y letra.
 pub const EXPANDED_LYRICS: (f32, f32, f32) = (500.0, EXPANDED_COMPACT.1, 24.0);
+const EMPTY_MUSIC_HEIGHT: f32 = 94.0;
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Shape {
+    pub lyrics: f32,
+    pub notice: f32,
+    pub empty_music: bool,
+}
 
 /// Con un aviso del sistema (salida de audio, temporizador, atajo, actualización): una sola
 /// fila con el ícono y los textos, sin el espacio del reproductor.
@@ -174,7 +182,7 @@ pub fn indicator_hit_test(
     scale: f32,
     p: f32,
     presence: f32,
-    shape: (f32, f32),
+    shape: Shape,
     indicators: Indicators,
     x: f32,
     y: f32,
@@ -478,17 +486,10 @@ impl Geometry {
 /// `lyrics_p`: 1 = ancho completo con letra sincronizada; 0 = ancho compacto sólo reproductor.
 /// `notice_p`: 1 = forma de aviso (`NOTICE`), que reemplaza a la de la música mientras dura.
 /// Al aparecer baja desde arriba con rebote del resorte y queda flotando sin tocar el techo.
-fn geometry(
-    max_w: f32,
-    max_h: f32,
-    scale: f32,
-    p: f32,
-    presence: f32,
-    (lyrics_p, notice_p): (f32, f32),
-) -> Geometry {
+fn geometry(max_w: f32, max_h: f32, scale: f32, p: f32, presence: f32, shape: Shape) -> Geometry {
     let p = p.clamp(-0.1, 1.1);
     let lerp = |a: f32, b: f32| a + (b - a) * p;
-    let (expanded_w, expanded_h) = expanded_size((lyrics_p, notice_p));
+    let (expanded_w, expanded_h) = expanded_size(shape);
     let w = (lerp(RESTING.0, expanded_w) * scale).clamp(1.0, max_w);
     let h = lerp(RESTING.1, expanded_h) * scale;
     let gap = TOP_GAP * scale * p.clamp(0.0, 1.0);
@@ -516,21 +517,32 @@ pub fn backdrop_geometry(
     scale: f32,
     p: f32,
     presence: f32,
-    shape: (f32, f32),
+    shape: Shape,
 ) -> (f32, f32, f32, f32, f32) {
     let g = geometry(max_w, max_h, scale, p, presence, shape);
     (g.x0, g.y0, g.w, g.h, g.r)
 }
 
 /// Tamaño lógico de la isla expandida (ancho, alto) para `shape` = (`lyrics_p`, `notice_p`).
-fn expanded_size((lyrics_p, notice_p): (f32, f32)) -> (f32, f32) {
-    let lyrics_p = lyrics_p.clamp(-0.1, 1.15);
-    let n = notice_p.clamp(-0.1, 1.1);
+fn expanded_size(shape: Shape) -> (f32, f32) {
+    let lyrics_p = if shape.empty_music {
+        0.0
+    } else {
+        shape.lyrics.clamp(-0.1, 1.15)
+    };
+    let n = shape.notice.clamp(-0.1, 1.1);
     let toward_notice = |music: f32, notice: f32| music + (notice - music) * n;
     let music_w = EXPANDED_COMPACT.0 + (EXPANDED_LYRICS.0 - EXPANDED_COMPACT.0) * lyrics_p;
     (
         toward_notice(music_w, NOTICE.0),
-        toward_notice(EXPANDED_LYRICS.1, NOTICE.1),
+        toward_notice(
+            if shape.empty_music {
+                EMPTY_MUSIC_HEIGHT
+            } else {
+                EXPANDED_COMPACT.1
+            },
+            NOTICE.1,
+        ),
     )
 }
 
@@ -544,7 +556,7 @@ pub fn bounds(
     scale: f32,
     p: f32,
     presence: f32,
-    shape: (f32, f32),
+    shape: Shape,
 ) -> (f32, f32, f32, f32) {
     let g = geometry(max_w, max_h, scale, p, presence, shape);
     let margin = 8.0 * scale;
@@ -554,7 +566,7 @@ pub fn bounds(
     // La zona lo cubre entero, si no quedarían restos de esos cuadros al encogerse.
     if g.alpha > 0.0 {
         let (w, mut h) = expanded_size(shape);
-        if shape.1 < 1.0 {
+        if shape.notice < 1.0 && !shape.empty_music {
             h = h.max(EXPANDED_COMPACT.1);
         }
         let (w, h) = (w * OVERSHOOT * scale, h * OVERSHOOT * scale);
@@ -574,7 +586,7 @@ pub fn edge_strip_bounds(max_w: f32, scale: f32, _battery_low: bool) -> (f32, f3
 
 /// Borde inferior en píxeles físicos; debajo se coloca el proyector de la letra.
 /// `shape` = (`lyrics_p`, `notice_p`), como en `geometry`.
-pub fn bottom(max_w: f32, max_h: f32, scale: f32, p: f32, presence: f32, shape: (f32, f32)) -> f32 {
+pub fn bottom(max_w: f32, max_h: f32, scale: f32, p: f32, presence: f32, shape: Shape) -> f32 {
     let g = geometry(max_w, max_h, scale, p, presence, shape);
     g.y0 + g.h
 }
@@ -619,7 +631,7 @@ pub fn hit_test(
     scale: f32,
     p: f32,
     presence: f32,
-    shape: (f32, f32),
+    shape: Shape,
     seekable: bool,
     switchable: bool,
     updatable: bool,
@@ -682,7 +694,7 @@ pub fn seek_fraction(
     scale: f32,
     p: f32,
     presence: f32,
-    shape: (f32, f32),
+    shape: Shape,
     x: f32,
 ) -> f32 {
     let g = geometry(max_w, max_h, scale, p, presence, shape);
@@ -702,7 +714,7 @@ pub fn draw(
     scale: f32,
     p: f32,
     presence: f32,
-    shape: (f32, f32),
+    shape: Shape,
     controls: Option<Controls>,
     indicators: Indicators,
     notice: Option<(&Notice, f32)>,
@@ -728,11 +740,11 @@ pub fn draw(
     let g = match notice {
         Some(_) => g,
         None => Geometry {
-            alpha: g.alpha * (1.0 - shape.1.clamp(0.0, 1.0)),
+            alpha: g.alpha * (1.0 - shape.notice.clamp(0.0, 1.0)),
             ..g
         },
     };
-    let lyrics_p = shape.0;
+    let lyrics_p = shape.lyrics;
     let s = scale;
 
     let mut paint = Paint {
@@ -794,6 +806,34 @@ pub fn draw(
             seek: None,
         });
     }
+    if shape.empty_music {
+        let y = g.y0 + 66.0 * s;
+        let alpha = g.alpha * ((g.h / s - 76.0) / 12.0).clamp(0.0, 1.0);
+        let [r, green, b] = color.blend(255, 42);
+        paint.set_color_rgba8(r, green, b, (alpha * 220.0) as u8);
+        draw_notice_icon(pixmap, &paint, NoticeIcon::Music, g.x0 + 32.0 * s, y, s);
+        return Some(LayoutAreas {
+            labels: vec![LabelArea {
+                text: "Sin reproducción".into(),
+                x: g.x0 + 53.0 * s,
+                y: y - 10.0 * s,
+                w: (EXPANDED_COMPACT.0 - 73.0) * s,
+                h: 20.0 * s,
+                alpha,
+                strong: false,
+                scroll: false,
+            }],
+            text: TextArea {
+                x: g.x0,
+                w: 0.0,
+                cy: y,
+                alpha: 0.0,
+            },
+            time: None,
+            lyrics: None,
+            seek: None,
+        });
+    }
     // Panel izquierdo: carátula de la canción
     let (cover_x, cover_y, size) = g.cover_rect();
     draw_cover(
@@ -809,7 +849,7 @@ pub fn draw(
     if let Some(c) = &controls {
         draw_bars(
             pixmap,
-            g.x0 + (EXPANDED_COMPACT.0 - COVER_PAD_X - 20.0) * s,
+            g.x0 + (EXPANDED_COMPACT.0 - COVER_PAD_X - 28.0) * s,
             cover_y + size / 2.0,
             s,
             c,
@@ -875,7 +915,7 @@ pub fn draw(
     let (text_x, text_w) = text_column(&g, s);
     let title_area = TextArea {
         x: text_x,
-        w: (text_w - if controls.is_some() { 26.0 * s } else { 0.0 }).max(0.0),
+        w: (text_w - if controls.is_some() { 34.0 * s } else { 0.0 }).max(0.0),
         cy: g.y0 + (COVER_PAD_TOP + HEADER_HEIGHT + COVER_SIZE / 2.0) * s,
         alpha: g.alpha,
     };
@@ -1750,7 +1790,10 @@ mod tests {
                             scale,
                             p,
                             1.0,
-                            (lyrics, 0.0),
+                            Shape {
+                                lyrics,
+                                ..Shape::default()
+                            },
                             Some(c),
                             Indicators::default(),
                             None,
@@ -1776,7 +1819,17 @@ mod tests {
                         let x = (i as u32 % w) as f32;
                         let y = (i as u32 / w) as f32;
                         let text = &areas.as_ref().unwrap().text;
-                        let g = geometry(w as f32, h as f32, scale, p, 1.0, (lyrics, 0.0));
+                        let g = geometry(
+                            w as f32,
+                            h as f32,
+                            scale,
+                            p,
+                            1.0,
+                            Shape {
+                                lyrics,
+                                ..Shape::default()
+                            },
+                        );
                         let (_, top, size) = g.cover_rect();
                         assert!(x > text.x + text.w, "las barras invaden el título");
                         assert!(x < g.x0 + (EXPANDED_COMPACT.0 - COVER_PAD_X) * scale);
@@ -1796,7 +1849,7 @@ mod tests {
         for scale in [1.0, 1.25, 1.5, 2.0] {
             let (w, h) = window_size();
             let (w, h) = ((w * scale).ceil() as u32, (h * scale).ceil() as u32);
-            let g = geometry(w as f32, h as f32, scale, 1.0, 1.0, (0.0, 0.0));
+            let g = geometry(w as f32, h as f32, scale, 1.0, 1.0, Shape::default());
             let (_, lx, ly) = button_centers(&g, scale, true).next().unwrap();
             for available in [false, true] {
                 let buttons: Vec<_> = button_centers(&g, scale, available).collect();
@@ -1822,7 +1875,7 @@ mod tests {
                             scale,
                             1.0,
                             1.0,
-                            (0.0, 0.0),
+                            Shape::default(),
                             false,
                             false,
                             false,
@@ -1849,7 +1902,7 @@ mod tests {
                     scale,
                     1.0,
                     1.0,
-                    (0.0, 0.0),
+                    Shape::default(),
                     false,
                     false,
                     false,
@@ -1874,7 +1927,7 @@ mod tests {
                 1.25,
                 p,
                 1.0,
-                (0.0, 0.0),
+                Shape::default(),
                 Some(controls()),
                 Indicators::default(),
                 None,
@@ -1914,7 +1967,7 @@ mod tests {
             let (w, h) = ((w * scale).ceil() as u32, (h * scale).ceil() as u32);
             for step in 0..=22 {
                 let p = step as f32 * 0.05;
-                let g = geometry(w as f32, h as f32, scale, p, 1.0, (0.0, 0.0));
+                let g = geometry(w as f32, h as f32, scale, p, 1.0, Shape::default());
                 let mut image = Pixmap::new(w, h).unwrap();
                 draw_indicators(&mut image, &g, p, indicators);
                 for (index, pixel) in image.pixels().iter().enumerate() {
@@ -1939,7 +1992,7 @@ mod tests {
                             scale,
                             p,
                             1.0,
-                            (0.0, 0.0),
+                            Shape::default(),
                             indicators,
                             x,
                             y
@@ -1984,20 +2037,34 @@ mod tests {
             icon: NoticeIcon::Audio,
             color: [255, 255, 255],
         };
-        for shape in [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0)] {
+        for shape in [
+            Shape::default(),
+            Shape {
+                empty_music: true,
+                ..Shape::default()
+            },
+            Shape {
+                lyrics: 1.0,
+                ..Shape::default()
+            },
+            Shape {
+                notice: 1.0,
+                ..Shape::default()
+            },
+        ] {
             for step in 0..=22 {
                 let p = step as f32 * 0.05;
                 for presence in [0.4, 1.0] {
                     let mut pixmap = Pixmap::new(pw, ph).unwrap();
                     let c = controls();
-                    let notice = (shape.1 > 0.0).then_some((&notice, 1.0));
+                    let notice = (shape.notice > 0.0).then_some((&notice, 1.0));
                     draw(
                         &mut pixmap,
                         scale,
                         p,
                         presence,
                         shape,
-                        Some(c),
+                        (!shape.empty_music).then_some(c),
                         Indicators {
                             battery_low: true,
                             update: true,

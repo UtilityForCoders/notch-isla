@@ -527,8 +527,6 @@ struct App {
     /// Control del volumen; se crea la primera vez que se gira la rueda.
     volume: Option<Volume>,
     volume_level: f32,
-    /// El nivel mostrado es el de la app que suena (no el general).
-    volume_app: bool,
     /// Hasta cuándo se muestra el nivel de volumen en la isla.
     volume_until: Option<Instant>,
     /// Versión nueva publicada en GitHub, si la hay (se ofrece en el menú de la bandeja).
@@ -631,7 +629,6 @@ impl App {
             notice_spring: Spring::new(0.0, 260.0, 22.0),
             volume: None,
             volume_level: 0.0,
-            volume_app: false,
             volume_until: None,
             update: None,
             idle_hidden: true,
@@ -1465,7 +1462,6 @@ impl App {
         };
         if let Some(level) = level {
             self.volume_level = level;
-            self.volume_app = app.is_some();
             self.volume_until = Some(Instant::now() + VOLUME_SHOW);
             self.redraw();
         }
@@ -2106,9 +2102,12 @@ impl App {
         self.set_timer(timer_for(&motion, moving, frame_ms));
     }
 
-    /// Forma de la isla expandida para `island`: (ancho con letra, forma de aviso).
-    fn shape(&self) -> (f32, f32) {
-        (self.lyrics_spring.value, self.notice_spring.value)
+    fn shape(&self) -> island::Shape {
+        island::Shape {
+            lyrics: self.lyrics_spring.value,
+            notice: self.notice_spring.value,
+            empty_music: self.page == workspace::Page::Music && self.media.is_none(),
+        }
     }
 
     /// Dibuja el cuadro actual y dice qué sigue moviéndose.
@@ -2360,7 +2359,7 @@ impl App {
                 } else {
                     workspace::ShareState::default()
                 };
-                let mut labels = workspace::draw(
+                let labels = workspace::draw(
                     &mut self.surface.pixmap,
                     bounds,
                     self.scale,
@@ -2374,18 +2373,17 @@ impl App {
                     self.page == workspace::Page::Music
                         && bounds.2 >= (island::EXPANDED_COMPACT.0 - 0.5) * self.scale
                 }) {
-                    labels.push(workspace::draw_volume(
+                    workspace::draw_volume(
                         &mut self.surface.pixmap,
                         bounds,
                         self.scale,
                         alpha * fade,
                         level,
-                        self.volume_app,
                         self.settings.island_color,
-                    ));
+                    );
                 }
                 if let Some(areas) = areas.as_mut() {
-                    areas.labels = labels;
+                    areas.labels.extend(labels);
                 }
             }
         }
@@ -2520,7 +2518,7 @@ impl App {
                     }
                     (title.to_string(), subtitle)
                 }
-                (None, None) => ("Tu música".to_string(), "Sin reproducción".to_string()),
+                (None, None) => (String::new(), String::new()),
             };
             scroll_ms = text.draw(
                 self.surface.dib(),
@@ -3815,6 +3813,10 @@ mod tests {
             let key = lyrics::key(&media.title, &media.artist);
             app.lyrics.insert(key.clone(), Vec::new());
             app.set_media(Some(media.clone()));
+            assert!(
+                !app.shape().empty_music,
+                "una sesión en pausa conserva el reproductor"
+            );
             assert_eq!(app.lyrics_spring.target(), 0.0);
             assert!(app.settings.lyrics_island);
             app.set_lyrics(lyrics::Lyrics {
@@ -3830,6 +3832,13 @@ mod tests {
             assert_eq!(app.lyrics_spring.target(), 0.0);
             app.set_media(None);
             assert!(app.visible);
+            assert!(
+                !app.shape().empty_music,
+                "Compartir conserva el alto de sus acciones"
+            );
+            app.select_page(workspace::Page::Music);
+            assert!(app.shape().empty_music);
+            app.select_page(workspace::Page::Share);
             app.spring.reset(1.0);
             app.presence.reset(1.0);
             let bounds = island::backdrop_geometry(
@@ -4221,7 +4230,7 @@ mod tests {
         let (lw, lh) = island::window_size();
         let (w, h) = ((lw * scale).ceil() as u32, (lh * scale).ceil() as u32);
         let zone = |p: f32| {
-            let b = island::bounds(w as f32, h as f32, scale, p, 1.0, (0.0, 0.0));
+            let b = island::bounds(w as f32, h as f32, scale, p, 1.0, island::Shape::default());
             Area::new(b, w, h)
         };
         let collapsed = zone(0.0).pixels() as f32 / (w * h) as f32;
@@ -4347,7 +4356,10 @@ mod tests {
                 scale,
                 1.0,
                 1.0,
-                (1.0, 0.0),
+                island::Shape {
+                    lyrics: 1.0,
+                    ..Default::default()
+                },
                 Some(island::Controls {
                     playing: true,
                     hovered: None,
@@ -4384,7 +4396,17 @@ mod tests {
             surface.copy_to_dib();
             let mid = Instant::now();
             let island = Area::new(
-                island::bounds(w as f32, h as f32, scale, 1.0, 1.0, (1.0, 0.0)),
+                island::bounds(
+                    w as f32,
+                    h as f32,
+                    scale,
+                    1.0,
+                    1.0,
+                    island::Shape {
+                        lyrics: 1.0,
+                        ..Default::default()
+                    },
+                ),
                 w,
                 h,
             );
@@ -4552,7 +4574,10 @@ mod tests {
                 scale,
                 expanded,
                 1.0,
-                (lyrics, 0.0),
+                island::Shape {
+                    lyrics,
+                    ..Default::default()
+                },
             );
             let (min_x, max_x) = island_bounds(&rc, width, visible_width, scale);
             let left_gap = min_x as f32 + left - rc.left as f32;

@@ -264,14 +264,13 @@ pub fn draw_volume(
     scale: f32,
     alpha: f32,
     level: f32,
-    per_app: bool,
     color: crate::settings::IslandColor,
-) -> LabelArea {
+) {
     let (left, top, _, _, _) = bounds;
     let x = left + (TAB_X + 2.0 * TAB_WIDTH + 12.0) * scale;
-    let y = top + 33.0 * scale;
+    let y = top + (TAB_Y + TAB_HEIGHT / 2.0 - 2.0) * scale;
     let width = 96.0 * scale;
-    let height = 3.0 * scale;
+    let height = 4.0 * scale;
     let level = level.clamp(0.0, 1.0);
     let mut paint = Paint {
         anti_alias: true,
@@ -282,17 +281,6 @@ pub fn draw_volume(
     let [r, g, b] = color.blend(255, 42);
     paint.set_color_rgba8(r, g, b, (alpha * 255.0) as u8);
     island::fill_rounded_rect(pixmap, &paint, x, y, width * level, height, height / 2.0);
-    let source = if per_app { "App" } else { "General" };
-    LabelArea {
-        text: format!("{source} · {:.0} %", level * 100.0),
-        x,
-        y: top + 12.0 * scale,
-        w: width,
-        h: 18.0 * scale,
-        alpha,
-        strong: false,
-        scroll: false,
-    }
 }
 
 #[cfg(test)]
@@ -367,18 +355,19 @@ mod tests {
             )
             .is_none());
             let mut image = Pixmap::new(640, 400).unwrap();
-            let volume = draw_volume(
+            draw_volume(
                 &mut image,
                 bounds,
                 scale,
                 1.0,
                 0.68,
-                false,
                 crate::settings::IslandColor::default(),
             );
-            assert_eq!(volume.text, "General · 68 %");
-            assert!(volume.x > bounds.0 + (TAB_X + 2.0 * TAB_WIDTH) * scale);
-            assert!(volume.x + volume.w < bounds.0 + (width - 64.0) * scale);
+            let y = (bounds.1 + 26.0 * scale) as u32;
+            for (x, expected) in [(94.0, 0), (110.0, 255), (185.0, 55), (200.0, 0)] {
+                let x = (bounds.0 + x * scale) as u32;
+                assert_eq!(image.pixel(x, y).unwrap().alpha(), expected);
+            }
         }
     }
 }
