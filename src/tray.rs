@@ -54,6 +54,7 @@ const CMD_BATTERY_REFRESH: usize = 21;
 const CMD_CONNECTION_NOTICES: usize = 22;
 const CMD_SHARE: usize = 23;
 const CMD_SETTINGS: usize = 24;
+const CMD_LINKED_DEVICES: usize = 25;
 /// Las opciones de los submenús van numeradas a partir de estas bases.
 const CMD_MONITOR: usize = 200;
 const CMD_TIMER: usize = 300;
@@ -67,6 +68,7 @@ pub(crate) const CMD_ISLAND_COLOR: usize = 600;
 pub const TIMER_MINUTES: [u32; 6] = [5, 10, 15, 25, 45, 60];
 
 pub enum Command {
+    LinkedDevices,
     Share,
     ToggleBatteryNotices,
     ToggleConnectionNotices,
@@ -354,6 +356,7 @@ fn build_settings_items(state: &MenuState) -> Vec<Item> {
     items.push(Item::Separator);
     // Con una versión nueva ya encontrada, la opción de arriba la instala; esta igual consulta.
     items.push(action(CMD_SHARE, "Compartir cerca…", false));
+    items.push(action(CMD_LINKED_DEVICES, "Equipos vinculados…", false));
     items.push(action(CMD_CHECK_UPDATES, "Buscar actualizaciones", false));
     items.push(action(CMD_EXIT, "Salir", false));
     items
@@ -375,6 +378,7 @@ fn id_to_command(id: usize, state: &MenuState) -> Option<Command> {
         CMD_LYRICS_PROJECTOR => Some(Command::ToggleLyricsProjector),
         CMD_REAL_BARS => Some(Command::ToggleRealBars),
         CMD_SHARE => Some(Command::Share),
+        CMD_LINKED_DEVICES => Some(Command::LinkedDevices),
         CMD_CHECK_UPDATES => Some(Command::CheckUpdates),
         CMD_CENTER => Some(Command::Center),
         CMD_HIGH_REFRESH => Some(Command::ToggleHighRefresh),
@@ -452,7 +456,7 @@ fn categories(state: &MenuState) -> Vec<crate::settings_ui::Category> {
                 CMD_CENTER | CMD_HIGH_REFRESH | CMD_ISLAND_COLOR => 1,
                 CMD_REAL_BARS => 2,
                 CMD_NOTICES => 3,
-                CMD_SHARE => 5,
+                CMD_SHARE | CMD_LINKED_DEVICES => 5,
                 CMD_UPDATE | CMD_CHECK_UPDATES => 6,
                 _ => 0,
             },

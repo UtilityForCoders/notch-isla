@@ -3448,6 +3448,10 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                     }
                 });
                 tray::show_menu(state, |cmd, settings| match cmd {
+                    Command::LinkedDevices => {
+                        share_ui::manage_linked(hwnd);
+                        true
+                    }
                     Command::Share => {
                         unsafe {
                             let _ = PostMessageW(

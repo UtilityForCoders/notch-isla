@@ -12,7 +12,9 @@ use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
 use windows::Win32::System::DataExchange::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Memory::*;
-use windows::Win32::UI::Controls::{SetWindowTheme, DRAWITEMSTRUCT, ODS_FOCUS};
+use windows::Win32::UI::Controls::{
+    SetWindowTheme, DRAWITEMSTRUCT, EM_SETLIMITTEXT, EM_SETSEL, ODS_FOCUS,
+};
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetFocus, SetFocus};
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -150,7 +152,35 @@ fn show_with_label(
     image: Option<Image>,
     primary_label: Option<&str>,
 ) -> Result<bool> {
+    show_panel(owner, title, detail, text, image, primary_label, None)
+}
+
+pub fn edit_device_name(owner: HWND, name: &str) -> Result<Option<String>> {
+    let mut edited = name.to_owned();
+    let saved = show_panel(
+        owner,
+        "Nombre del equipo",
+        "Déjalo vacío para recuperar el nombre original.",
+        None,
+        None,
+        Some("Guardar nombre"),
+        Some(&mut edited),
+    )?;
+    Ok(saved.then_some(edited))
+}
+
+fn show_panel(
+    owner: HWND,
+    title: &str,
+    detail: &str,
+    text: Option<&str>,
+    image: Option<Image>,
+    primary_label: Option<&str>,
+    edited: Option<&mut String>,
+) -> Result<bool> {
     let confirm = primary_label.is_some();
+    let editing = edited.is_some();
+    let panel_height = if editing { 272 } else { 540 };
     unsafe {
         let instance = GetModuleHandleW(None)?;
         // MAKEINTRESOURCEW(1): Win32 interpreta la dirección numérica como el ID de
@@ -174,7 +204,7 @@ fn show_with_label(
             CW_USEDEFAULT,
             CW_USEDEFAULT,
             560,
-            540,
+            panel_height,
             Some(owner),
             None,
             Some(instance.into()),
@@ -248,7 +278,7 @@ fn show_with_label(
             &mut monitor,
         );
         let width = n(560).min(monitor.rcWork.right - monitor.rcWork.left);
-        let height = n(540).min(monitor.rcWork.bottom - monitor.rcWork.top);
+        let height = n(panel_height).min(monitor.rcWork.bottom - monitor.rcWork.top);
         SetWindowPos(
             hwnd,
             None,
@@ -258,7 +288,12 @@ fn show_with_label(
             height,
             SWP_NOZORDER,
         )?;
-        if let Some(text) = text {
+        if let Some(text) = edited.as_deref().map(String::as_str).or(text) {
+            let style = if editing {
+                ES_AUTOHSCROLL
+            } else {
+                ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL
+            };
             let edit = CreateWindowExW(
                 WINDOW_EX_STYLE(0),
                 w!("EDIT"),
@@ -266,17 +301,21 @@ fn show_with_label(
                 WS_CHILD
                     | WS_VISIBLE
                     | WS_TABSTOP
-                    | WS_VSCROLL
-                    | WINDOW_STYLE((ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL) as u32),
+                    | if editing { WS_BORDER } else { WS_VSCROLL }
+                    | WINDOW_STYLE(style as u32),
                 n(24),
                 n(92 + HEADER_HEIGHT),
                 width - n(64),
-                height - n(254),
+                if editing { n(32) } else { height - n(254) },
                 Some(hwnd),
-                None,
+                editing.then_some(HMENU(4usize as _)),
                 Some(instance.into()),
                 None,
             )?;
+            if editing {
+                SendMessageW(edit, EM_SETLIMITTEXT, Some(WPARAM(96)), None);
+                SendMessageW(edit, EM_SETSEL, Some(WPARAM(0)), Some(LPARAM(-1)));
+            }
             let _ = SetWindowTheme(edit, w!("DarkMode_Explorer"), None);
             SendMessageW(
                 edit,
@@ -287,7 +326,17 @@ fn show_with_label(
         }
         for (id, label, x) in [
             (1, primary_label.unwrap_or("Copiar"), 280),
-            (2, if confirm { "Rechazar" } else { "Cerrar" }, 24),
+            (
+                2,
+                if editing {
+                    "Cancelar"
+                } else if confirm {
+                    "Rechazar"
+                } else {
+                    "Cerrar"
+                },
+                24,
+            ),
         ] {
             let button = CreateWindowExW(
                 WINDOW_EX_STYLE(0),
@@ -332,13 +381,17 @@ fn show_with_label(
         );
         let _ = ShowWindow(hwnd, SW_SHOW);
         let _ = SetForegroundWindow(hwnd);
-        if confirm {
+        if editing {
+            if let Ok(edit) = GetDlgItem(Some(hwnd), 4) {
+                let _ = SetFocus(Some(edit));
+            }
+        } else if confirm {
             if let Ok(reject) = GetDlgItem(Some(hwnd), 2) {
                 let _ = SetFocus(Some(reject));
             }
         }
         // La confirmación vence junto con la solicitud de red.
-        if confirm {
+        if confirm && !editing {
             SetTimer(Some(hwnd), 1, 60_000, None);
         }
         let mut msg = MSG::default();
@@ -357,7 +410,9 @@ fn show_with_label(
             if confirm && msg.message == WM_KEYDOWN && msg.wParam.0 == 13 {
                 // Enter solo confirma si el usuario enfocó expresamente la acción principal.
                 let focused = GetFocus();
-                if GetDlgItem(Some(hwnd), 1).ok() == Some(focused) {
+                if GetDlgItem(Some(hwnd), 1).ok() == Some(focused)
+                    || (editing && GetDlgItem(Some(hwnd), 4).ok() == Some(focused))
+                {
                     panel.accepted = true;
                     panel.done = true;
                 } else if GetDlgItem(Some(hwnd), 2).ok() == Some(focused)
@@ -370,6 +425,15 @@ fn show_with_label(
             if !IsDialogMessageW(hwnd, &msg).as_bool() {
                 let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);
+            }
+        }
+        if let Some(edited) = edited.filter(|_| panel.accepted) {
+            if let Ok(edit) = GetDlgItem(Some(hwnd), 4) {
+                let mut buffer = [0; 97];
+                let len = GetWindowTextW(edit, &mut buffer).max(0) as usize;
+                *edited = String::from_utf16_lossy(&buffer[..len]);
+            } else {
+                panel.accepted = false;
             }
         }
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
