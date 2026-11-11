@@ -73,7 +73,15 @@ struct Line {
     width: f32,
 }
 
-/// Formatos, layouts y pincel reutilizables; se invalidan los textos al cambiar el DPI.
+/// Imagen y recursos de Direct2D que solo viven mientras hay texto para dibujar.
+struct TextCanvas {
+    bitmap: IWICBitmap,
+    target: ID2D1RenderTarget,
+    brush: ID2D1SolidColorBrush,
+    size: (u32, u32),
+}
+
+/// Formatos y layouts reutilizables; se invalidan los textos al cambiar el DPI.
 ///
 /// El texto se dibuja en una imagen propia (WIC, en memoria) y después se mezcla sobre el
 /// DIB de la ventana, solo en la zona que cambió. Dibujar directo sobre el DIB (un "DC render
@@ -83,13 +91,11 @@ pub struct TextRenderer {
     dwrite: IDWriteFactory,
     d2d: ID2D1Factory,
     wic: IWICImagingFactory,
-    /// Imagen donde se dibuja el texto, del tamaño de la ventana (se crea al primer cuadro).
-    canvas: Option<IWICBitmap>,
-    canvas_size: (u32, u32),
+    /// Imagen local a la zona de texto, sin las partes transparentes de la ventana.
+    canvas: Option<TextCanvas>,
     /// Qué se dibujó en la imagen en el último cuadro (firma de textos, posiciones y zona):
     /// si el cuadro nuevo es igual, se reutiliza sin volver a dibujar las letras.
     drawn: Option<(u64, (u32, u32, u32, u32))>,
-    target: ID2D1RenderTarget,
     title: IDWriteTextFormat,
     subtitle: IDWriteTextFormat,
     label: IDWriteTextFormat,
@@ -107,7 +113,6 @@ pub struct TextRenderer {
     seek_line: Option<Line>,
     /// Versos del carrusel ya maquetados, en negrita (`true`) o normal; los más viejos primero.
     lyric_cache: Vec<(bool, Line)>,
-    brush: ID2D1SolidColorBrush,
     scale: f32,
 }
 
@@ -122,10 +127,6 @@ impl TextRenderer {
             let d2d: ID2D1Factory = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?;
             let wic: IWICImagingFactory =
                 CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER)?;
-            // Imagen mínima hasta el primer cuadro, que la crea del tamaño de la ventana.
-            let canvas =
-                wic.CreateBitmap(1, 1, &GUID_WICPixelFormat32bppPBGRA, WICBitmapCacheOnDemand)?;
-            let (target, brush) = make_target(&d2d, &canvas)?;
             let dwrite: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
             let title = make_format(&dwrite, DWRITE_FONT_WEIGHT_SEMI_BOLD, 14.5 * scale)?;
             let subtitle = make_format(&dwrite, DWRITE_FONT_WEIGHT_REGULAR, 12.0 * scale)?;
@@ -139,10 +140,8 @@ impl TextRenderer {
                 dwrite,
                 d2d,
                 wic,
-                canvas: Some(canvas),
-                canvas_size: (1, 1),
+                canvas: None,
                 drawn: None,
-                target,
                 title,
                 subtitle,
                 label,
@@ -150,7 +149,6 @@ impl TextRenderer {
                 time,
                 lyric_current,
                 lyric_secondary,
-                brush,
                 time_lines: [None, None],
                 seek_line: None,
                 lyric_cache: Vec::with_capacity(LYRIC_CACHE),
@@ -206,6 +204,12 @@ impl TextRenderer {
         t.max(s)
     }
 
+    /// Guarda los formatos y las líneas; al volver a mostrar texto se recupera el lienzo.
+    pub(crate) fn release_canvas(&mut self) {
+        self.canvas = None;
+        self.drawn = None;
+    }
+
     /// Dibuja textos encima de lo que ya hay en el DIB `dib` (BGRA premultiplicado de
     /// `width` x `height`), solo dentro de `zone` (x0, y0, x1, y1): fuera no cambia nada.
     /// `t` = segundos desde que empezó el desplazamiento. Si alguna línea no cabe y se
@@ -225,10 +229,27 @@ impl TextRenderer {
         t: f32,
     ) -> Option<u32> {
         let (x0, y0, x1, y1) = zone;
-        if x0 >= x1 || y0 >= y1 || dib.len() < (width * height * 4) as usize {
+        if x0 >= x1
+            || y0 >= y1
+            || x1 > width
+            || y1 > height
+            || dib.len() < (width * height * 4) as usize
+        {
             return None;
         }
-        if self.canvas_size != (width, height) && self.resize(width, height).is_err() {
+        let required = (x1 - x0, y1 - y0);
+        // Holgura y un umbral de reducción para no reasignar a cada paso de la animación.
+        let capacity = |needed: u32, limit| needed.next_multiple_of(64).min(limit);
+        let size = (capacity(required.0, width), capacity(required.1, height));
+        let area = |(w, h)| u64::from(w) * u64::from(h);
+        let resize = self.canvas.as_ref().is_none_or(|canvas| {
+            canvas.size.0 < required.0
+                || canvas.size.1 < required.1
+                || canvas.size.0 > width
+                || canvas.size.1 > height
+                || area(canvas.size) >= 2 * area(size)
+        });
+        if resize && self.resize(size.0, size.1).is_err() {
             return None;
         }
         // Mismos textos en el mismo lugar que el cuadro anterior (se movió la barra, un botón,
@@ -239,6 +260,12 @@ impl TextRenderer {
             return None;
         }
         self.drawn = None;
+        let TextCanvas { target, brush, .. } = self.canvas.as_ref()?;
+        let transform = Matrix3x2 {
+            M31: -(x0 as f32),
+            M32: -(y0 as f32),
+            ..Matrix3x2::identity()
+        };
         let s = self.scale;
         let title_line = line_for(&self.dwrite, &self.title, &mut self.title_line, title);
         let subtitle_line = line_for(
@@ -262,12 +289,11 @@ impl TextRenderer {
             }
         };
         unsafe {
-            self.target.BeginDraw();
-            self.target.SetTransform(&Matrix3x2::identity());
+            target.BeginDraw();
+            target.SetTransform(&transform);
             // Solo la zona que cambió: se borra el texto del cuadro anterior y se dibuja el nuevo.
-            self.target
-                .PushAxisAlignedClip(&zone_rect, D2D1_ANTIALIAS_MODE_ALIASED);
-            self.target.Clear(Some(&D2D1_COLOR_F::default()));
+            target.PushAxisAlignedClip(&zone_rect, D2D1_ANTIALIAS_MODE_ALIASED);
+            target.Clear(Some(&D2D1_COLOR_F::default()));
 
             for (index, label) in areas.labels.iter().take(self.label_lines.len()).enumerate() {
                 if self.label_styles[index] != label.strong {
@@ -285,8 +311,7 @@ impl TextRenderer {
                     right: label.x + label.w,
                     bottom: label.y + label.h,
                 };
-                self.target
-                    .PushAxisAlignedClip(&clip, D2D1_ANTIALIAS_MODE_ALIASED);
+                target.PushAxisAlignedClip(&clip, D2D1_ANTIALIAS_MODE_ALIASED);
                 if label.scroll {
                     if let Some(line) = line_for(
                         &self.dwrite,
@@ -301,8 +326,8 @@ impl TextRenderer {
                             alpha: label.alpha,
                         };
                         track(draw_line(
-                            &self.target,
-                            &self.brush,
+                            target,
+                            brush,
                             line,
                             &area,
                             label.y,
@@ -314,10 +339,10 @@ impl TextRenderer {
                     }
                 } else {
                     draw_simple_text(
-                        &self.target,
+                        target,
                         &self.dwrite,
                         format,
-                        &self.brush,
+                        brush,
                         &mut self.label_lines[index],
                         &label.text,
                         label.x,
@@ -327,13 +352,13 @@ impl TextRenderer {
                         (0.9, 0.93, 0.98, label.alpha),
                     );
                 }
-                self.target.PopAxisAlignedClip();
+                target.PopAxisAlignedClip();
             }
             // 1. Título y artista
             if let Some(line) = title_line {
                 track(draw_line(
-                    &self.target,
-                    &self.brush,
+                    target,
+                    brush,
                     line,
                     &areas.text,
                     areas.text.cy - 19.0 * s,
@@ -345,8 +370,8 @@ impl TextRenderer {
             }
             if let Some(line) = subtitle_line {
                 track(draw_line(
-                    &self.target,
-                    &self.brush,
+                    target,
+                    brush,
                     line,
                     &areas.text,
                     areas.text.cy + 1.0 * s,
@@ -360,10 +385,10 @@ impl TextRenderer {
             // 2. Tiempos actual y restante
             if let Some(time) = &areas.time {
                 draw_simple_text(
-                    &self.target,
+                    target,
                     &self.dwrite,
                     &self.time,
-                    &self.brush,
+                    brush,
                     &mut self.time_lines[0],
                     &time.current,
                     time.cur_x,
@@ -373,10 +398,10 @@ impl TextRenderer {
                     (0.92, 0.92, 0.92, time.alpha),
                 );
                 draw_simple_text(
-                    &self.target,
+                    target,
                     &self.dwrite,
                     &self.time,
-                    &self.brush,
+                    brush,
                     &mut self.time_lines[1],
                     &time.remaining,
                     time.rem_x,
@@ -402,8 +427,7 @@ impl TextRenderer {
                         right: lx + lw,
                         bottom: cy + lyrics.half_height,
                     };
-                    self.target
-                        .PushAxisAlignedClip(&clip, D2D1_ANTIALIAS_MODE_ALIASED);
+                    target.PushAxisAlignedClip(&clip, D2D1_ANTIALIAS_MODE_ALIASED);
 
                     if let Some(status) = &lyrics.status {
                         if let Some(line) = cached_line(
@@ -414,8 +438,9 @@ impl TextRenderer {
                             status,
                         ) {
                             draw_lyric(
-                                &self.target,
-                                &self.brush,
+                                target,
+                                brush,
+                                &transform,
                                 line,
                                 (lx, cy - 10.0 * s, lw, 24.0 * s),
                                 1.0,
@@ -432,8 +457,8 @@ impl TextRenderer {
                             if text.is_empty() {
                                 // Pausa sin letra: una nota musical para que no quede vacío.
                                 draw_note(
-                                    &self.target,
-                                    &self.brush,
+                                    target,
+                                    brush,
                                     (lx, cy + top * s),
                                     s * size / LYRIC_SIZE,
                                     a * alpha,
@@ -473,8 +498,9 @@ impl TextRenderer {
                                     text,
                                 ) {
                                     draw_lyric(
-                                        &self.target,
-                                        &self.brush,
+                                        target,
+                                        brush,
+                                        &transform,
                                         line,
                                         (lx, cy + top * s, lw, h),
                                         size / natural,
@@ -486,7 +512,7 @@ impl TextRenderer {
                         }
                     }
 
-                    self.target.PopAxisAlignedClip();
+                    target.PopAxisAlignedClip();
                 }
             }
 
@@ -505,19 +531,19 @@ impl TextRenderer {
                         bottom: y + h,
                     };
                     // El gris de los menús: se distingue sobre el negro de la isla.
-                    self.brush.SetColor(&D2D1_COLOR_F {
+                    brush.SetColor(&D2D1_COLOR_F {
                         r: 44.0 / 255.0,
                         g: 44.0 / 255.0,
                         b: 48.0 / 255.0,
                         a: tip.alpha,
                     });
-                    self.target.FillRoundedRectangle(
+                    target.FillRoundedRectangle(
                         &D2D1_ROUNDED_RECT {
                             rect,
                             radiusX: 6.0 * s,
                             radiusY: 6.0 * s,
                         },
-                        &self.brush,
+                        brush,
                     );
                     // Centrado en el globo, a lo ancho y a lo alto.
                     let _ = line.layout.SetMaxWidth(w);
@@ -526,25 +552,25 @@ impl TextRenderer {
                     let _ = line
                         .layout
                         .SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-                    self.brush.SetColor(&D2D1_COLOR_F {
+                    brush.SetColor(&D2D1_COLOR_F {
                         r: 1.0,
                         g: 1.0,
                         b: 1.0,
                         a: tip.alpha,
                     });
-                    self.target.DrawTextLayout(
+                    target.DrawTextLayout(
                         Vector2 { X: x, Y: y },
                         &line.layout,
-                        &self.brush,
+                        brush,
                         D2D1_DRAW_TEXT_OPTIONS_NONE,
                     );
                 }
             }
 
-            self.target.PopAxisAlignedClip();
-            if self.target.EndDraw(None, None).is_err() {
+            target.PopAxisAlignedClip();
+            if target.EndDraw(None, None).is_err() {
                 // El destino se perdió (pasa muy rara vez): se vuelve a crear en el próximo cuadro.
-                self.canvas_size = (0, 0);
+                self.release_canvas();
                 return still.map(|_| SCROLL_FRAME_MS.0);
             }
         }
@@ -564,7 +590,7 @@ impl TextRenderer {
         })
     }
 
-    /// Crea la imagen del texto (y su destino de dibujo) del tamaño de la ventana.
+    /// Crea la imagen del texto (y su destino de dibujo) con espacio para la zona de texto.
     fn resize(&mut self, width: u32, height: u32) -> Result<()> {
         unsafe {
             let canvas = self.wic.CreateBitmap(
@@ -574,10 +600,12 @@ impl TextRenderer {
                 WICBitmapCacheOnDemand,
             )?;
             let (target, brush) = make_target(&self.d2d, &canvas)?;
-            self.canvas = Some(canvas);
-            self.target = target;
-            self.brush = brush;
-            self.canvas_size = (width, height);
+            self.canvas = Some(TextCanvas {
+                bitmap: canvas,
+                target,
+                brush,
+                size: (width, height),
+            });
             self.drawn = None;
         }
         Ok(())
@@ -588,13 +616,13 @@ impl TextRenderer {
     fn blend_into(&self, dib: &mut [u8], width: u32, (x0, y0, x1, y1): (u32, u32, u32, u32)) {
         let Some(canvas) = &self.canvas else { return };
         let rect = WICRect {
-            X: x0 as i32,
-            Y: y0 as i32,
+            X: 0,
+            Y: 0,
             Width: (x1 - x0) as i32,
             Height: (y1 - y0) as i32,
         };
         unsafe {
-            let Ok(lock) = canvas.Lock(&rect, WICBitmapLockRead.0 as u32) else {
+            let Ok(lock) = canvas.bitmap.Lock(&rect, WICBitmapLockRead.0 as u32) else {
                 return;
             };
             let (Ok(stride), mut size, mut data) = (lock.GetStride(), 0u32, std::ptr::null_mut())
@@ -827,9 +855,11 @@ fn cached_line<'a>(
 /// izquierda: el tamaño cambia de forma continua sin volver a maquetar en cada cuadro.
 /// `sung`: (hasta dónde va cantado, opacidad de esa parte), que se vuelve a dibujar encima
 /// recortada a lo cantado.
+#[allow(clippy::too_many_arguments)]
 fn draw_lyric(
     target: &ID2D1RenderTarget,
     brush: &ID2D1SolidColorBrush,
+    transform: &Matrix3x2,
     line: &Line,
     (x, y, w, h): (f32, f32, f32, f32),
     zoom: f32,
@@ -849,8 +879,8 @@ fn draw_lyric(
             M12: 0.0,
             M21: 0.0,
             M22: zoom,
-            M31: x * (1.0 - zoom),
-            M32: y * (1.0 - zoom),
+            M31: transform.M31 + x * (1.0 - zoom),
+            M32: transform.M32 + y * (1.0 - zoom),
         });
         target.DrawTextLayout(
             Vector2 { X: x, Y: y },
@@ -881,7 +911,7 @@ fn draw_lyric(
                 target.PopAxisAlignedClip();
             }
         }
-        target.SetTransform(&Matrix3x2::identity());
+        target.SetTransform(transform);
     }
 }
 
@@ -1169,6 +1199,23 @@ mod tests {
                 .iter()
                 .all(|px| px[3] == 0)),
             "el verso no invade el siguiente"
+        );
+        // El origen local del lienzo no cambia la posición del texto ni el recorte cantado.
+        renderer.release_canvas();
+        let mut cropped = vec![0; dib.len()];
+        renderer.draw(
+            &mut cropped,
+            width,
+            height,
+            (4, 32, 112, 100),
+            &areas,
+            "",
+            "",
+            0.0,
+        );
+        assert!(
+            cropped == dib,
+            "el recorte debe conservar los mismos píxeles"
         );
         drop(renderer);
         unsafe { CoUninitialize() };

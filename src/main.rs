@@ -2598,12 +2598,18 @@ impl App {
                 self.surface.dib(),
                 sw,
                 sh,
-                (dirty.x0, dirty.y0, dirty.x1, dirty.y1),
+                (drawn.x0, drawn.y0, drawn.x1, drawn.y1),
                 &areas,
                 &title,
                 &subtitle,
                 self.scroll_start.elapsed().as_secs_f32(),
             );
+        } else if let Some(Some(text)) = self
+            .text
+            .get_mut()
+            .filter(|_| settled && height == surface_height(0, self.scale, self.max_surface_height))
+        {
+            text.release_canvas();
         }
 
         let size = SIZE {
