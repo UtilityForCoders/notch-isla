@@ -15,10 +15,10 @@ use tiny_skia::{
 const RESTING: (f32, f32, f32) = (88.0, 3.0, 1.5);
 
 /// Expandida compacta (sin letra): tarjeta flotante con reproductor.
-pub const EXPANDED_COMPACT: (f32, f32, f32) = (284.0, 176.0, 24.0);
+pub const EXPANDED_COMPACT: (f32, f32, f32) = (264.0, 176.0, 24.0);
 
 /// Expandida amplia (con letra sincronizada): tarjeta completa con reproductor y letra.
-pub const EXPANDED_LYRICS: (f32, f32, f32) = (552.0, EXPANDED_COMPACT.1, 24.0);
+pub const EXPANDED_LYRICS: (f32, f32, f32) = (500.0, EXPANDED_COMPACT.1, 24.0);
 
 /// Con un aviso del sistema (salida de audio, temporizador, atajo, actualización): una sola
 /// fila con el ícono y los textos, sin el espacio del reproductor.
@@ -276,8 +276,6 @@ pub struct Controls {
     pub accent: [u8; 3],
     /// Fracción reproducida, o `None` si la app no informa el avance (no se dibuja la barra).
     pub progress: Option<f32>,
-    /// Nivel de volumen (0 a 1) y opacidad de desvanecimiento (0 a 1) mientras se cambia con la rueda.
-    pub volume: Option<(f32, f32)>,
     /// (posición de la app mostrada, cantidad de apps con música): con 2 o más se dibujan
     /// puntos bajo la carátula.
     pub sessions: (usize, usize),
@@ -871,19 +869,13 @@ pub fn draw(
                 });
             }
         }
-        if let Some((vol_level, fade)) = c.volume {
-            let combined_alpha = g.alpha * fade;
-            if combined_alpha > 0.005 {
-                draw_vertical_volume(pixmap, &g, s, vol_level, combined_alpha);
-            }
-        }
     }
 
     // Áreas de texto: título/artista
     let (text_x, text_w) = text_column(&g, s);
     let title_area = TextArea {
         x: text_x,
-        w: (text_w - if controls.is_some() { 32.0 * s } else { 0.0 }).max(0.0),
+        w: (text_w - if controls.is_some() { 26.0 * s } else { 0.0 }).max(0.0),
         cy: g.y0 + (COVER_PAD_TOP + HEADER_HEIGHT + COVER_SIZE / 2.0) * s,
         alpha: g.alpha,
     };
@@ -1426,34 +1418,6 @@ fn draw_bars(pixmap: &mut Pixmap, left: f32, cy: f32, s: f32, c: &Controls, t: f
     }
 }
 
-/// Indicador de volumen vertical en el espacio libre a la derecha del reproductor.
-/// Una línea vertical tipo slider cápsula que aparece al girar la rueda del mouse.
-fn draw_vertical_volume(pixmap: &mut Pixmap, g: &Geometry, s: f32, level: f32, alpha: f32) {
-    let bar_w = 4.0 * s;
-    let bar_h = 56.0 * s;
-    let vx = g.x0 + (EXPANDED_COMPACT.0 - 10.0) * s;
-    let vy = g.cy() - bar_h / 2.0;
-    let radius = bar_w / 2.0;
-
-    let mut paint = Paint {
-        anti_alias: true,
-        ..Default::default()
-    };
-
-    // Pista vertical de fondo (tenue y elegante)
-    paint.set_color_rgba8(255, 255, 255, (alpha * 48.0) as u8);
-    fill_rounded_rect(pixmap, &paint, vx, vy, bar_w, bar_h, radius);
-
-    // Relleno de volumen (sube desde abajo)
-    let level = level.clamp(0.0, 1.0);
-    if level > 0.001 {
-        let fill_h = (bar_h * level).max(bar_w);
-        let fill_y = vy + bar_h - fill_h;
-        paint.set_color_rgba8(255, 255, 255, (alpha * 240.0) as u8);
-        fill_rounded_rect(pixmap, &paint, vx, fill_y, bar_w, fill_h, radius);
-    }
-}
-
 /// Íconos blancos del reproductor; el botón de letra indica si está activa.
 /// El círculo tenue de fondo resalta el botón bajo el mouse.
 #[allow(clippy::too_many_arguments)]
@@ -1755,7 +1719,6 @@ mod tests {
             seek_hover: None,
             accent: [200, 120, 60],
             progress: Some(0.4),
-            volume: None,
             sessions: (0, 1),
             cover_hovered: false,
             pressed: None,

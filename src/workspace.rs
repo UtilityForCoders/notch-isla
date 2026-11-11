@@ -83,10 +83,10 @@ fn regions(width: f32, page: Page) -> Vec<(Hit, [f32; 4])> {
                 Hit::Share(ShareAction::Clipboard),
                 [20.0, 84.0, width - 40.0, 32.0],
             ),
-            (Hit::Share(ShareAction::Pair), [20.0, 122.0, 88.0, 28.0]),
+            (Hit::Share(ShareAction::Pair), [20.0, 122.0, 78.0, 28.0]),
             (
                 Hit::Share(ShareAction::Devices),
-                [114.0, 122.0, width - 176.0, 28.0],
+                [104.0, 122.0, width - 166.0, 28.0],
             ),
             (
                 Hit::Share(ShareAction::Receive),
@@ -258,6 +258,43 @@ pub fn draw(
     labels
 }
 
+pub fn draw_volume(
+    pixmap: &mut Pixmap,
+    bounds: (f32, f32, f32, f32, f32),
+    scale: f32,
+    alpha: f32,
+    level: f32,
+    per_app: bool,
+    color: crate::settings::IslandColor,
+) -> LabelArea {
+    let (left, top, _, _, _) = bounds;
+    let x = left + (TAB_X + 2.0 * TAB_WIDTH + 12.0) * scale;
+    let y = top + 33.0 * scale;
+    let width = 96.0 * scale;
+    let height = 3.0 * scale;
+    let level = level.clamp(0.0, 1.0);
+    let mut paint = Paint {
+        anti_alias: true,
+        ..Default::default()
+    };
+    paint.set_color_rgba8(255, 255, 255, (alpha * 55.0) as u8);
+    island::fill_rounded_rect(pixmap, &paint, x, y, width, height, height / 2.0);
+    let [r, g, b] = color.blend(255, 42);
+    paint.set_color_rgba8(r, g, b, (alpha * 255.0) as u8);
+    island::fill_rounded_rect(pixmap, &paint, x, y, width * level, height, height / 2.0);
+    let source = if per_app { "App" } else { "General" };
+    LabelArea {
+        text: format!("{source} · {:.0} %", level * 100.0),
+        x,
+        y: top + 12.0 * scale,
+        w: width,
+        h: 18.0 * scale,
+        alpha,
+        strong: false,
+        scroll: false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -294,16 +331,17 @@ mod tests {
     #[test]
     fn pestañas_y_acciones_coinciden_a_distintos_dpi() {
         for scale in [1.0, 1.25, 1.5, 2.0] {
+            let width = island::EXPANDED_COMPACT.0;
             let bounds = (
                 80.0,
                 8.0,
-                284.0 * scale,
+                width * scale,
                 island::EXPANDED_COMPACT.1 * scale,
                 24.0 * scale,
             );
-            let regions = regions(284.0, Page::Share);
+            let regions = regions(width, Page::Share);
             for (index, (_, [x, y, w, h])) in regions.iter().enumerate() {
-                assert!(*x >= 16.0 && x + w <= 284.0 - 16.0);
+                assert!(*x >= 16.0 && x + w <= width - 16.0);
                 assert!(*y >= 12.0 && y + h <= island::EXPANDED_COMPACT.1 - 16.0);
                 for (_, [ox, oy, ow, oh]) in &regions[index + 1..] {
                     assert!(x + w <= *ox || ox + ow <= *x || y + h <= *oy || oy + oh <= *y);
@@ -328,6 +366,19 @@ mod tests {
                 bounds.1 + 100.0 * scale
             )
             .is_none());
+            let mut image = Pixmap::new(640, 400).unwrap();
+            let volume = draw_volume(
+                &mut image,
+                bounds,
+                scale,
+                1.0,
+                0.68,
+                false,
+                crate::settings::IslandColor::default(),
+            );
+            assert_eq!(volume.text, "General · 68 %");
+            assert!(volume.x > bounds.0 + (TAB_X + 2.0 * TAB_WIDTH) * scale);
+            assert!(volume.x + volume.w < bounds.0 + (width - 64.0) * scale);
         }
     }
 }

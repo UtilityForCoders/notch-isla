@@ -2174,7 +2174,6 @@ impl App {
             progress: m
                 .timeline
                 .map(|t| self.dragging.unwrap_or_else(|| t.progress(m.playing))),
-            volume,
             sessions: m.sessions,
             cover_hovered: self.cover_hovered,
             lyrics_active: self.settings.lyrics_island && self.has_current_lyrics(),
@@ -2361,7 +2360,7 @@ impl App {
                 } else {
                     workspace::ShareState::default()
                 };
-                let labels = workspace::draw(
+                let mut labels = workspace::draw(
                     &mut self.surface.pixmap,
                     bounds,
                     self.scale,
@@ -2371,6 +2370,20 @@ impl App {
                     &panel,
                     self.settings.island_color,
                 );
+                if let Some((level, fade)) = volume.filter(|_| {
+                    self.page == workspace::Page::Music
+                        && bounds.2 >= (island::EXPANDED_COMPACT.0 - 0.5) * self.scale
+                }) {
+                    labels.push(workspace::draw_volume(
+                        &mut self.surface.pixmap,
+                        bounds,
+                        self.scale,
+                        alpha * fade,
+                        level,
+                        self.volume_app,
+                        self.settings.island_color,
+                    ));
+                }
                 if let Some(areas) = areas.as_mut() {
                     areas.labels = labels;
                 }
@@ -2496,11 +2509,7 @@ impl App {
                         &m.title
                     };
                     let mut subtitle = m.artist.clone();
-                    if let Some((level, _)) = volume {
-                        let kind = if self.volume_app { "app" } else { "general" };
-                        let percent = (level * 100.0).round() as u32;
-                        subtitle = format!("Volumen {kind} {percent} %");
-                    } else if let (true, Some(u)) = (self.update_hovered, &self.update) {
+                    if let (true, Some(u)) = (self.update_hovered, &self.update) {
                         // Explica qué hace el botón azul antes de hacer clic.
                         subtitle = u.menu_label();
                     } else if !m.playing {
@@ -4345,7 +4354,6 @@ mod tests {
                     seek_hover: None,
                     accent: [200, 120, 60],
                     progress: Some(0.4),
-                    volume: None,
                     sessions: (0, 1),
                     cover_hovered: false,
                     pressed: None,
