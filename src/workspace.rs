@@ -32,6 +32,12 @@ const TAB_Y: f32 = 108.0;
 const EMPTY_TAB_Y: f32 = 16.0;
 const TAB_WIDTH: f32 = 36.0;
 const TAB_HEIGHT: f32 = 28.0;
+pub const SHARE_HEIGHT: f32 = 184.0;
+const SHARE_TAB_Y: f32 = SHARE_HEIGHT - 40.0;
+
+pub fn share_tab_center_y() -> f32 {
+    SHARE_TAB_Y + TAB_HEIGHT / 2.0
+}
 
 pub fn tab_center_y(empty_music: bool) -> f32 {
     (if empty_music { EMPTY_TAB_Y } else { TAB_Y }) + TAB_HEIGHT / 2.0
@@ -71,7 +77,11 @@ fn fill_tab(pixmap: &mut Pixmap, paint: &Paint, left: f32, top: f32, scale: f32,
 }
 
 fn regions(width: f32, page: Page, empty_music: bool) -> Vec<(Hit, [f32; 4])> {
-    let tab_y = tab_center_y(empty_music) - TAB_HEIGHT / 2.0;
+    let tab_y = if page == Page::Share {
+        share_tab_center_y() - TAB_HEIGHT / 2.0
+    } else {
+        tab_center_y(empty_music) - TAB_HEIGHT / 2.0
+    };
     let mut regions = vec![
         (Hit::Tab(Page::Music), [TAB_X, tab_y, TAB_WIDTH, TAB_HEIGHT]),
         (
@@ -83,20 +93,20 @@ fn regions(width: f32, page: Page, empty_music: bool) -> Vec<(Hit, [f32; 4])> {
         regions.extend([
             (
                 Hit::Share(ShareAction::Files),
-                [20.0, 10.0, width - 88.0, 28.0],
+                [20.0, 38.0, width - 40.0, 30.0],
             ),
             (
                 Hit::Share(ShareAction::Clipboard),
-                [20.0, 42.0, width - 40.0, 28.0],
+                [20.0, 74.0, width - 40.0, 30.0],
             ),
-            (Hit::Share(ShareAction::Pair), [20.0, 76.0, 78.0, 26.0]),
+            (Hit::Share(ShareAction::Pair), [20.0, 111.0, 100.0, 27.0]),
             (
                 Hit::Share(ShareAction::Devices),
-                [104.0, 76.0, width - 166.0, 26.0],
+                [126.0, 111.0, width - 146.0, 27.0],
             ),
             (
                 Hit::Share(ShareAction::Receive),
-                [width - 56.0, 76.0, 36.0, 26.0],
+                [width - 56.0, SHARE_TAB_Y, 36.0, 28.0],
             ),
         ]);
     }
@@ -255,9 +265,9 @@ pub fn draw(
         };
         labels.push(LabelArea {
             text: status.to_string(),
-            x: left + 100.0 * scale,
-            y: top + (TAB_Y + 6.0) * scale,
-            w: width - 120.0 * scale,
+            x: left + 20.0 * scale,
+            y: top + 8.0 * scale,
+            w: width - 92.0 * scale,
             h: 16.0 * scale,
             alpha: alpha * 0.7,
             strong: false,
@@ -300,15 +310,20 @@ mod tests {
     #[test]
     fn las_pestañas_cubren_la_union_en_ambos_bordes() {
         for scale in [1.0, 1.25, 1.5, 2.0] {
-            let bounds = (3.3, 4.2, 284.0 * scale, 176.0 * scale, 24.0 * scale);
+            let bounds = (3.3, 4.2, 284.0 * scale, SHARE_HEIGHT * scale, 24.0 * scale);
             let seam = (bounds.0 + (TAB_X + TAB_WIDTH) * scale).round() as u32;
-            let top = (bounds.1 + TAB_Y * scale).round() as u32;
-            let bottom = (bounds.1 + (TAB_Y + TAB_HEIGHT) * scale).round() as u32 - 1;
             for (page, other, expected) in [
                 (Page::Music, Page::Share, [185, 220]),
                 (Page::Share, Page::Music, [220, 185]),
             ] {
-                let mut image = Pixmap::new(600, 360).unwrap();
+                let tab_y = if page == Page::Share {
+                    SHARE_TAB_Y
+                } else {
+                    TAB_Y
+                };
+                let top = (bounds.1 + tab_y * scale).round() as u32;
+                let bottom = (bounds.1 + (tab_y + TAB_HEIGHT) * scale).round() as u32 - 1;
+                let mut image = Pixmap::new(600, 400).unwrap();
                 draw(
                     &mut image,
                     bounds,
@@ -331,17 +346,11 @@ mod tests {
     fn pestañas_y_acciones_coinciden_a_distintos_dpi() {
         for scale in [1.0, 1.25, 1.5, 2.0] {
             let width = island::EXPANDED_COMPACT.0;
-            let bounds = (
-                80.0,
-                8.0,
-                width * scale,
-                island::EXPANDED_COMPACT.1 * scale,
-                24.0 * scale,
-            );
+            let bounds = (80.0, 8.0, width * scale, SHARE_HEIGHT * scale, 24.0 * scale);
             let regions = regions(width, Page::Share, false);
             for (index, (_, [x, y, w, h])) in regions.iter().enumerate() {
                 assert!(*x >= 16.0 && x + w <= width - 16.0);
-                assert!(*y >= 10.0 && y + h <= island::EXPANDED_COMPACT.1 - 12.0);
+                assert!(*y >= 10.0 && y + h <= SHARE_HEIGHT - 12.0);
                 for (_, [ox, oy, ow, oh]) in &regions[index + 1..] {
                     assert!(x + w <= *ox || ox + ow <= *x || y + h <= *oy || oy + oh <= *y);
                 }

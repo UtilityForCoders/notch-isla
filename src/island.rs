@@ -26,6 +26,7 @@ pub struct Shape {
     pub lyrics: f32,
     pub notice: f32,
     pub empty_music: bool,
+    pub share: bool,
 }
 
 /// Con un aviso del sistema (salida de audio, temporizador, atajo, actualización): una sola
@@ -65,7 +66,7 @@ const BUTTON_RADIUS: f32 = 15.0;
 pub fn window_size() -> (f32, f32) {
     (
         EXPANDED_LYRICS.0 * OVERSHOOT + 16.0,
-        TOP_GAP + EXPANDED_LYRICS.1 * OVERSHOOT + 16.0,
+        TOP_GAP + crate::workspace::SHARE_HEIGHT.max(EXPANDED_LYRICS.1) * OVERSHOOT + 16.0,
     )
 }
 
@@ -534,7 +535,9 @@ fn expanded_size(shape: Shape) -> (f32, f32) {
     (
         toward_notice(music_w, NOTICE.0),
         toward_notice(
-            if shape.empty_music {
+            if shape.share {
+                crate::workspace::SHARE_HEIGHT
+            } else if shape.empty_music {
                 EMPTY_MUSIC_HEIGHT
             } else {
                 EXPANDED_COMPACT.1

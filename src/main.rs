@@ -2114,6 +2114,7 @@ impl App {
             lyrics: self.lyrics_spring.value,
             notice: self.notice_spring.value,
             empty_music: self.page == workspace::Page::Music && self.media.is_none(),
+            share: self.page == workspace::Page::Share,
         }
     }
 
@@ -3865,11 +3866,11 @@ mod tests {
             assert!(
                 app.hit_at(
                     bounds.0 + 40.0 * app.scale,
-                    bounds.1 + workspace::tab_center_y(false) * app.scale
+                    bounds.1 + workspace::share_tab_center_y() * app.scale
                 ) == Some(Hit::Tab(workspace::Page::Music))
             );
             assert!(
-                app.hit_at(bounds.0 + 70.0 * app.scale, bounds.1 + 24.0 * app.scale)
+                app.hit_at(bounds.0 + 70.0 * app.scale, bounds.1 + 53.0 * app.scale)
                     == Some(Hit::Share(workspace::ShareAction::Files))
             );
             app.battery_low = true;
