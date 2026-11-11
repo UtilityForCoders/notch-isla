@@ -57,6 +57,29 @@ fn compositor() -> Result<Compositor> {
     })
 }
 
+/// Prepara el fondo solo cuando va a verse. Un fallo deja disponible el modo opaco.
+#[derive(Default)]
+pub struct LazyBackdrop(OnceCell<Option<Backdrop>>);
+
+impl LazyBackdrop {
+    pub fn get_or_create(&mut self) -> Option<&mut Backdrop> {
+        self.0.get_or_init(|| Backdrop::new().ok());
+        self.as_mut()
+    }
+
+    pub fn as_mut(&mut self) -> Option<&mut Backdrop> {
+        self.0.get_mut()?.as_mut()
+    }
+
+    pub fn as_ref(&self) -> Option<&Backdrop> {
+        self.0.get()?.as_ref()
+    }
+
+    pub fn clear(&mut self) {
+        self.0.take();
+    }
+}
+
 fn enable_host_backdrop(hwnd: HWND) -> Result<()> {
     let enabled = BOOL(1);
     unsafe {
@@ -189,7 +212,7 @@ pub struct Backdrop {
 }
 
 impl Backdrop {
-    pub fn new() -> Result<Self> {
+    fn new() -> Result<Self> {
         let compositor = compositor()?;
         unsafe {
             let instance = GetModuleHandleW(None)?;

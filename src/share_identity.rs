@@ -18,6 +18,14 @@ const MAX_STATE: u64 = 256 * 1024;
 pub struct TrustedDevice {
     pub name: String,
     pub certificate: Vec<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    alias: Option<String>,
+}
+
+impl TrustedDevice {
+    pub fn display_name(&self) -> &str {
+        self.alias.as_deref().unwrap_or(&self.name)
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -127,7 +135,11 @@ impl Store {
                 }
                 let mut roots = rustls::RootCertStore::empty();
                 roots.add(CertificateDer::from(certificate.clone()))?;
-                state.devices.push(TrustedDevice { name, certificate });
+                state.devices.push(TrustedDevice {
+                    name,
+                    certificate,
+                    alias: None,
+                });
             }
             Ok(())
         })
@@ -138,6 +150,23 @@ impl Store {
             state
                 .devices
                 .retain(|device| device.certificate != certificate);
+            Ok(())
+        })
+    }
+
+    /// El alias se guarda localmente y la confianza sigue asociada al certificado.
+    pub fn rename(&self, certificate: &[u8], alias: &str) -> Result<()> {
+        let alias = alias.trim();
+        if alias.chars().count() > 48 || alias.chars().any(char::is_control) {
+            return Err("Usa un nombre de hasta 48 caracteres, sin saltos de línea.".into());
+        }
+        self.update(|state| {
+            let device = state
+                .devices
+                .iter_mut()
+                .find(|device| device.certificate == certificate)
+                .ok_or("El equipo ya no está vinculado.")?;
+            device.alias = (!alias.is_empty()).then(|| alias.to_owned());
             Ok(())
         })
     }
@@ -237,8 +266,18 @@ mod tests {
         let restored = Store::at(path.clone())?;
         assert_eq!(restored.credentials().0, identity);
         assert!(restored.enabled());
-        assert_eq!(restored.known(&cert).unwrap().name, "Mi portátil");
+        assert_eq!(restored.known(&cert).unwrap().display_name(), "Mi portátil");
+        restored.rename(&cert, "  PC del estudio  ")?;
+        restored.remember("DESKTOP-123".into(), cert.clone())?;
+        let restored = Store::at(path.clone())?;
+        assert_eq!(
+            restored.known(&cert).unwrap().display_name(),
+            "PC del estudio"
+        );
+        restored.rename(&cert, "")?;
+        assert_eq!(restored.known(&cert).unwrap().display_name(), "DESKTOP-123");
         restored.forget(&cert)?;
+        assert!(restored.rename(&cert, "No vinculado").is_err());
         assert!(Store::at(path)?.known(&cert).is_none());
         Ok(())
     }

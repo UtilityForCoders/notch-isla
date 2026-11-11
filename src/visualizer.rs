@@ -6,15 +6,19 @@
 //! segundo separa graves, medios y agudos con una transformada de Fourier y deja los 4 niveles
 //! listos para la isla. El audio se procesa en memoria y se descarta: no se guarda ni se envía.
 //!
-//! Solo corre mientras se ven las barras (música sonando, isla contraída y a la vista); en
-//! cualquier otro caso el hilo termina y la CPU vuelve a 0 %.
+//! Con "Seguir la voz" activado, el mismo hilo busca además cuándo empieza cada sílaba cantada
+//! (`VoiceDetector`), para que la letra avance con la voz.
+//!
+//! Solo corre mientras se ven las barras (música sonando, reproductor extendido y a la vista) o
+//! la letra guiada por la voz; en cualquier otro caso el hilo termina y la CPU vuelve a 0 %.
 
+use std::collections::VecDeque;
 use std::f32::consts::PI;
 use std::mem::ManuallyDrop;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use windows::core::{implement, Interface, Result, HRESULT};
 use windows::Win32::Foundation::E_FAIL;
@@ -66,13 +70,22 @@ struct Shared {
     /// La captura arrancó (si no, la isla usa la animación de siempre).
     running: AtomicBool,
     stop: AtomicBool,
+    /// Buscar los inicios de sílaba (cuesta un poco más de CPU, solo con la opción activa).
+    voice: AtomicBool,
+    /// Momentos recientes en que empezó una sílaba cantada (los últimos `MAX_ONSETS`).
+    onsets: Mutex<VecDeque<Instant>>,
 }
+
+/// Inicios de sílaba que se guardan: sobra para el verso que se está cantando.
+const MAX_ONSETS: usize = 64;
 
 /// Controla la captura: se le dice qué app escuchar (o ninguna) en cada cuadro.
 #[derive(Default)]
 pub struct Visualizer {
     /// App que se está escuchando y sus niveles.
     current: Option<(String, Arc<Shared>)>,
+    /// Buscar los inicios de sílaba (se pasa a cada captura nueva).
+    voice: bool,
 }
 
 impl Visualizer {
@@ -90,6 +103,8 @@ impl Visualizer {
             levels: Default::default(),
             running: AtomicBool::new(false),
             stop: AtomicBool::new(false),
+            voice: AtomicBool::new(self.voice),
+            onsets: Mutex::new(VecDeque::with_capacity(MAX_ONSETS)),
         });
         let thread_shared = shared.clone();
         let id = app_id.to_string();
@@ -98,6 +113,30 @@ impl Visualizer {
             thread_shared.running.store(false, Ordering::SeqCst);
         });
         self.current = Some((app_id.to_string(), shared));
+    }
+
+    /// Activa o apaga la búsqueda de inicios de sílaba (también en la captura en curso).
+    pub fn set_voice(&mut self, on: bool) {
+        if self.voice == on {
+            return;
+        }
+        self.voice = on;
+        if let Some((_, shared)) = &self.current {
+            if let Ok(mut onsets) = shared.onsets.lock() {
+                onsets.clear();
+            }
+            shared.voice.store(on, Ordering::SeqCst);
+        }
+    }
+
+    /// Momentos recientes en que empezó una sílaba cantada, del más viejo al más nuevo, o
+    /// `None` si no se están buscando (sin captura o con la opción apagada).
+    pub fn onsets(&self) -> Option<Vec<Instant>> {
+        let (_, shared) = self.current.as_ref()?;
+        if !self.voice || !shared.running.load(Ordering::SeqCst) {
+            return None;
+        }
+        Some(shared.onsets.lock().ok()?.iter().copied().collect())
     }
 
     /// Niveles actuales, o `None` si no hay captura funcionando.
@@ -174,9 +213,12 @@ fn capture(app_id: &str, shared: &Shared) -> Result<()> {
 
     let mut analyzer = Analyzer::new();
     let mut samples: Vec<f32> = Vec::with_capacity(FFT * 4);
+    let mut voice = VoiceDetector::new();
+    let mut stereo: Vec<[f32; 2]> = Vec::with_capacity(FFT * 4);
     while !shared.stop.load(Ordering::SeqCst) {
         std::thread::sleep(TICK);
         let mut got = false;
+        let listen_voice = shared.voice.load(Ordering::Relaxed);
         unsafe {
             while reader.GetNextPacketSize().unwrap_or(0) > 0 {
                 let mut data = std::ptr::null_mut();
@@ -191,6 +233,9 @@ fn capture(app_id: &str, shared: &Shared) -> Result<()> {
                 let silent = flags & AUDCLNT_BUFFERFLAGS_SILENT.0 as u32 != 0;
                 if silent || data.is_null() {
                     samples.extend(std::iter::repeat_n(0.0, frames as usize));
+                    if listen_voice {
+                        stereo.extend(std::iter::repeat_n([0.0; 2], frames as usize));
+                    }
                 } else {
                     // Estéreo de 16 bits: se promedian los dos canales.
                     let pcm = std::slice::from_raw_parts(data as *const i16, frames as usize * 2);
@@ -200,6 +245,14 @@ fn capture(app_id: &str, shared: &Shared) -> Result<()> {
                             .iter()
                             .map(|[l, r]| (*l as f32 + *r as f32) / 65536.0),
                     );
+                    if listen_voice {
+                        stereo.extend(
+                            pcm.as_chunks::<2>()
+                                .0
+                                .iter()
+                                .map(|[l, r]| [*l as f32 / 32768.0, *r as f32 / 32768.0]),
+                        );
+                    }
                 }
                 let _ = reader.ReleaseBuffer(frames);
                 got = true;
@@ -217,6 +270,27 @@ fn capture(app_id: &str, shared: &Shared) -> Result<()> {
         };
         for (slot, level) in shared.levels.iter().zip(levels) {
             slot.store(level.to_bits(), Ordering::Relaxed);
+        }
+
+        if !listen_voice {
+            stereo.clear();
+            continue;
+        }
+        // Cada `HOP` muestras, un análisis de las últimas `FFT`. La muestra más nueva sonó
+        // recién; las demás, tantas muestras antes.
+        let now = Instant::now();
+        while stereo.len() >= FFT {
+            if let Some(hops_ago) = voice.step(&stereo[..FFT]) {
+                let pending = stereo.len() - FFT + hops_ago * HOP + HOP / 2;
+                let at = now - Duration::from_secs_f32(pending as f32 / RATE as f32);
+                if let Ok(mut onsets) = shared.onsets.lock() {
+                    if onsets.len() == MAX_ONSETS {
+                        onsets.pop_front();
+                    }
+                    onsets.push_back(at);
+                }
+            }
+            stereo.drain(..HOP);
         }
     }
     unsafe {
@@ -376,6 +450,140 @@ impl Analyzer {
     }
 }
 
+/// Paso entre análisis de la voz: 512 muestras son 11,6 ms.
+const HOP: usize = 512;
+/// Banda de la voz cantada en Hz (fundamental y primeros formantes).
+const VOICE_BAND: (f32, f32) = (250.0, 3000.0);
+/// Análisis mínimos entre dos inicios de sílaba (10 son 116 ms: hasta ~8 sílabas por segundo).
+const MIN_ONSET_GAP: u32 = 10;
+
+/// Umbrales del detector de voz.
+#[derive(Clone, Copy, Debug)]
+struct Tuning {
+    /// Cuántas veces el promedio reciente del flujo tiene que superar un inicio.
+    ratio: f32,
+    /// Flujo mínimo de un inicio, solo contra el ruido numérico: un mínimo mayor depende del
+    /// volumen (con música real, 0,02 dejaba pasar una sílaba de cada ocho).
+    floor: f32,
+    /// Energía mínima de la voz respecto de su pico reciente para considerar que canta.
+    gate: f32,
+    /// Cuánto tiene que subir la energía de la voz en un inicio.
+    rise: f32,
+}
+
+const TUNING: Tuning = Tuning {
+    ratio: 1.8,
+    floor: 0.002,
+    gate: 0.12,
+    rise: 1.1,
+};
+
+/// Busca cuándo empieza cada sílaba cantada.
+///
+/// La voz suele ir al centro de la mezcla (igual en los dos canales) y muchos instrumentos a
+/// los lados: por cada frecuencia, lo que sobra del centro (M = (L + R) / 2) por encima de los
+/// lados (S = (L - R) / 2) se toma como voz. Un inicio de sílaba es un salto de esa energía en
+/// la banda de la voz (flujo espectral) bien por encima de su promedio reciente, y que sea un
+/// máximo local. Con audio en mono no hay lados: se usa la mezcla entera de esa banda.
+struct VoiceDetector {
+    window: Vec<f32>,
+    mid: (Vec<f32>, Vec<f32>),
+    side: (Vec<f32>, Vec<f32>),
+    /// Energía de la voz por frecuencia en el análisis anterior (comprimida con logaritmo).
+    prev: Vec<f32>,
+    /// Flujo de los dos análisis anteriores: un inicio se confirma un análisis después.
+    flux: [f32; 2],
+    /// Promedio reciente del flujo, para el umbral adaptable.
+    average: f32,
+    /// Pico reciente de la energía de la voz: muy por debajo de él se considera que no canta.
+    peak: f32,
+    /// Energía de la voz en los dos análisis anteriores.
+    energy: [f32; 2],
+    /// Análisis desde el último inicio.
+    since: u32,
+    tuning: Tuning,
+}
+
+impl VoiceDetector {
+    fn new() -> Self {
+        let hz_per_bin = RATE as f32 / FFT as f32;
+        let bins = (VOICE_BAND.1 / hz_per_bin) as usize - (VOICE_BAND.0 / hz_per_bin) as usize;
+        Self {
+            window: (0..FFT)
+                .map(|i| 0.5 - 0.5 * (2.0 * PI * i as f32 / FFT as f32).cos())
+                .collect(),
+            mid: (vec![0.0; FFT], vec![0.0; FFT]),
+            side: (vec![0.0; FFT], vec![0.0; FFT]),
+            prev: vec![0.0; bins],
+            flux: [0.0; 2],
+            average: 0.0,
+            peak: 1e-3,
+            energy: [0.0; 2],
+            since: MIN_ONSET_GAP,
+            tuning: TUNING,
+        }
+    }
+
+    /// Analiza las últimas `FFT` muestras estéreo. Devuelve `Some(análisis atrás)` si ahí
+    /// empezó una sílaba (se confirma con un análisis de retraso: `Some(1)`).
+    fn step(&mut self, frames: &[[f32; 2]]) -> Option<usize> {
+        for (k, ([l, r], w)) in frames.iter().zip(&self.window).enumerate() {
+            self.mid.0[k] = (l + r) * 0.5 * w;
+            self.side.0[k] = (l - r) * 0.5 * w;
+        }
+        self.mid.1.fill(0.0);
+        self.side.1.fill(0.0);
+        fft(&mut self.mid.0, &mut self.mid.1);
+        fft(&mut self.side.0, &mut self.side.1);
+
+        let hz_per_bin = RATE as f32 / FFT as f32;
+        let first = (VOICE_BAND.0 / hz_per_bin) as usize;
+        let (mut flux, mut energy) = (0.0f32, 0.0f32);
+        for (i, prev) in self.prev.iter_mut().enumerate() {
+            let k = first + i;
+            let m = (self.mid.0[k].powi(2) + self.mid.1[k].powi(2)).sqrt();
+            let s = (self.side.0[k].powi(2) + self.side.1[k].powi(2)).sqrt();
+            let center = (m - s).max(0.0);
+            energy += center;
+            let c = (1.0 + center).ln();
+            flux += (c - *prev).max(0.0);
+            *prev = c;
+        }
+        let bins = self.prev.len() as f32;
+        flux /= bins;
+        energy /= bins;
+        self.peak = (self.peak * 0.998).max(energy).max(1e-3);
+
+        // El análisis anterior es un inicio si su flujo fue un máximo local, bastante por
+        // encima del promedio, con voz audible y no muy pegado al inicio anterior.
+        let [before, candidate] = self.flux;
+        let Tuning {
+            ratio,
+            floor,
+            gate,
+            rise,
+        } = self.tuning;
+        let voiced = self.energy[1].max(energy) > self.peak * gate;
+        let onset = candidate > before
+            && candidate >= flux
+            && candidate > self.average * ratio + floor
+            && voiced
+            // Al terminar una nota también cambia el espectro: solo cuenta si la voz sube.
+            && self.energy[1] > self.energy[0] * rise
+            && self.since >= MIN_ONSET_GAP;
+
+        self.average += (candidate - self.average) * 0.05;
+        self.flux = [candidate, flux];
+        self.energy = [self.energy[1], energy];
+        self.since = if onset {
+            1
+        } else {
+            self.since.saturating_add(1)
+        };
+        onset.then_some(1)
+    }
+}
+
 /// Transformada rápida de Fourier (radix 2, en el lugar). `re.len()` debe ser potencia de 2.
 fn fft(re: &mut [f32], im: &mut [f32]) {
     let n = re.len();
@@ -464,6 +672,123 @@ mod tests {
         assert!(seen.is_some(), "la captura no arrancó");
     }
 
+    /// Escucha 10 s de Spotify buscando la voz (se ignora por defecto: depende de lo que
+    /// suene). Muestra cuántos inicios de sílaba oyó y cada cuánto.
+    #[test]
+    #[ignore]
+    fn voz_real() {
+        let mut v = Visualizer::default();
+        v.set_voice(true);
+        v.set_target(Some("Spotify.exe"));
+        std::thread::sleep(Duration::from_secs(10));
+        let onsets = v.onsets().expect("la captura no arrancó");
+        let gaps: Vec<u128> = onsets
+            .windows(2)
+            .map(|w| (w[1] - w[0]).as_millis())
+            .collect();
+        println!(
+            "{} inicios en 10 s; separación en ms: {gaps:?}",
+            onsets.len()
+        );
+    }
+
+    /// Graba 12 s de Spotify en memoria (no se guardan) y prueba varios umbrales sobre el
+    /// mismo audio (se ignora por defecto: depende de lo que suene).
+    #[test]
+    #[ignore]
+    fn ajusta_umbrales_con_audio_real() {
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        }
+        let pid = crate::audio::app_root_pid("Spotify.exe").expect("Spotify no está abierto");
+        let client = process_client(pid).expect("sin captura por proceso");
+        let format = WAVEFORMATEX {
+            wFormatTag: 1,
+            nChannels: 2,
+            nSamplesPerSec: RATE,
+            nAvgBytesPerSec: RATE * 4,
+            nBlockAlign: 4,
+            wBitsPerSample: 16,
+            cbSize: 0,
+        };
+        let mut audio: Vec<[f32; 2]> = Vec::new();
+        unsafe {
+            client
+                .Initialize(
+                    AUDCLNT_SHAREMODE_SHARED,
+                    AUDCLNT_STREAMFLAGS_LOOPBACK,
+                    2_000_000,
+                    0,
+                    &format,
+                    None,
+                )
+                .unwrap();
+            let reader: IAudioCaptureClient = client.GetService().unwrap();
+            client.Start().unwrap();
+            let end = Instant::now() + Duration::from_secs(12);
+            while Instant::now() < end {
+                std::thread::sleep(TICK);
+                while reader.GetNextPacketSize().unwrap_or(0) > 0 {
+                    let mut data = std::ptr::null_mut();
+                    let (mut frames, mut flags) = (0u32, 0u32);
+                    reader
+                        .GetBuffer(&mut data, &mut frames, &mut flags, None, None)
+                        .unwrap();
+                    if data.is_null() || flags & AUDCLNT_BUFFERFLAGS_SILENT.0 as u32 != 0 {
+                        audio.extend(std::iter::repeat_n([0.0; 2], frames as usize));
+                    } else {
+                        let pcm =
+                            std::slice::from_raw_parts(data as *const i16, frames as usize * 2);
+                        audio.extend(
+                            pcm.as_chunks::<2>()
+                                .0
+                                .iter()
+                                .map(|[l, r]| [*l as f32 / 32768.0, *r as f32 / 32768.0]),
+                        );
+                    }
+                    let _ = reader.ReleaseBuffer(frames);
+                }
+            }
+            let _ = client.Stop();
+        }
+        let secs = audio.len() as f32 / RATE as f32;
+        let (mut mid, mut side) = (0.0f32, 0.0f32);
+        for [l, r] in &audio {
+            mid += ((l + r) * 0.5).powi(2);
+            side += ((l - r) * 0.5).powi(2);
+        }
+        println!(
+            "{secs:.1} s grabados; energía centro/lados: {:.1}",
+            mid / side.max(1e-9)
+        );
+        for ratio in [1.2, 1.5, 1.8] {
+            for floor in [0.0, 0.01, 0.02] {
+                for gate in [0.05, 0.12] {
+                    for rise in [1.0, 1.1] {
+                        let tuning = Tuning {
+                            ratio,
+                            floor,
+                            gate,
+                            rise,
+                        };
+                        let mut detector = VoiceDetector::new();
+                        detector.tuning = tuning;
+                        let mut count = 0;
+                        let mut at = 0;
+                        while at + FFT <= audio.len() {
+                            count += detector.step(&audio[at..at + FFT]).is_some() as usize;
+                            at += HOP;
+                        }
+                        println!(
+                            "ratio {ratio} floor {floor} gate {gate} rise {rise}: {:.1} por s",
+                            count as f32 / secs
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     /// El análisis corre 30 veces por segundo mientras suenan las barras: tiene que costar
     /// muy poco (con margen para equipos lentos; sin optimizar, 20 veces más).
     #[test]
@@ -481,6 +806,104 @@ mod tests {
         let ms = start.elapsed().as_secs_f64() * 1000.0 / runs as f64;
         println!("analisis: {ms:.4} ms");
         assert!(ms < 0.2 * slack, "analisis: {ms:.4} ms");
+    }
+
+    /// Sílabas de voz al centro: un tono con armónicos (como una vocal) que suena 180 ms de
+    /// cada 300 ms. `panned` la manda solo por la izquierda; `side` agrega un instrumento
+    /// constante a un lado.
+    fn sung_syllables(count: usize, panned: bool, side: bool) -> Vec<[f32; 2]> {
+        let period = (0.3 * RATE as f32) as usize;
+        let on = (0.18 * RATE as f32) as usize;
+        (0..period * count + FFT)
+            .map(|i| {
+                let t = i as f32 / RATE as f32;
+                // Entra en 20 ms y se apaga en 40 ms, como una sílaba cantada.
+                let k = i % period;
+                let envelope = if k < on {
+                    (k as f32 / (0.02 * RATE as f32))
+                        .min((on - k) as f32 / (0.04 * RATE as f32))
+                        .min(1.0)
+                } else {
+                    0.0
+                };
+                let vowel = envelope
+                    * [220.0, 440.0, 660.0, 880.0]
+                        .iter()
+                        .map(|f| 0.1 * (2.0 * PI * f * t).sin())
+                        .sum::<f32>();
+                let guitar = if side {
+                    0.3 * (2.0 * PI * 330.0 * t).sin()
+                } else {
+                    0.0
+                };
+                if panned {
+                    [vowel + guitar, 0.0]
+                } else {
+                    [vowel + guitar, vowel]
+                }
+            })
+            .collect()
+    }
+
+    fn count_onsets(audio: &[[f32; 2]]) -> usize {
+        let mut detector = VoiceDetector::new();
+        let mut count = 0;
+        let mut at = 0;
+        while at + FFT <= audio.len() {
+            count += detector.step(&audio[at..at + FFT]).is_some() as usize;
+            at += HOP;
+        }
+        count
+    }
+
+    #[test]
+    fn encuentra_las_silabas_al_centro() {
+        assert_eq!(count_onsets(&sung_syllables(10, false, false)), 10);
+        // Con una guitarra constante a un lado, igual.
+        assert_eq!(count_onsets(&sung_syllables(10, false, true)), 10);
+    }
+
+    /// El momento que se anota (como en `capture`: el final de la ventana, menos los análisis
+    /// de atraso y medio paso) cae cerca del comienzo real de cada sílaba.
+    #[test]
+    fn anota_el_momento_de_cada_silaba() {
+        let audio = sung_syllables(10, false, true);
+        let period = 0.3 * RATE as f32;
+        let mut detector = VoiceDetector::new();
+        let mut at = 0;
+        while at + FFT <= audio.len() {
+            if let Some(hops_ago) = detector.step(&audio[at..at + FFT]) {
+                let sample = (at + FFT - hops_ago * HOP - HOP / 2) as f32;
+                let offset = sample - (sample / period).round() * period;
+                let ms = offset / RATE as f32 * 1000.0;
+                assert!(ms.abs() < 60.0, "{ms:.0} ms del comienzo");
+            }
+            at += HOP;
+        }
+    }
+
+    #[test]
+    fn ignora_lo_que_suena_a_un_lado() {
+        // La "voz" va solo por el canal izquierdo: es un instrumento, no la voz principal.
+        assert!(count_onsets(&sung_syllables(10, true, false)) <= 1);
+        // Silencio: nada.
+        assert_eq!(count_onsets(&vec![[0.0; 2]; RATE as usize]), 0);
+    }
+
+    /// Con la opción activa corre ~86 veces por segundo: tiene que costar poco.
+    #[test]
+    fn buscar_la_voz_es_barato() {
+        let slack = if cfg!(debug_assertions) { 20.0 } else { 1.0 };
+        let audio = sung_syllables(2, false, true);
+        let mut detector = VoiceDetector::new();
+        let runs = 300;
+        let start = std::time::Instant::now();
+        for i in 0..runs {
+            let at = (i * HOP) % (audio.len() - FFT);
+            std::hint::black_box(detector.step(&audio[at..at + FFT]));
+        }
+        let ms = start.elapsed().as_secs_f64() * 1000.0 / runs as f64;
+        assert!(ms < 0.3 * slack, "voz: {ms:.4} ms");
     }
 
     #[test]
