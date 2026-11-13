@@ -3994,7 +3994,7 @@ mod tests {
                 ) == Some(Hit::Tab(workspace::Page::Music))
             );
             assert!(
-                app.hit_at(bounds.0 + 70.0 * app.scale, bounds.1 + 53.0 * app.scale)
+                app.hit_at(bounds.0 + 70.0 * app.scale, bounds.1 + 85.0 * app.scale)
                     == Some(Hit::Share(workspace::ShareAction::Files))
             );
             app.battery_visible = true;
