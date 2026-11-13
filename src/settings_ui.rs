@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicIsize, Ordering};
 
 use tiny_skia::{Color, Paint};
 use windows::core::{w, Result, PCWSTR};
-use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
+use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, SIZE, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MonitorFromPoint, AC_SRC_ALPHA, AC_SRC_OVER, BLENDFUNCTION, MONITORINFO,
     MONITOR_DEFAULTTONEAREST,
@@ -130,8 +130,6 @@ struct Panel {
     focus: usize,
     dragging: Option<usize>,
     picker: Option<Picker>,
-    maximized: bool,
-    normal_rect: RECT,
 }
 
 impl Panel {
@@ -141,53 +139,6 @@ impl Panel {
         self.surface = Surface::new(width, height)?;
         self.text = TextRenderer::with_label_capacity(scale, 40)?;
         self.scale = scale;
-        Ok(())
-    }
-
-    fn toggle_maximized(&mut self) -> Result<()> {
-        unsafe {
-            if self.maximized {
-                let rect = self.normal_rect;
-                self.maximized = false;
-                self.rescale()?;
-                SetWindowPos(
-                    self.hwnd,
-                    None,
-                    rect.left,
-                    rect.top,
-                    (WIDTH * self.scale).ceil() as i32,
-                    (HEIGHT * self.scale).ceil() as i32,
-                    SWP_NOZORDER | SWP_NOACTIVATE,
-                )?;
-            } else {
-                let _ = GetWindowRect(self.hwnd, &mut self.normal_rect);
-                let monitor = windows::Win32::Graphics::Gdi::MonitorFromWindow(
-                    self.hwnd,
-                    MONITOR_DEFAULTTONEAREST,
-                );
-                let mut info = MONITORINFO {
-                    cbSize: std::mem::size_of::<MONITORINFO>() as u32,
-                    ..Default::default()
-                };
-                let _ = GetMonitorInfoW(monitor, &mut info);
-                let scale = ((info.rcWork.right - info.rcWork.left) as f32 / WIDTH)
-                    .min((info.rcWork.bottom - info.rcWork.top) as f32 / HEIGHT);
-                self.set_scale(scale)?;
-                let width = self.surface.width as i32;
-                let height = self.surface.height as i32;
-                SetWindowPos(
-                    self.hwnd,
-                    None,
-                    info.rcWork.left + (info.rcWork.right - info.rcWork.left - width) / 2,
-                    info.rcWork.top + (info.rcWork.bottom - info.rcWork.top - height) / 2,
-                    width,
-                    height,
-                    SWP_NOZORDER | SWP_NOACTIVATE,
-                )?;
-                self.maximized = true;
-            }
-        }
-        self.render();
         Ok(())
     }
 
@@ -316,12 +267,9 @@ impl Panel {
         }
         rect!(0.0, 0.0, WIDTH, HEIGHT, 18.0, [12, 18, 30, 255]);
         rect!(12.0, 76.0, 172.0, HEIGHT - 88.0, 12.0, [19, 28, 44, 255]);
-        rect!(WIDTH - 120.0, 18.0, 28.0, 28.0, 8.0, [30, 42, 60, 255]);
         rect!(WIDTH - 84.0, 18.0, 28.0, 28.0, 8.0, [30, 42, 60, 255]);
         rect!(WIDTH - 48.0, 18.0, 28.0, 28.0, 8.0, [39, 51, 70, 255]);
-        rect!(WIDTH - 111.0, 32.0, 10.0, 1.5, 0.75, [220, 230, 244, 255]);
-        rect!(WIDTH - 76.0, 26.0, 11.0, 10.0, 1.0, [220, 230, 244, 255]);
-        rect!(WIDTH - 74.0, 24.0, 11.0, 10.0, 1.0, [220, 230, 244, 180]);
+        rect!(WIDTH - 75.0, 32.0, 10.0, 1.5, 0.75, [220, 230, 244, 255]);
         label!("×", WIDTH - 39.0, 22.0, 18.0, true, 1.0);
         for (i, category) in self.categories.iter().enumerate() {
             let y = 88.0 + i as f32 * 42.0;
@@ -592,7 +540,7 @@ where
             WS_EX_LAYERED | WS_EX_APPWINDOW,
             class,
             w!("Notch Isla · Configuración"),
-            WS_POPUP | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX,
+            WS_POPUP | WS_SYSMENU | WS_MINIMIZEBOX,
             info.rcWork.left + (info.rcWork.right - info.rcWork.left - width as i32) / 2,
             info.rcWork.top + (info.rcWork.bottom - info.rcWork.top - height as i32) / 2,
             width as i32,
@@ -626,17 +574,6 @@ where
             focus: 0,
             dragging: None,
             picker: None,
-            maximized: false,
-            normal_rect: RECT {
-                left: info.rcWork.left + (info.rcWork.right - info.rcWork.left - width as i32) / 2,
-                top: info.rcWork.top + (info.rcWork.bottom - info.rcWork.top - height as i32) / 2,
-                right: info.rcWork.left
-                    + (info.rcWork.right - info.rcWork.left - width as i32) / 2
-                    + width as i32,
-                bottom: info.rcWork.top
-                    + (info.rcWork.bottom - info.rcWork.top - height as i32) / 2
-                    + height as i32,
-            },
         };
         panel.render();
         let _ = ShowWindow(hwnd, SW_SHOW);
@@ -722,11 +659,9 @@ where
                     Event::Close => break 'messages,
                     Event::Down(x, y) => {
                         let (x, y) = (x / panel.scale, y / panel.scale);
-                        if y < 58.0 && x >= WIDTH - 124.0 {
+                        if y < 58.0 && x >= WIDTH - 88.0 {
                             if x >= WIDTH - 52.0 {
                                 break 'messages;
-                            } else if x >= WIDTH - 88.0 {
-                                panel.toggle_maximized()?;
                             } else {
                                 let _ = ShowWindow(hwnd, SW_MINIMIZE);
                             }

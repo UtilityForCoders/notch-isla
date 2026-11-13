@@ -114,6 +114,9 @@ const REVEAL_DELAY_MS: u32 = 3000;
 const FULLSCREEN_TIMER: usize = 8;
 const FULLSCREEN_CHECK_MS: u32 = 500;
 const NOTICE_CARD_TIMER: usize = 9;
+/// Muestra la batería al mantener el puntero sobre el icono, sin abrirla por un roce accidental.
+const BATTERY_HOVER_TIMER: usize = 10;
+const BATTERY_HOVER_MS: u32 = 450;
 
 /// Resorte de la expansión (rigidez, amortiguación): rápido, con un pequeño rebote.
 const EXPAND_SPRING: (f32, f32) = (260.0, 22.0);
@@ -1783,6 +1786,14 @@ impl App {
                 Hit::Tab(_) | Hit::Share(_) | Hit::Battery | Hit::Update
             )
         });
+        if (self.workspace_hover == Some(Hit::Battery)) != (workspace_hover == Some(Hit::Battery)) {
+            unsafe {
+                let _ = KillTimer(Some(self.hwnd), BATTERY_HOVER_TIMER);
+                if workspace_hover == Some(Hit::Battery) {
+                    SetTimer(Some(self.hwnd), BATTERY_HOVER_TIMER, BATTERY_HOVER_MS, None);
+                }
+            }
+        }
         if self.workspace_hover == workspace_hover
             && self.hovered_button == button
             && self.seek_hover == seek
@@ -3086,6 +3097,23 @@ fn mouse_pos(lparam: LPARAM) -> (f32, f32) {
     (x as f32, y as f32)
 }
 
+fn show_battery_hover() {
+    let mut items = None;
+    with_app(|app| {
+        if app.workspace_hover == Some(Hit::Battery) && app.battery_visible {
+            app.tray_menu_open = true;
+            items = Some(app.battery_items());
+        }
+    });
+    if let Some(items) = items {
+        menu::show(items);
+        with_app(|app| {
+            app.tray_menu_open = false;
+            app.redraw();
+        });
+    }
+}
+
 extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     let deferrable = msg >= WM_APP
         || matches!(
@@ -3207,7 +3235,6 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             // WM_DESTROY necesita el estado de la app libre.
             let mut pending = None;
             let mut share_action = None;
-            let mut battery_items = None;
             with_app(|app| {
                 if std::mem::take(&mut app.centering_double_click) {
                     unsafe {
@@ -3247,7 +3274,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                         Some(Hit::Button(button)) => app.press(button),
                         Some(Hit::Seek(fraction)) => app.seek(fraction),
                         Some(Hit::Cover) => media::next_session(),
-                        Some(Hit::Battery) => battery_items = Some(app.battery_items()),
+                        Some(Hit::Battery) => {}
                         Some(Hit::Update) => pending = app.update.clone(),
                         None => {}
                     }
@@ -3267,19 +3294,11 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                     Some(Hit::Button(button)) => app.press(button),
                     Some(Hit::Seek(fraction)) => app.seek(fraction),
                     Some(Hit::Cover) => media::next_session(),
-                    Some(Hit::Battery) => battery_items = Some(app.battery_items()),
+                    Some(Hit::Battery) => {}
                     Some(Hit::Update) => pending = app.update.clone(),
                     None => {}
                 }
             });
-            if let Some(items) = battery_items {
-                with_app(|app| app.tray_menu_open = true);
-                menu::show(items);
-                with_app(|app| {
-                    app.tray_menu_open = false;
-                    app.redraw();
-                });
-            }
             if let Some(action) = share_action {
                 share_ui::perform(hwnd, action);
             }
@@ -3342,6 +3361,13 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                     app.show_next_notice();
                 }
             });
+            LRESULT(0)
+        }
+        WM_TIMER if wparam.0 == BATTERY_HOVER_TIMER => {
+            unsafe {
+                let _ = KillTimer(Some(hwnd), BATTERY_HOVER_TIMER);
+            }
+            show_battery_hover();
             LRESULT(0)
         }
         WM_TIMER if wparam.0 == COUNTDOWN_TIMER => {
@@ -4012,7 +4038,7 @@ mod tests {
             });
             assert!(
                 app.hit_at(
-                    bounds.0 + bounds.2 - 50.0 * app.scale,
+                    bounds.0 + bounds.2 - 24.0 * app.scale,
                     bounds.1 + 14.0 * app.scale
                 ) == Some(Hit::Battery)
             );

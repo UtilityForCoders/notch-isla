@@ -165,13 +165,14 @@ pub struct Indicators {
     pub hovered: Option<Hit>,
 }
 
-fn indicator_center(g: &Geometry, p: f32, battery: bool) -> (f32, f32) {
+fn indicator_center(g: &Geometry, p: f32, battery: bool, update: bool) -> (f32, f32) {
     let p = p.clamp(0.0, 1.0);
     let s = g.scale;
-    let x = if battery {
-        g.x0 + 14.0 * s * (1.0 - p) + (g.w - 50.0 * s) * p
+    let right = g.x1() - (14.0 + 10.0 * p) * s;
+    let x = if battery && update {
+        right - (20.0 + 6.0 * p) * s
     } else {
-        g.x1() - (14.0 + 10.0 * p) * s
+        right
     };
     (x, g.y0 + ((17.0 - 3.0 * p) * s).min(g.h / 2.0))
 }
@@ -199,7 +200,7 @@ pub fn indicator_hit_test(
         if !shown {
             continue;
         }
-        let (cx, cy) = indicator_center(&g, p, battery);
+        let (cx, cy) = indicator_center(&g, p, battery, indicators.update);
         if (x - cx).abs() <= INDICATOR_HIT_R * scale && (y - cy).abs() <= INDICATOR_HIT_R * scale {
             return Some(hit);
         }
@@ -239,7 +240,7 @@ fn draw_indicators(pixmap: &mut Pixmap, g: &Geometry, p: f32, indicators: Indica
         if !shown {
             continue;
         }
-        let (cx, cy) = indicator_center(g, p, battery);
+        let (cx, cy) = indicator_center(g, p, battery, indicators.update);
         let s = g.scale;
         let [r, green, b] = color;
         paint.set_color_rgba8(
@@ -1999,7 +2000,7 @@ mod tests {
                     );
                 }
                 for (battery, hit) in [(true, Hit::Battery), (false, Hit::Update)] {
-                    let (x, y) = indicator_center(&g, p, battery);
+                    let (x, y) = indicator_center(&g, p, battery, indicators.update);
                     assert!(
                         indicator_hit_test(
                             w as f32,
