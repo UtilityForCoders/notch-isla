@@ -19,9 +19,7 @@ pub enum ShareAction {
 #[derive(Default)]
 pub struct ShareState {
     pub receiving: bool,
-    pub devices: usize,
     pub device_name: String,
-    pub device_available: bool,
     pub busy: bool,
     pub status: String,
 }
@@ -195,20 +193,7 @@ pub fn draw(
                 let label = if state.device_name.is_empty() {
                     "Vincular un dispositivo…".to_string()
                 } else {
-                    format!(
-                        "Enviar a: {}{} · {}",
-                        state.device_name,
-                        if state.devices > 1 {
-                            format!(" · {} equipos", state.devices)
-                        } else {
-                            String::new()
-                        },
-                        if state.device_available {
-                            "Disponible"
-                        } else {
-                            "Sin conexión"
-                        }
-                    )
+                    format!("Enviar a: {}", state.device_name)
                 };
                 (label, Some(NoticeIcon::Wireless))
             }

@@ -915,10 +915,7 @@ impl App {
     }
 
     fn battery_items(&self) -> Vec<menu::Item> {
-        let mut items = vec![
-            menu::Item::Label("Batería de periféricos".into()),
-            menu::Item::Separator,
-        ];
+        let mut items = Vec::new();
         if self.battery_devices.is_empty() {
             items.push(menu::Item::Label("No hay lecturas disponibles".into()));
         }

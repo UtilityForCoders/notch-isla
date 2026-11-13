@@ -173,15 +173,9 @@ pub fn panel_state() -> crate::workspace::ShareState {
         });
         crate::workspace::ShareState {
             receiving: ui.cancel.is_some(),
-            devices: devices.len(),
             device_name: selected
                 .map(|device| device.display_name().to_owned())
                 .unwrap_or_default(),
-            device_available: selected.is_some_and(|device| {
-                ui.peers
-                    .iter()
-                    .any(|peer| peer.certificate.as_ref() == device.certificate)
-            }),
             busy: ui.sending || ui.accepting || ui.modal,
             status: ui.status.clone(),
         }
