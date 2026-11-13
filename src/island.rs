@@ -154,10 +154,12 @@ pub enum Hit {
 
 const UPDATE_COLOR: [u8; 3] = [75, 166, 255];
 const BATTERY_COLOR: [u8; 3] = [255, 174, 66];
+const BATTERY_NORMAL_COLOR: [u8; 3] = [210, 218, 232];
 const INDICATOR_HIT_R: f32 = 8.0;
 
 #[derive(Clone, Copy, Default)]
 pub struct Indicators {
+    pub battery: bool,
     pub battery_low: bool,
     pub update: bool,
     pub hovered: Option<Hit>,
@@ -191,7 +193,7 @@ pub fn indicator_hit_test(
         return None;
     }
     for (shown, hit, battery) in [
-        (indicators.battery_low, Hit::Battery, true),
+        (indicators.battery, Hit::Battery, true),
         (indicators.update, Hit::Update, false),
     ] {
         if !shown {
@@ -213,13 +215,18 @@ fn draw_indicators(pixmap: &mut Pixmap, g: &Geometry, p: f32, indicators: Indica
         anti_alias: true,
         ..Default::default()
     };
+    let battery_color = if indicators.battery_low {
+        BATTERY_COLOR
+    } else {
+        BATTERY_NORMAL_COLOR
+    };
     for (shown, hit, battery, icon, color) in [
         (
-            indicators.battery_low,
+            indicators.battery,
             Hit::Battery,
             true,
             NoticeIcon::Battery,
-            BATTERY_COLOR,
+            battery_color,
         ),
         (
             indicators.update,
@@ -916,7 +923,7 @@ pub fn draw(
 
     // Áreas de texto: título/artista
     let (text_x, text_w) = text_column(&g, s);
-    let title_inset = if indicators.battery_low { 42.0 } else { 34.0 };
+    let title_inset = if indicators.battery { 42.0 } else { 34.0 };
     let title_area = TextArea {
         x: text_x,
         w: (text_w
@@ -1965,6 +1972,7 @@ mod tests {
     #[test]
     fn indicadores_quedan_dentro_del_contorno_y_responden_sin_musica() {
         let indicators = Indicators {
+            battery: true,
             battery_low: true,
             update: true,
             ..Indicators::default()
@@ -2073,6 +2081,7 @@ mod tests {
                         shape,
                         (!shape.empty_music).then_some(c),
                         Indicators {
+                            battery: true,
                             battery_low: true,
                             update: true,
                             ..Indicators::default()

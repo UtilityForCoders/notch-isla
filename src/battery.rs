@@ -217,6 +217,14 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
+    pub fn battery_devices(&self) -> Vec<Device> {
+        self.devices
+            .iter()
+            .filter(|device| self.confirmed_link(device) && device.level.is_some())
+            .cloned()
+            .collect()
+    }
+
     pub fn low_devices(&self) -> Vec<Device> {
         self.devices
             .iter()

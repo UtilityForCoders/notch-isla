@@ -565,7 +565,9 @@ struct App {
     /// Escucha la salida de audio; `None` si Core Audio no está disponible.
     audio: Option<AudioWatch>,
     battery: Option<battery::Monitor>,
+    battery_visible: bool,
     battery_low: bool,
+    battery_devices: Vec<battery::Device>,
     low_battery_devices: Vec<battery::Device>,
     battery_alerts: battery::Alerts,
     battery_pending: std::collections::VecDeque<battery::Device>,
@@ -662,7 +664,9 @@ impl App {
             notice_card: None,
             audio: None,
             battery: None,
+            battery_visible: false,
             battery_low: false,
+            battery_devices: Vec::new(),
             low_battery_devices: Vec::new(),
             battery_alerts: battery::Alerts::default(),
             battery_pending: std::collections::VecDeque::new(),
@@ -907,17 +911,15 @@ impl App {
         )
     }
 
-    fn low_battery_items(&self) -> Vec<menu::Item> {
+    fn battery_items(&self) -> Vec<menu::Item> {
         let mut items = vec![
-            menu::Item::Label("Dispositivos con batería baja".into()),
+            menu::Item::Label("Batería de periféricos".into()),
             menu::Item::Separator,
         ];
-        if self.low_battery_devices.is_empty() {
-            items.push(menu::Item::Label(
-                "No hay dispositivos con batería baja".into(),
-            ));
+        if self.battery_devices.is_empty() {
+            items.push(menu::Item::Label("No hay lecturas disponibles".into()));
         }
-        for device in &self.low_battery_devices {
+        for device in &self.battery_devices {
             items.push(menu::Item::DeviceStatus {
                 name: device.name.clone(),
                 status: device.status(),
@@ -937,13 +939,17 @@ impl App {
             return;
         };
         let snapshot = monitor.snapshot();
+        self.battery_devices = snapshot.battery_devices();
         self.low_battery_devices = if self.settings.battery_notices {
             snapshot.low_devices()
         } else {
             Vec::new()
         };
+        let battery_visible = !self.battery_devices.is_empty();
         let battery_low = !self.low_battery_devices.is_empty();
-        let marker_changed = std::mem::replace(&mut self.battery_low, battery_low) != battery_low;
+        let marker_changed = std::mem::replace(&mut self.battery_visible, battery_visible)
+            != battery_visible
+            || std::mem::replace(&mut self.battery_low, battery_low) != battery_low;
         self.connection_pending = self
             .connection_pending
             .drain(..)
@@ -1700,6 +1706,7 @@ impl App {
             return None;
         }
         let indicators = island::Indicators {
+            battery: self.battery_visible,
             battery_low: self.battery_low,
             update: self.update.is_some(),
             hovered: None,
@@ -2393,6 +2400,7 @@ impl App {
             shape,
             controls,
             island::Indicators {
+                battery: self.battery_visible,
                 battery_low: self.battery_low,
                 update: self.update.is_some(),
                 hovered: self.workspace_hover,
@@ -3239,7 +3247,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                         Some(Hit::Button(button)) => app.press(button),
                         Some(Hit::Seek(fraction)) => app.seek(fraction),
                         Some(Hit::Cover) => media::next_session(),
-                        Some(Hit::Battery) => battery_items = Some(app.low_battery_items()),
+                        Some(Hit::Battery) => battery_items = Some(app.battery_items()),
                         Some(Hit::Update) => pending = app.update.clone(),
                         None => {}
                     }
@@ -3259,7 +3267,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                     Some(Hit::Button(button)) => app.press(button),
                     Some(Hit::Seek(fraction)) => app.seek(fraction),
                     Some(Hit::Cover) => media::next_session(),
-                    Some(Hit::Battery) => battery_items = Some(app.low_battery_items()),
+                    Some(Hit::Battery) => battery_items = Some(app.battery_items()),
                     Some(Hit::Update) => pending = app.update.clone(),
                     None => {}
                 }
@@ -3789,8 +3797,9 @@ mod tests {
             app.pos.y += 150;
             app.idle_hidden = false;
             if std::env::var_os("NOTCH_PREVIEW_INDICATORS").is_some() {
+                app.battery_visible = true;
                 app.battery_low = true;
-                app.low_battery_devices = vec![battery::Device {
+                app.battery_devices = vec![battery::Device {
                     id: "preview-mouse".into(),
                     name: "Mouse de prueba".into(),
                     kind: battery::DeviceKind::Mouse,
@@ -3801,6 +3810,7 @@ mod tests {
                     windows_cached: false,
                     detail: String::new(),
                 }];
+                app.low_battery_devices = app.battery_devices.clone();
             }
             if std::env::var_os("NOTCH_PREVIEW_MEDIA").is_some() {
                 app.set_media(Some(NowPlaying {
@@ -3987,8 +3997,9 @@ mod tests {
                 app.hit_at(bounds.0 + 70.0 * app.scale, bounds.1 + 53.0 * app.scale)
                     == Some(Hit::Share(workspace::ShareAction::Files))
             );
+            app.battery_visible = true;
             app.battery_low = true;
-            app.low_battery_devices.push(battery::Device {
+            app.battery_devices.push(battery::Device {
                 id: "bt:test".into(),
                 name: "Mouse de prueba".into(),
                 kind: battery::DeviceKind::Mouse,
@@ -4005,7 +4016,8 @@ mod tests {
                     bounds.1 + 14.0 * app.scale
                 ) == Some(Hit::Battery)
             );
-            assert!(app.low_battery_items().iter().any(|item| matches!(
+            app.low_battery_devices = app.battery_devices.clone();
+            assert!(app.battery_items().iter().any(|item| matches!(
                 item,
                 menu::Item::DeviceStatus { name, status, .. }
                     if name == "Mouse de prueba" && status == "15 % · Baja"
