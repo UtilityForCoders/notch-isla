@@ -162,6 +162,16 @@ pub fn show(items: Vec<Item>) -> Option<usize> {
     chosen
 }
 
+/// Cierra el menú abierto, si existe. Se usa para paneles informativos ligados al hover.
+pub fn dismiss() {
+    let hwnd = HWND(MENU_HWND.load(Ordering::SeqCst) as _);
+    if !hwnd.is_invalid() {
+        unsafe {
+            let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+        }
+    }
+}
+
 /// Abre el menú interactivo, permitiendo procesar opciones y mantenerlo abierto con nuevos items.
 pub fn show_interactive<F>(items: Vec<Item>, mut on_action: F)
 where

@@ -1787,11 +1787,15 @@ impl App {
             )
         });
         if (self.workspace_hover == Some(Hit::Battery)) != (workspace_hover == Some(Hit::Battery)) {
+            let leaving_battery = self.workspace_hover == Some(Hit::Battery);
             unsafe {
                 let _ = KillTimer(Some(self.hwnd), BATTERY_HOVER_TIMER);
                 if workspace_hover == Some(Hit::Battery) {
                     SetTimer(Some(self.hwnd), BATTERY_HOVER_TIMER, BATTERY_HOVER_MS, None);
                 }
+            }
+            if leaving_battery {
+                menu::dismiss();
             }
         }
         if self.workspace_hover == workspace_hover
@@ -3199,6 +3203,9 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             let (x, y) = mouse_pos(lparam);
             with_app(|app| {
                 let hit = app.hit_at(x, y);
+                if hit == Some(Hit::Battery) {
+                    return;
+                }
                 if let (None, Some(Hit::Seek(fraction))) = (&app.notice, hit) {
                     app.begin_drag(fraction);
                 } else {
