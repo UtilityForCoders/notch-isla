@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use windows::core::{w, Result, HSTRING, PWSTR};
+use windows::core::{w, Result, PWSTR};
 use windows::Win32::Foundation::{ERROR_CANCELLED, HGLOBAL, HWND, LPARAM, WPARAM};
 use windows::Win32::System::Com::{CoCreateInstance, CoTaskMemFree, CLSCTX_INPROC_SERVER};
 use windows::Win32::System::DataExchange::{CloseClipboard, GetClipboardData, OpenClipboard};
@@ -22,9 +22,7 @@ use windows::Win32::UI::Shell::{
     SHGetKnownFolderPath, FOS_ALLOWMULTISELECT, FOS_FILEMUSTEXIST, FOS_FORCEFILESYSTEM,
     FOS_PATHMUSTEXIST, HDROP, KF_FLAG_DEFAULT, SIGDN_FILESYSPATH,
 };
-use windows::Win32::UI::WindowsAndMessaging::{
-    MessageBoxW, PostMessageW, MB_ICONINFORMATION, MB_OK, MB_SETFOREGROUND, WM_APP,
-};
+use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_APP};
 
 use crate::island::{Notice, NoticeIcon};
 use crate::menu::{self, Item};
@@ -788,7 +786,7 @@ fn save_inbox(messages: &VecDeque<PendingMessage>) -> std::io::Result<()> {
     std::fs::rename(temporary, path)
 }
 
-fn stable_image(path: &std::path::Path) -> std::io::Result<PathBuf> {
+fn stable_image(path: &std::path::Path, name: &str) -> std::io::Result<PathBuf> {
     let directory = inbox_path()
         .and_then(|path| path.parent().map(|parent| parent.join("share-inbox")))
         .ok_or_else(|| std::io::Error::other("LOCALAPPDATA no disponible"))?;
@@ -797,7 +795,18 @@ fn stable_image(path: &std::path::Path) -> std::io::Result<PathBuf> {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    let destination = directory.join(format!("imagen-{stamp}.bin"));
+    let extension = std::path::Path::new(name)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .filter(|extension| {
+            !extension.is_empty()
+                && extension.len() <= 10
+                && extension
+                    .chars()
+                    .all(|character| character.is_ascii_alphanumeric())
+        })
+        .unwrap_or("img");
+    let destination = directory.join(format!("imagen-{stamp}.{extension}"));
     if std::fs::rename(path, &destination).is_err() {
         std::fs::copy(path, &destination)?;
     }
@@ -839,9 +848,10 @@ fn queue_received(result: std::result::Result<Option<share::Received>, String>) 
         }),
         Ok(Some(share::Received::Image {
             sender,
+            name,
             directory,
             path,
-        })) => match stable_image(&path) {
+        })) => match stable_image(&path, &name) {
             Ok(path) => {
                 drop(directory);
                 Some(PendingMessage {
@@ -900,22 +910,7 @@ pub fn open_received(hwnd: HWND) {
     let shown = match &message.content {
         PendingContent::Text { text } => crate::share_preview::text(hwnd, &message.sender, text),
         PendingContent::Image { path } => crate::share_preview::image(hwnd, &message.sender, path),
-        PendingContent::Files { path } => {
-            let detail = HSTRING::from(format!(
-                "{} te envió archivos.\n\nGuardado en:\n{}",
-                message.sender,
-                path.display()
-            ));
-            unsafe {
-                MessageBoxW(
-                    Some(hwnd),
-                    &detail,
-                    w!("Envío recibido · Notch Isla"),
-                    MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND,
-                );
-            }
-            Ok(())
-        }
+        PendingContent::Files { path } => crate::share_preview::files(hwnd, &message.sender, path),
     };
     match shown {
         Ok(()) => {
