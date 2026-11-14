@@ -51,13 +51,17 @@ pub enum ContentKind {
 }
 
 pub enum Received {
-    Files(PathBuf),
+    Files {
+        sender: String,
+        path: PathBuf,
+    },
     Text {
         sender: String,
         text: String,
     },
     Image {
         sender: String,
+        name: String,
         directory: tempfile::TempDir,
         path: PathBuf,
     },
@@ -940,6 +944,7 @@ fn finish_receive(
                 copy_exact(&mut *stream, &mut file, offer.entries[0].bytes)?;
                 Received::Image {
                     sender: clean_label(&offer.sender),
+                    name: clean_label(&offer.entries[0].name),
                     directory,
                     path,
                 }
@@ -968,7 +973,12 @@ fn finish_receive(
     if saved.is_ok() {
         let _ = stream.write_all(&[1]).and_then(|()| stream.flush());
     }
-    saved.map(|path| Some(Received::Files(path)))
+    saved.map(|path| {
+        Some(Received::Files {
+            sender: clean_label(&offer.sender),
+            path,
+        })
+    })
 }
 
 fn save_offer(downloads: &Path, stream: &mut impl Read, offer: &Offer) -> Result<PathBuf> {
@@ -1181,6 +1191,7 @@ mod tests {
         assert_eq!(sender, local_name());
         assert_eq!(text, "Hola 👋\r\nsegunda línea");
         let Some(Received::Image {
+            name,
             directory: temporary,
             path,
             ..
@@ -1188,10 +1199,11 @@ mod tests {
         else {
             panic!("esperaba imagen")
         };
+        assert_eq!(name, "Imagen.bmp");
         assert_eq!(std::fs::read(&path)?, [1, 2, 3, 4]);
         drop(temporary);
         assert!(!path.exists());
-        let Some(Received::Files(path)) = received.next().unwrap() else {
+        let Some(Received::Files { path, .. }) = received.next().unwrap() else {
             panic!("esperaba archivo")
         };
         assert_eq!(

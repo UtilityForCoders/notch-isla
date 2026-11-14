@@ -577,6 +577,7 @@ struct App {
     connections: battery::Connections,
     connection_pending: std::collections::VecDeque<battery::Device>,
     audio_notice_pending: Option<PendingAudioNotice>,
+    share_notice_pending: Option<(String, String)>,
     tray_menu_open: bool,
     /// Nombre de la salida de audio actual, para avisar solo cuando de verdad cambia.
     audio_device: Option<String>,
@@ -676,6 +677,7 @@ impl App {
             connections: battery::Connections::default(),
             connection_pending: std::collections::VecDeque::new(),
             audio_notice_pending: None,
+            share_notice_pending: None,
             tray_menu_open: false,
             audio_device: None,
             countdown: None,
@@ -814,6 +816,17 @@ impl App {
     }
 
     fn show_notice_card(&mut self, view: Notice, title: &str, subtitle: &str, ms: u32) {
+        self.show_notice_card_kind(view, title, subtitle, ms, false);
+    }
+
+    fn show_notice_card_kind(
+        &mut self,
+        view: Notice,
+        title: &str,
+        subtitle: &str,
+        ms: u32,
+        clickable: bool,
+    ) {
         if self.notice_card.is_some() || self.hidden_by_fullscreen() {
             return;
         }
@@ -822,11 +835,23 @@ impl App {
             title: title.to_string(),
             subtitle: subtitle.to_string(),
         };
-        if let Ok(card) = NoticeCard::new(self.scale, self.monitor_rect(), notice, ms) {
+        if let Ok(card) = NoticeCard::new(
+            self.hwnd,
+            self.scale,
+            self.monitor_rect(),
+            notice,
+            ms,
+            clickable,
+        ) {
             self.notice_card = Some(card);
             self.place_notice_card();
             self.advance_notice_card();
         }
+    }
+
+    fn queue_share_notice(&mut self, title: String, subtitle: String) {
+        self.share_notice_pending = Some((title, subtitle));
+        self.show_next_notice();
     }
 
     fn place_notice_card(&mut self) {
@@ -1006,6 +1031,21 @@ impl App {
             || self.installing.is_some()
         {
             return;
+        }
+        if let Some((title, subtitle)) = self.share_notice_pending.take() {
+            self.show_notice_card_kind(
+                Notice {
+                    icon: NoticeIcon::Share,
+                    color: BLUE,
+                },
+                &title,
+                &subtitle,
+                6000,
+                true,
+            );
+            if self.notice_card.is_some() {
+                return;
+            }
         }
         if let Some(audio) = self.audio_notice_pending.take() {
             if !audio.automatic || self.settings.notices {
@@ -3153,6 +3193,12 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             share_ui::on_event(hwnd);
             LRESULT(0)
         }
+        notice_card::WM_NOTICE_CARD_CLICK => {
+            with_app(|app| app.clear_notice_card());
+            share_ui::open_received(hwnd);
+            with_app(|app| app.show_next_notice());
+            LRESULT(0)
+        }
         WM_MOUSEMOVE => {
             let (x, y) = mouse_pos(lparam);
             with_app(|app| {
@@ -3588,6 +3634,10 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                             );
                         }
                         false
+                    }
+                    Command::ToggleShareDnd => {
+                        share_ui::set_receiving(hwnd, !share_ui::receiving_enabled());
+                        true
                     }
                     Command::ToggleBatteryNotices => {
                         settings.battery_notices = !settings.battery_notices;
