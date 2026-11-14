@@ -10,19 +10,16 @@ pub enum Page {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(usize)]
 pub enum ShareAction {
     Files = 1,
     Clipboard = 2,
-    Receive = 3,
-    Pair = 4,
-    Devices = 5,
+    Device,
 }
 
 #[derive(Default)]
 pub struct ShareState {
     pub receiving: bool,
-    pub devices: usize,
+    pub device_name: String,
     pub busy: bool,
     pub status: String,
 }
@@ -92,21 +89,16 @@ fn regions(width: f32, page: Page, empty_music: bool) -> Vec<(Hit, [f32; 4])> {
     if page == Page::Share {
         regions.extend([
             (
+                Hit::Share(ShareAction::Device),
+                [20.0, 34.0, width - 40.0, 30.0],
+            ),
+            (
                 Hit::Share(ShareAction::Files),
-                [20.0, 38.0, width - 40.0, 30.0],
+                [20.0, 70.0, width - 40.0, 30.0],
             ),
             (
                 Hit::Share(ShareAction::Clipboard),
-                [20.0, 74.0, width - 40.0, 30.0],
-            ),
-            (Hit::Share(ShareAction::Pair), [20.0, 111.0, 100.0, 27.0]),
-            (
-                Hit::Share(ShareAction::Devices),
-                [126.0, 111.0, width - 146.0, 27.0],
-            ),
-            (
-                Hit::Share(ShareAction::Receive),
-                [width - 56.0, SHARE_TAB_Y, 36.0, 28.0],
+                [20.0, 106.0, width - 40.0, 30.0],
             ),
         ]);
     }
@@ -178,7 +170,10 @@ pub fn draw(
         }
         let ([r, g, b], opacity) = if hover {
             (color.light(), 40)
-        } else if matches!(hit, Hit::Share(ShareAction::Files | ShareAction::Clipboard)) {
+        } else if matches!(
+            hit,
+            Hit::Share(ShareAction::Device | ShareAction::Files | ShareAction::Clipboard)
+        ) {
             (color.light(), 26)
         } else {
             (color.light(), 16)
@@ -194,6 +189,14 @@ pub fn draw(
             10.0 * scale,
         );
         let (label, icon) = match hit {
+            Hit::Share(ShareAction::Device) => {
+                let label = if state.device_name.is_empty() {
+                    "Vincular un dispositivo…".to_string()
+                } else {
+                    format!("Enviar a: {}", state.device_name)
+                };
+                (label, Some(NoticeIcon::Wireless))
+            }
             Hit::Share(ShareAction::Files) => {
                 ("Elegir archivos…".to_string(), Some(NoticeIcon::Usb))
             }
@@ -201,9 +204,6 @@ pub fn draw(
                 "Enviar portapapeles".to_string(),
                 Some(NoticeIcon::Keyboard),
             ),
-            Hit::Share(ShareAction::Pair) => ("Vincular…".to_string(), None),
-            Hit::Share(ShareAction::Devices) => (format!("Equipos · {}", state.devices), None),
-            Hit::Share(ShareAction::Receive) => (String::new(), None),
             _ => continue,
         };
         if let Some(icon) = icon {
@@ -230,31 +230,9 @@ pub fn draw(
             strong: false,
             scroll: false,
         });
-        if hit == Hit::Share(ShareAction::Receive) {
-            paint.set_color_rgba8(
-                if state.receiving { 88 } else { 115 },
-                if state.receiving { 190 } else { 118 },
-                if state.receiving { 142 } else { 125 },
-                (alpha * 255.0) as u8,
-            );
-            island::draw_notice_icon(
-                pixmap,
-                &paint,
-                NoticeIcon::Wireless,
-                left + (x + w / 2.0) * scale,
-                top + (y + h / 2.0) * scale,
-                scale * 0.7,
-            );
-        }
     }
     if page == Page::Share {
-        let status = if hovered == Some(Hit::Share(ShareAction::Receive)) {
-            if state.receiving {
-                "Pausar recepción"
-            } else {
-                "Activar recepción"
-            }
-        } else if !state.status.is_empty() {
+        let status = if !state.status.is_empty() {
             &state.status
         } else if state.busy {
             "Solicitud en curso…"

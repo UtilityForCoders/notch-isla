@@ -154,22 +154,25 @@ pub enum Hit {
 
 const UPDATE_COLOR: [u8; 3] = [75, 166, 255];
 const BATTERY_COLOR: [u8; 3] = [255, 174, 66];
+const BATTERY_NORMAL_COLOR: [u8; 3] = [210, 218, 232];
 const INDICATOR_HIT_R: f32 = 8.0;
 
 #[derive(Clone, Copy, Default)]
 pub struct Indicators {
+    pub battery: bool,
     pub battery_low: bool,
     pub update: bool,
     pub hovered: Option<Hit>,
 }
 
-fn indicator_center(g: &Geometry, p: f32, battery: bool) -> (f32, f32) {
+fn indicator_center(g: &Geometry, p: f32, battery: bool, update: bool) -> (f32, f32) {
     let p = p.clamp(0.0, 1.0);
     let s = g.scale;
-    let x = if battery {
-        g.x0 + 14.0 * s * (1.0 - p) + (g.w - 50.0 * s) * p
+    let right = g.x1() - (14.0 + 10.0 * p) * s;
+    let x = if battery && update {
+        right - (20.0 + 6.0 * p) * s
     } else {
-        g.x1() - (14.0 + 10.0 * p) * s
+        right
     };
     (x, g.y0 + ((17.0 - 3.0 * p) * s).min(g.h / 2.0))
 }
@@ -191,13 +194,13 @@ pub fn indicator_hit_test(
         return None;
     }
     for (shown, hit, battery) in [
-        (indicators.battery_low, Hit::Battery, true),
+        (indicators.battery, Hit::Battery, true),
         (indicators.update, Hit::Update, false),
     ] {
         if !shown {
             continue;
         }
-        let (cx, cy) = indicator_center(&g, p, battery);
+        let (cx, cy) = indicator_center(&g, p, battery, indicators.update);
         if (x - cx).abs() <= INDICATOR_HIT_R * scale && (y - cy).abs() <= INDICATOR_HIT_R * scale {
             return Some(hit);
         }
@@ -213,13 +216,18 @@ fn draw_indicators(pixmap: &mut Pixmap, g: &Geometry, p: f32, indicators: Indica
         anti_alias: true,
         ..Default::default()
     };
+    let battery_color = if indicators.battery_low {
+        BATTERY_COLOR
+    } else {
+        BATTERY_NORMAL_COLOR
+    };
     for (shown, hit, battery, icon, color) in [
         (
-            indicators.battery_low,
+            indicators.battery,
             Hit::Battery,
             true,
             NoticeIcon::Battery,
-            BATTERY_COLOR,
+            battery_color,
         ),
         (
             indicators.update,
@@ -232,7 +240,7 @@ fn draw_indicators(pixmap: &mut Pixmap, g: &Geometry, p: f32, indicators: Indica
         if !shown {
             continue;
         }
-        let (cx, cy) = indicator_center(g, p, battery);
+        let (cx, cy) = indicator_center(g, p, battery, indicators.update);
         let s = g.scale;
         let [r, green, b] = color;
         paint.set_color_rgba8(
@@ -916,7 +924,7 @@ pub fn draw(
 
     // Áreas de texto: título/artista
     let (text_x, text_w) = text_column(&g, s);
-    let title_inset = if indicators.battery_low { 42.0 } else { 34.0 };
+    let title_inset = if indicators.battery { 42.0 } else { 34.0 };
     let title_area = TextArea {
         x: text_x,
         w: (text_w
@@ -1608,15 +1616,16 @@ fn draw_button(
             paint.set_color_rgba8(r, g, b, a);
             let tri_w = 6.0 * s;
             let tri_h = 10.0 * s;
-            fill_triangle(pixmap, &paint, cx + 1.0 * s, cy, -tri_w, tri_h);
-            fill_triangle(pixmap, &paint, cx + 7.5 * s, cy, -tri_w, tri_h);
+            // La caja conjunta de los dos triángulos queda centrada en `cx`.
+            fill_triangle(pixmap, &paint, cx - 0.25 * s, cy, -tri_w, tri_h);
+            fill_triangle(pixmap, &paint, cx + 6.25 * s, cy, -tri_w, tri_h);
         }
         Button::Next => {
             paint.set_color_rgba8(r, g, b, a);
             let tri_w = 6.0 * s;
             let tri_h = 10.0 * s;
-            fill_triangle(pixmap, &paint, cx - 7.5 * s, cy, tri_w, tri_h);
-            fill_triangle(pixmap, &paint, cx - 1.0 * s, cy, tri_w, tri_h);
+            fill_triangle(pixmap, &paint, cx - 6.25 * s, cy, tri_w, tri_h);
+            fill_triangle(pixmap, &paint, cx + 0.25 * s, cy, tri_w, tri_h);
         }
     }
 }
@@ -1965,6 +1974,7 @@ mod tests {
     #[test]
     fn indicadores_quedan_dentro_del_contorno_y_responden_sin_musica() {
         let indicators = Indicators {
+            battery: true,
             battery_low: true,
             update: true,
             ..Indicators::default()
@@ -1991,7 +2001,7 @@ mod tests {
                     );
                 }
                 for (battery, hit) in [(true, Hit::Battery), (false, Hit::Update)] {
-                    let (x, y) = indicator_center(&g, p, battery);
+                    let (x, y) = indicator_center(&g, p, battery, indicators.update);
                     assert!(
                         indicator_hit_test(
                             w as f32,
@@ -2073,6 +2083,7 @@ mod tests {
                         shape,
                         (!shape.empty_music).then_some(c),
                         Indicators {
+                            battery: true,
                             battery_low: true,
                             update: true,
                             ..Indicators::default()
