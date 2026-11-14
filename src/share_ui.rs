@@ -2,12 +2,14 @@
 
 use crate::share_identity::Store;
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::os::windows::ffi::OsStringExt;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Sender};
 use std::sync::Arc;
 use std::thread;
+use std::time::{Duration, Instant};
 
 use windows::core::{w, Result, HSTRING, PWSTR};
 use windows::Win32::Foundation::{ERROR_CANCELLED, HGLOBAL, HWND, LPARAM, WPARAM};
@@ -30,6 +32,9 @@ use crate::share::{self, Payload, Peer, ReceiveEvent};
 pub const WM_SHARE_EVENT: u32 = WM_APP + 12;
 pub const WM_SHARE_MENU: u32 = WM_APP + 13;
 const TITLE: &str = "Compartir cerca";
+// mDNS usa UDP y un sondeo aislado puede no recibir respuesta. No conviertas una sola
+// pérdida de paquetes en "Sin conexión" ni impidas un envío que todavía puede funcionar.
+const PEER_GRACE: Duration = Duration::from_secs(30);
 
 enum Search {
     Pair,
@@ -59,6 +64,7 @@ struct Ui {
     service_id: u64,
     receive_code: Option<String>,
     peers: Vec<Peer>,
+    peer_seen: BTreeMap<Vec<u8>, Instant>,
     selected: Option<Vec<u8>>,
     sending: bool,
     accepting: bool,
@@ -69,7 +75,7 @@ struct Ui {
 thread_local! {
     static UI: RefCell<Ui> = {
         let (tx, rx) = mpsc::channel();
-        RefCell::new(Ui { tx, rx, store: None, pairing: Arc::new(share::Pairing::default()), cancel: None, service_id: 0, receive_code: None, peers: Vec::new(), selected: None, sending: false, accepting: false, status: String::new(), modal: false })
+        RefCell::new(Ui { tx, rx, store: None, pairing: Arc::new(share::Pairing::default()), cancel: None, service_id: 0, receive_code: None, peers: Vec::new(), peer_seen: BTreeMap::new(), selected: None, sending: false, accepting: false, status: String::new(), modal: false })
     };
 }
 
@@ -275,14 +281,7 @@ pub fn open(hwnd: HWND) {
             Some(payload) => start_send(hwnd, payload),
             None => notify("Copia texto (hasta 256 KB) o una imagen (hasta 32 MB)."),
         },
-        Some(3) if receiving => match store.set_enabled(false) {
-            Ok(()) => {
-                stop();
-                notify("Recepción pausada. Tus equipos siguen vinculados.");
-            }
-            Err(error) => notify(&format!("No se pudo pausar la recepción. {error}")),
-        },
-        Some(3) => enable_receive(hwnd),
+        Some(3) => set_receiving(hwnd, !receiving),
         Some(4) => start_pairing(hwnd),
         Some(5) => start_search(hwnd, Search::Manage),
         Some(6) => {
@@ -386,15 +385,16 @@ fn start_send(hwnd: HWND, payload: Payload) {
     let Some(store) = store() else {
         return;
     };
-    let peer = UI.with_borrow(|ui| {
-        let selected = ui.selected.as_ref()?;
-        ui.peers
+    let Some((selected, peer)) = UI.with_borrow(|ui| {
+        let selected = ui.selected.clone()?;
+        let peer = ui
+            .peers
             .iter()
             .find(|peer| peer.certificate.as_ref() == selected.as_slice())
-            .cloned()
-    });
-    let Some(peer) = peer else {
-        notify("Elige un dispositivo vinculado que esté disponible.");
+            .cloned();
+        Some((selected, peer))
+    }) else {
+        notify("Elige primero un dispositivo vinculado.");
         return;
     };
     let started = UI.with_borrow_mut(|ui| {
@@ -408,13 +408,56 @@ fn start_send(hwnd: HWND, payload: Payload) {
         notify("Termina primero la solicitud actual.");
         return;
     }
-    notify("Enviando al equipo vinculado…");
+    notify(if peer.is_some() {
+        "Enviando al equipo vinculado…"
+    } else {
+        "Buscando el equipo vinculado…"
+    });
     let report = reporter(hwnd);
     thread::spawn(move || {
-        report(Event::Sent(
-            share::send(&store, peer, payload).map_err(|error| error.to_string()),
-        ))
+        let peer = match peer {
+            Some(peer) => Ok(peer),
+            None => share::discover(&store)
+                .map_err(|error| error.to_string())
+                .and_then(|peers| {
+                    let peer = peers
+                        .iter()
+                        .find(|peer| peer.certificate.as_ref() == selected.as_slice())
+                        .cloned();
+                    // Conserva también el resultado del sondeo solicitado por el usuario.
+                    report(Event::Discovery(Ok(peers)));
+                    peer.ok_or_else(|| {
+                        "El equipo no respondió a la búsqueda. Comprueba que tenga activada la recepción y que ambos estén en la misma red.".to_string()
+                    })
+                }),
+        };
+        report(Event::Sent(peer.and_then(|peer| {
+            share::send(&store, peer, payload).map_err(|error| error.to_string())
+        })))
     });
+}
+
+fn update_discovered_peers(ui: &mut Ui, discovered: Vec<Peer>) {
+    let now = Instant::now();
+    for peer in discovered {
+        let certificate = peer.certificate.to_vec();
+        ui.peer_seen.insert(certificate.clone(), now);
+        if let Some(current) = ui
+            .peers
+            .iter_mut()
+            .find(|current| current.certificate.as_ref() == certificate.as_slice())
+        {
+            *current = peer;
+        } else {
+            ui.peers.push(peer);
+        }
+    }
+    ui.peer_seen
+        .retain(|_, seen| now.saturating_duration_since(*seen) <= PEER_GRACE);
+    ui.peers
+        .retain(|peer| ui.peer_seen.contains_key(peer.certificate.as_ref()));
+    ui.peers
+        .sort_by(|left, right| left.name.cmp(&right.name).then(left.code.cmp(&right.code)));
 }
 
 fn start_search(hwnd: HWND, search: Search) {
@@ -455,15 +498,29 @@ fn start_discovery(hwnd: HWND) {
     });
 }
 
-fn enable_receive(hwnd: HWND) {
+pub fn receiving_enabled() -> bool {
+    store().is_some_and(|store| store.enabled())
+}
+
+/// Activa o pausa el listener sin borrar identidades ni equipos vinculados.
+pub fn set_receiving(hwnd: HWND, enabled: bool) {
     let Some(store) = store() else {
         return;
     };
-    if let Err(error) = store.set_enabled(true) {
-        notify(&format!("No se pudo activar la recepción. {error}"));
+    if let Err(error) = store.set_enabled(enabled) {
+        notify(&format!(
+            "No se pudo {} la recepción. {error}",
+            if enabled { "activar" } else { "pausar" }
+        ));
         return;
     }
-    start_receive(hwnd);
+    if enabled {
+        start_receive(hwnd);
+        notify("Recepción activada para tus equipos vinculados.");
+    } else {
+        stop();
+        notify("No molestar activado. Tus equipos siguen vinculados.");
+    }
 }
 
 fn start_receive(hwnd: HWND) {
@@ -699,7 +756,7 @@ pub fn on_event(hwnd: HWND) {
             }
             Event::Discovery(result) => {
                 if let Ok(peers) = result {
-                    UI.with_borrow_mut(|ui| ui.peers = peers);
+                    UI.with_borrow_mut(|ui| update_discovered_peers(ui, peers));
                     crate::with_app(|app| app.redraw());
                 }
             }

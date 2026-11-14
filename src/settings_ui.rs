@@ -130,6 +130,7 @@ struct Panel {
     focus: usize,
     dragging: Option<usize>,
     picker: Option<Picker>,
+    color: IslandColor,
 }
 
 impl Panel {
@@ -236,6 +237,13 @@ impl Panel {
             ..Default::default()
         };
         self.surface.pixmap.fill(Color::TRANSPARENT);
+        let [accent_r, accent_g, accent_b] = self.color.light();
+        let [base_r, base_g, base_b] = self.color.blend(10, 12);
+        let [side_r, side_g, side_b] = self.color.blend(18, 18);
+        let [selected_r, selected_g, selected_b] = self.color.blend(34, 48);
+        let [row_r, row_g, row_b] = self.color.blend(24, 14);
+        let [focus_r, focus_g, focus_b] = self.color.blend(38, 30);
+        let [toggle_r, toggle_g, toggle_b] = self.color.blend(76, 72);
         macro_rules! rect {
             ($x:expr, $y:expr, $w:expr, $h:expr, $r:expr, $color:expr) => {{
                 let [r, g, b, a] = $color;
@@ -265,19 +273,54 @@ impl Panel {
                 });
             };
         }
-        rect!(0.0, 0.0, WIDTH, HEIGHT, 18.0, [12, 18, 30, 255]);
-        rect!(12.0, 76.0, 172.0, HEIGHT - 88.0, 12.0, [19, 28, 44, 255]);
-        rect!(WIDTH - 84.0, 18.0, 28.0, 28.0, 8.0, [30, 42, 60, 255]);
-        rect!(WIDTH - 48.0, 18.0, 28.0, 28.0, 8.0, [39, 51, 70, 255]);
+        rect!(0.0, 0.0, WIDTH, HEIGHT, 18.0, [base_r, base_g, base_b, 255]);
+        rect!(
+            12.0,
+            76.0,
+            172.0,
+            HEIGHT - 88.0,
+            12.0,
+            [side_r, side_g, side_b, 255]
+        );
+        rect!(
+            WIDTH - 84.0,
+            18.0,
+            28.0,
+            28.0,
+            8.0,
+            [row_r, row_g, row_b, 255]
+        );
+        rect!(
+            WIDTH - 48.0,
+            18.0,
+            28.0,
+            28.0,
+            8.0,
+            [focus_r, focus_g, focus_b, 255]
+        );
         rect!(WIDTH - 75.0, 32.0, 10.0, 1.5, 0.75, [220, 230, 244, 255]);
         label!("×", WIDTH - 39.0, 22.0, 18.0, true, 1.0);
         for (i, category) in self.categories.iter().enumerate() {
             let y = 88.0 + i as f32 * 42.0;
             if i == self.category {
-                rect!(20.0, y, 156.0, 36.0, 9.0, [37, 73, 124, 255]);
+                rect!(
+                    20.0,
+                    y,
+                    156.0,
+                    36.0,
+                    9.0,
+                    [selected_r, selected_g, selected_b, 255]
+                );
             }
             if self.focus == i {
-                rect!(24.0, y + 9.0, 3.0, 18.0, 1.5, [134, 193, 255, 255]);
+                rect!(
+                    24.0,
+                    y + 9.0,
+                    3.0,
+                    18.0,
+                    1.5,
+                    [accent_r, accent_g, accent_b, 255]
+                );
             }
             label!(
                 &category.title,
@@ -309,9 +352,9 @@ impl Panel {
                     row.height - 5.0,
                     9.0,
                     if focus_row == Some(index) {
-                        [36, 54, 80, 255]
+                        [focus_r, focus_g, focus_b, 255]
                     } else {
-                        [23, 33, 50, 255]
+                        [row_r, row_g, row_b, 255]
                     }
                 );
             }
@@ -341,7 +384,7 @@ impl Panel {
                             18.0,
                             9.0,
                             if *checked {
-                                [67, 135, 231, 255]
+                                [toggle_r, toggle_g, toggle_b, 255]
                             } else {
                                 [64, 77, 96, 255]
                             }
@@ -389,7 +432,7 @@ impl Panel {
                         (width * fraction).max(4.0),
                         4.0,
                         2.0,
-                        [89, 165, 255, 255]
+                        [accent_r, accent_g, accent_b, 255]
                     );
                     rect!(
                         CONTENT_X + 10.0 + width * fraction,
@@ -403,7 +446,7 @@ impl Panel {
                 Item::DeviceStatus {
                     name, status, icon, ..
                 } => {
-                    paint.set_color_rgba8(134, 193, 255, 255);
+                    paint.set_color_rgba8(accent_r, accent_g, accent_b, 255);
                     island::draw_notice_icon(
                         &mut self.surface.pixmap,
                         &paint,
@@ -422,7 +465,14 @@ impl Panel {
             let range = CONTENT_BOTTOM - CONTENT_Y;
             let thumb = (range * range / (range + self.max_scroll())).max(28.0);
             let y = CONTENT_Y + (range - thumb) * self.scroll / self.max_scroll();
-            rect!(WIDTH - 14.0, y, 3.0, thumb, 1.5, [77, 102, 138, 255]);
+            rect!(
+                WIDTH - 14.0,
+                y,
+                3.0,
+                thumb,
+                1.5,
+                [accent_r, accent_g, accent_b, 210]
+            );
         }
         label!(
             "Los cambios se guardan automáticamente",
@@ -574,6 +624,7 @@ where
             focus: 0,
             dragging: None,
             picker: None,
+            color,
         };
         panel.render();
         let _ = ShowWindow(hwnd, SW_SHOW);
@@ -643,6 +694,7 @@ where
                         PickerAction::Cancel => panel.picker = None,
                         PickerAction::Apply(selected) => {
                             color = selected;
+                            panel.color = selected;
                             panel.picker = None;
                             panel.categories = command(Change::Color(selected)).0;
                         }

@@ -3589,6 +3589,10 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                         }
                         false
                     }
+                    Command::ToggleShareDnd => {
+                        share_ui::set_receiving(hwnd, !share_ui::receiving_enabled());
+                        true
+                    }
                     Command::ToggleBatteryNotices => {
                         settings.battery_notices = !settings.battery_notices;
                         settings.save();
