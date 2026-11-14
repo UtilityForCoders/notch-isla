@@ -268,6 +268,7 @@ pub fn perform(hwnd: HWND, action: crate::workspace::ShareAction) {
         },
         ShareAction::Device => select_device(hwnd),
         ShareAction::Inbox => open_received(hwnd),
+        ShareAction::Receiving => set_receiving(hwnd, !receiving_enabled()),
     }
     crate::with_app(|app| app.redraw());
 }
@@ -818,10 +819,10 @@ fn notify_received(message: &PendingMessage, unread: usize) {
         String::new()
     };
     crate::with_app(|app| {
-        app.tray.notify(
-            &format!("Mensaje de {}", message.sender),
-            &format!(
-                "{}{}. Haz clic para abrir.",
+        app.queue_share_notice(
+            format!("Mensaje de {}", message.sender),
+            format!(
+                "{}{} · Haz clic para abrir",
                 message_summary(message),
                 suffix
             ),
@@ -888,10 +889,6 @@ fn remove_message_file(message: &PendingMessage) {
     if let PendingContent::Image { path } = &message.content {
         let _ = std::fs::remove_file(path);
     }
-}
-
-pub fn has_unread() -> bool {
-    UI.with_borrow(|ui| !ui.inbox.is_empty())
 }
 
 pub fn open_received(hwnd: HWND) {

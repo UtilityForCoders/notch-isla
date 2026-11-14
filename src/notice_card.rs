@@ -1,15 +1,18 @@
-//! Aviso flotante en su propia ventana, sin tomar el foco ni interceptar clics.
+//! Aviso flotante en su propia ventana, sin tomar el foco; algunos avisos admiten clic.
 
 use std::time::{Duration, Instant};
 
 use tiny_skia::Color;
 use windows::core::{w, Result};
-use windows::Win32::Foundation::{COLORREF, HWND, POINT, RECT, SIZE};
+use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
 use windows::Win32::Graphics::Gdi::{AC_SRC_ALPHA, AC_SRC_OVER, BLENDFUNCTION};
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DestroyWindow, SetWindowPos, ShowWindow, UpdateLayeredWindow, SWP_NOACTIVATE,
-    SWP_NOSIZE, SWP_NOZORDER, SW_SHOWNOACTIVATE, ULW_ALPHA, WS_EX_LAYERED, WS_EX_NOACTIVATE,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GetWindow, LoadCursorW, PostMessageW,
+    RegisterClassW, SetWindowLongPtrW, SetWindowPos, ShowWindow, UpdateLayeredWindow,
+    GWLP_USERDATA, GW_OWNER, IDC_HAND, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SW_SHOWNOACTIVATE,
+    ULW_ALPHA, WM_APP, WM_LBUTTONUP, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
 use crate::{island, ActiveNotice, Surface, TextRenderer};
@@ -18,6 +21,24 @@ const WIDTH: f32 = 320.0;
 const HEIGHT: f32 = 50.0;
 const GAP: f32 = 8.0;
 const FADE: Duration = Duration::from_millis(140);
+const CLASS: windows::core::PCWSTR = w!("NotchIslaNoticeCard");
+pub const WM_NOTICE_CARD_CLICK: u32 = WM_APP + 14;
+
+extern "system" fn card_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    if msg == WM_LBUTTONUP
+        && unsafe {
+            windows::Win32::UI::WindowsAndMessaging::GetWindowLongPtrW(hwnd, GWLP_USERDATA)
+        } != 0
+    {
+        if let Ok(owner) = unsafe { GetWindow(hwnd, GW_OWNER) } {
+            unsafe {
+                let _ = PostMessageW(Some(owner), WM_NOTICE_CARD_CLICK, WPARAM(0), LPARAM(0));
+            }
+        }
+        return LRESULT(0);
+    }
+    unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+}
 
 pub struct NoticeCard {
     hwnd: HWND,
@@ -39,29 +60,49 @@ impl NoticeCard {
         self.hwnd
     }
 
-    pub fn new(scale: f32, bounds: RECT, notice: ActiveNotice, ms: u32) -> Result<Self> {
+    pub fn new(
+        owner: HWND,
+        scale: f32,
+        bounds: RECT,
+        notice: ActiveNotice,
+        ms: u32,
+        clickable: bool,
+    ) -> Result<Self> {
         let surface = card_surface(scale)?;
         let text = TextRenderer::new(scale)?;
         let hwnd = unsafe {
+            let instance = GetModuleHandleW(None)?;
+            let _ = RegisterClassW(&WNDCLASSW {
+                lpfnWndProc: Some(card_proc),
+                hInstance: instance.into(),
+                lpszClassName: CLASS,
+                hCursor: LoadCursorW(None, IDC_HAND)?,
+                ..Default::default()
+            });
+            let mut style = WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
+            if !clickable {
+                style |= WS_EX_TRANSPARENT;
+            }
             CreateWindowExW(
-                WS_EX_LAYERED
-                    | WS_EX_TOPMOST
-                    | WS_EX_TOOLWINDOW
-                    | WS_EX_NOACTIVATE
-                    | WS_EX_TRANSPARENT,
-                w!("Static"),
+                style,
+                CLASS,
                 w!("Aviso de Notch Isla"),
                 WS_POPUP,
                 0,
                 0,
                 0,
                 0,
-                None,
+                Some(owner),
                 None,
                 None,
                 None,
             )?
         };
+        if clickable {
+            unsafe {
+                SetWindowLongPtrW(hwnd, GWLP_USERDATA, 1);
+            }
+        }
         let started = Instant::now();
         Ok(Self {
             hwnd,

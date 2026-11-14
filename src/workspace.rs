@@ -15,6 +15,7 @@ pub enum ShareAction {
     Clipboard = 2,
     Device,
     Inbox,
+    Receiving,
 }
 
 #[derive(Default)]
@@ -31,7 +32,7 @@ const TAB_Y: f32 = 108.0;
 const EMPTY_TAB_Y: f32 = 16.0;
 const TAB_WIDTH: f32 = 36.0;
 const TAB_HEIGHT: f32 = 28.0;
-pub const SHARE_HEIGHT: f32 = 220.0;
+pub const SHARE_HEIGHT: f32 = 256.0;
 const SHARE_TAB_Y: f32 = SHARE_HEIGHT - 40.0;
 
 pub fn share_tab_center_y() -> f32 {
@@ -106,6 +107,10 @@ fn regions(width: f32, page: Page, empty_music: bool) -> Vec<(Hit, [f32; 4])> {
                 Hit::Share(ShareAction::Inbox),
                 [20.0, 142.0, width - 40.0, 30.0],
             ),
+            (
+                Hit::Share(ShareAction::Receiving),
+                [20.0, 178.0, width - 40.0, 30.0],
+            ),
         ]);
     }
     regions
@@ -178,7 +183,13 @@ pub fn draw(
             (color.light(), 40)
         } else if matches!(
             hit,
-            Hit::Share(ShareAction::Device | ShareAction::Files | ShareAction::Clipboard)
+            Hit::Share(
+                ShareAction::Device
+                    | ShareAction::Files
+                    | ShareAction::Clipboard
+                    | ShareAction::Inbox
+                    | ShareAction::Receiving
+            )
         ) {
             (color.light(), 26)
         } else {
@@ -220,6 +231,14 @@ pub fn draw(
                 },
                 Some(NoticeIcon::Share),
             ),
+            Hit::Share(ShareAction::Receiving) => (
+                if state.receiving {
+                    "Recepción activa".to_string()
+                } else {
+                    "No molestar · Recepción pausada".to_string()
+                },
+                Some(NoticeIcon::Wireless),
+            ),
             _ => continue,
         };
         if let Some(icon) = icon {
@@ -252,10 +271,8 @@ pub fn draw(
             state.status.clone()
         } else if state.busy {
             "Solicitud en curso…".to_string()
-        } else if state.receiving {
-            "Recepción activa".to_string()
         } else {
-            "Recepción pausada".to_string()
+            "Compartir cerca".to_string()
         };
         labels.push(LabelArea {
             text: status,
@@ -411,5 +428,20 @@ mod tests {
             .iter()
             .any(|label| label.text == "2 mensajes sin leer"));
         assert!(labels.iter().all(|label| label.text != "~~~"));
+
+        let paused = draw(
+            &mut image,
+            (0.0, 0.0, 360.0, SHARE_HEIGHT, 24.0),
+            1.0,
+            1.0,
+            Page::Share,
+            false,
+            None,
+            &ShareState::default(),
+            crate::settings::IslandColor::default(),
+        );
+        assert!(paused
+            .iter()
+            .any(|label| label.text == "No molestar · Recepción pausada"));
     }
 }
