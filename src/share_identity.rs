@@ -103,9 +103,6 @@ impl Store {
     pub fn devices(&self) -> Vec<TrustedDevice> {
         self.state.lock().unwrap().devices.clone()
     }
-    pub fn device_count(&self) -> usize {
-        self.state.lock().unwrap().devices.len()
-    }
     pub fn enabled(&self) -> bool {
         self.state.lock().unwrap().enabled
     }

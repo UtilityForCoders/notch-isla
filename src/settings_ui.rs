@@ -5,7 +5,7 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicIsize, Ordering};
 
 use tiny_skia::{Color, Paint};
-use windows::core::{w, Result};
+use windows::core::{w, Result, PCWSTR};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, SIZE, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MonitorFromPoint, AC_SRC_ALPHA, AC_SRC_OVER, BLENDFUNCTION, MONITORINFO,
@@ -133,6 +133,15 @@ struct Panel {
 }
 
 impl Panel {
+    fn set_scale(&mut self, scale: f32) -> Result<()> {
+        let width = (WIDTH * scale).ceil() as u32;
+        let height = (HEIGHT * scale).ceil() as u32;
+        self.surface = Surface::new(width, height)?;
+        self.text = TextRenderer::with_label_capacity(scale, 40)?;
+        self.scale = scale;
+        Ok(())
+    }
+
     fn rows(&self) -> Vec<Row> {
         rows(&self.categories[self.category].items)
     }
@@ -213,13 +222,7 @@ impl Panel {
                 .min((info.rcWork.right - info.rcWork.left - 24).max(1) as f32 / WIDTH)
                 .min((info.rcWork.bottom - info.rcWork.top - 24).max(1) as f32 / HEIGHT);
             if (scale - self.scale).abs() > 0.001 {
-                let width = (WIDTH * scale).ceil() as u32;
-                let height = (HEIGHT * scale).ceil() as u32;
-                let surface = Surface::new(width, height)?;
-                let text = TextRenderer::with_label_capacity(scale, 40)?;
-                self.surface = surface;
-                self.text = text;
-                self.scale = scale;
+                self.set_scale(scale)?;
             }
         }
         Ok(())
@@ -264,7 +267,9 @@ impl Panel {
         }
         rect!(0.0, 0.0, WIDTH, HEIGHT, 18.0, [12, 18, 30, 255]);
         rect!(12.0, 76.0, 172.0, HEIGHT - 88.0, 12.0, [19, 28, 44, 255]);
+        rect!(WIDTH - 84.0, 18.0, 28.0, 28.0, 8.0, [30, 42, 60, 255]);
         rect!(WIDTH - 48.0, 18.0, 28.0, 28.0, 8.0, [39, 51, 70, 255]);
+        rect!(WIDTH - 75.0, 32.0, 10.0, 1.5, 0.75, [220, 230, 244, 255]);
         label!("×", WIDTH - 39.0, 22.0, 18.0, true, 1.0);
         for (i, category) in self.categories.iter().enumerate() {
             let y = 88.0 + i as f32 * 42.0;
@@ -500,12 +505,16 @@ where
         }
         let instance = GetModuleHandleW(None)?;
         let class = w!("NotchSettingsWindow");
+        let resource = PCWSTR(std::ptr::without_provenance::<u16>(1));
+        let icon = LoadIconW(Some(instance.into()), resource)?;
         RegisterClassExW(&WNDCLASSEXW {
             cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
             lpfnWndProc: Some(wndproc),
             hInstance: instance.into(),
             lpszClassName: class,
             hCursor: LoadCursorW(None, IDC_ARROW)?,
+            hIcon: icon,
+            hIconSm: icon,
             ..Default::default()
         });
         let mut cursor = POINT::default();
@@ -650,8 +659,13 @@ where
                     Event::Close => break 'messages,
                     Event::Down(x, y) => {
                         let (x, y) = (x / panel.scale, y / panel.scale);
-                        if x >= WIDTH - 48.0 && y < 58.0 {
-                            break 'messages;
+                        if y < 58.0 && x >= WIDTH - 88.0 {
+                            if x >= WIDTH - 52.0 {
+                                break 'messages;
+                            } else {
+                                let _ = ShowWindow(hwnd, SW_MINIMIZE);
+                            }
+                            continue;
                         }
                         if y < 66.0 {
                             let _ = ReleaseCapture();

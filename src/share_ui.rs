@@ -32,13 +32,13 @@ pub const WM_SHARE_MENU: u32 = WM_APP + 13;
 const TITLE: &str = "Compartir cerca";
 
 enum Search {
-    Send(Payload),
     Pair,
     Manage,
 }
 
 enum Event {
     Devices(Search, std::result::Result<Vec<Peer>, String>),
+    Discovery(std::result::Result<Vec<Peer>, String>),
     Sent(std::result::Result<(), String>),
     Paired(std::result::Result<(), String>),
     ConfirmPair {
@@ -58,6 +58,8 @@ struct Ui {
     cancel: Option<Sender<()>>,
     service_id: u64,
     receive_code: Option<String>,
+    peers: Vec<Peer>,
+    selected: Option<Vec<u8>>,
     sending: bool,
     accepting: bool,
     status: String,
@@ -67,7 +69,7 @@ struct Ui {
 thread_local! {
     static UI: RefCell<Ui> = {
         let (tx, rx) = mpsc::channel();
-        RefCell::new(Ui { tx, rx, store: None, pairing: Arc::new(share::Pairing::default()), cancel: None, service_id: 0, receive_code: None, sending: false, accepting: false, status: String::new(), modal: false })
+        RefCell::new(Ui { tx, rx, store: None, pairing: Arc::new(share::Pairing::default()), cancel: None, service_id: 0, receive_code: None, peers: Vec::new(), selected: None, sending: false, accepting: false, status: String::new(), modal: false })
     };
 }
 
@@ -91,6 +93,7 @@ fn store() -> Option<Arc<Store>> {
 }
 
 pub fn init(hwnd: HWND) {
+    start_discovery(hwnd);
     if store().is_some_and(|store| store.enabled()) {
         start_receive(hwnd);
     }
@@ -154,12 +157,53 @@ impl Drop for PanelModal {
 }
 
 pub fn panel_state() -> crate::workspace::ShareState {
-    UI.with_borrow(|ui| crate::workspace::ShareState {
-        receiving: ui.cancel.is_some(),
-        devices: ui.store.as_ref().map_or(0, |store| store.device_count()),
-        busy: ui.sending || ui.accepting || ui.modal,
-        status: ui.status.clone(),
+    let devices = store().map_or_else(Vec::new, |store| store.devices());
+    UI.with_borrow_mut(|ui| {
+        let selected_exists = ui
+            .selected
+            .as_ref()
+            .is_some_and(|selected| devices.iter().any(|device| device.certificate == *selected));
+        if !selected_exists {
+            ui.selected = devices.first().map(|device| device.certificate.clone());
+        }
+        let selected = ui.selected.as_ref().and_then(|certificate| {
+            devices
+                .iter()
+                .find(|device| device.certificate == *certificate)
+        });
+        crate::workspace::ShareState {
+            receiving: ui.cancel.is_some(),
+            device_name: selected
+                .map(|device| device.display_name().to_owned())
+                .unwrap_or_default(),
+            busy: ui.sending || ui.accepting || ui.modal,
+            status: ui.status.clone(),
+        }
     })
+}
+
+fn select_next_device(hwnd: HWND) {
+    let Some(store) = store() else {
+        return;
+    };
+    let devices = store.devices();
+    if devices.is_empty() {
+        start_pairing(hwnd);
+        return;
+    }
+    UI.with_borrow_mut(|ui| {
+        let next = ui
+            .selected
+            .as_ref()
+            .and_then(|selected| {
+                devices
+                    .iter()
+                    .position(|device| device.certificate == *selected)
+            })
+            .map_or(0, |index| (index + 1) % devices.len());
+        ui.selected = Some(devices[next].certificate.clone());
+        ui.status = format!("Destino: {}", devices[next].display_name());
+    });
 }
 
 /// Las acciones del panel se ejecutan fuera del préstamo de App: los diálogos procesan mensajes.
@@ -187,27 +231,7 @@ pub fn perform(hwnd: HWND, action: crate::workspace::ShareAction) {
             Some(payload) => start_send(hwnd, payload),
             None => notify("Copia texto o una imagen primero."),
         },
-        ShareAction::Pair => start_pairing(hwnd),
-        ShareAction::Devices => start_search(hwnd, Search::Manage),
-        ShareAction::Receive => {
-            let Some(store) = store() else {
-                return;
-            };
-            if UI.with_borrow(|ui| ui.cancel.is_some()) {
-                match store.set_enabled(false) {
-                    Ok(()) => {
-                        stop();
-                        notify("Recepción pausada");
-                    }
-                    Err(error) => notify(&format!("No se pudo pausar. {error}")),
-                }
-            } else {
-                enable_receive(hwnd);
-                if UI.with_borrow(|ui| ui.cancel.is_some()) {
-                    notify("Recepción activada");
-                }
-            }
-        }
+        ShareAction::Device => select_next_device(hwnd),
     }
     crate::with_app(|app| app.redraw());
 }
@@ -359,7 +383,38 @@ pub(crate) fn clipboard_text(hwnd: HWND) -> Option<String> {
 }
 
 fn start_send(hwnd: HWND, payload: Payload) {
-    start_search(hwnd, Search::Send(payload));
+    let Some(store) = store() else {
+        return;
+    };
+    let peer = UI.with_borrow(|ui| {
+        let selected = ui.selected.as_ref()?;
+        ui.peers
+            .iter()
+            .find(|peer| peer.certificate.as_ref() == selected.as_slice())
+            .cloned()
+    });
+    let Some(peer) = peer else {
+        notify("Elige un dispositivo vinculado que esté disponible.");
+        return;
+    };
+    let started = UI.with_borrow_mut(|ui| {
+        if ui.sending || ui.accepting {
+            return false;
+        }
+        ui.sending = true;
+        true
+    });
+    if !started {
+        notify("Termina primero la solicitud actual.");
+        return;
+    }
+    notify("Enviando al equipo vinculado…");
+    let report = reporter(hwnd);
+    thread::spawn(move || {
+        report(Event::Sent(
+            share::send(&store, peer, payload).map_err(|error| error.to_string()),
+        ))
+    });
 }
 
 fn start_search(hwnd: HWND, search: Search) {
@@ -384,6 +439,19 @@ fn start_search(hwnd: HWND, search: Search) {
             search,
             share::discover(&store).map_err(|error| error.to_string()),
         ))
+    });
+}
+
+fn start_discovery(hwnd: HWND) {
+    let Some(store) = store() else {
+        return;
+    };
+    let report = reporter(hwnd);
+    thread::spawn(move || loop {
+        report(Event::Discovery(
+            share::discover(&store).map_err(|error| error.to_string()),
+        ));
+        thread::sleep(std::time::Duration::from_secs(5));
     });
 }
 
@@ -455,73 +523,6 @@ pub fn stop() {
         if let Some(cancel) = ui.cancel.take() {
             let _ = cancel.send(());
         }
-    });
-}
-
-fn choose_device(hwnd: HWND, payload: Payload, peers: Vec<Peer>) {
-    let Some(store) = store() else {
-        return;
-    };
-    let _modal = panel_modal();
-    let description = match &payload {
-        Payload::Image(_) => "Imagen copiada".into(),
-        Payload::Text(text) => format!("Texto · {} caracteres", text.chars().count()),
-        Payload::Files(files) if files.len() == 1 => files[0].file_name().map_or_else(
-            || "1 archivo".into(),
-            |name| name.to_string_lossy().into_owned(),
-        ),
-        Payload::Files(files) => format!("{} archivos", files.len()),
-    };
-    let mut items = vec![
-        Item::Label(description),
-        Item::Label("Tus dispositivos".into()),
-    ];
-    let devices = store.devices();
-    let mut available = Vec::new();
-    for device in devices {
-        if let Some(peer) = peers
-            .iter()
-            .find(|peer| peer.certificate.as_ref() == device.certificate)
-        {
-            let mut peer = peer.clone();
-            peer.name = device.display_name().to_owned();
-            available.push(peer);
-            items.push(action(
-                available.len(),
-                format!("{} · Disponible", device.display_name()),
-            ));
-        } else {
-            items.push(Item::Label(format!(
-                "{} · Sin conexión",
-                device.display_name()
-            )));
-        }
-    }
-    if available.is_empty() {
-        items.push(Item::Label(
-            "Abre Notch Isla y permite recibir en el otro PC".into(),
-        ));
-    }
-    items.push(Item::Separator);
-    items.push(action(1000, "Vincular otro equipo…"));
-    let selected = menu::show(items);
-    if selected == Some(1000) {
-        start_pairing(hwnd);
-        return;
-    }
-    let Some(peer) = selected
-        .and_then(|id| id.checked_sub(1))
-        .and_then(|index| available.into_iter().nth(index))
-    else {
-        return;
-    };
-    UI.with_borrow_mut(|ui| ui.sending = true);
-    notify("Enviando al equipo vinculado…");
-    let report = reporter(hwnd);
-    thread::spawn(move || {
-        report(Event::Sent(
-            share::send(&store, peer, payload).map_err(|error| error.to_string()),
-        ))
     });
 }
 
@@ -690,11 +691,16 @@ pub fn on_event(hwnd: HWND) {
                 UI.with_borrow_mut(|ui| ui.sending = false);
                 match result {
                     Ok(peers) => match search {
-                        Search::Send(payload) => choose_device(hwnd, payload, peers),
                         Search::Pair => choose_pair(hwnd, peers),
                         Search::Manage => manage_devices(hwnd, Some(&peers)),
                     },
                     Err(error) => notify(&format!("No se pudo buscar equipos. {error}")),
+                }
+            }
+            Event::Discovery(result) => {
+                if let Ok(peers) = result {
+                    UI.with_borrow_mut(|ui| ui.peers = peers);
+                    crate::with_app(|app| app.redraw());
                 }
             }
             Event::Sent(result) => {
