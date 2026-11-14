@@ -902,27 +902,46 @@ fn remove_message_file(message: &PendingMessage) {
 }
 
 pub fn open_received(hwnd: HWND) {
-    let Some(message) = UI.with_borrow(|ui| ui.inbox.front().cloned()) else {
+    if UI.with_borrow(|ui| ui.inbox.is_empty()) {
         notify("No hay mensajes pendientes.");
         return;
-    };
+    }
     let _modal = panel_modal();
-    let shown = match &message.content {
-        PendingContent::Text { text } => crate::share_preview::text(hwnd, &message.sender, text),
-        PendingContent::Image { path } => crate::share_preview::image(hwnd, &message.sender, path),
-        PendingContent::Files { path } => crate::share_preview::files(hwnd, &message.sender, path),
-    };
-    match shown {
-        Ok(()) => {
-            remove_message_file(&message);
-            UI.with_borrow_mut(|ui| {
-                ui.inbox.pop_front();
-                if let Err(error) = save_inbox(&ui.inbox) {
-                    ui.status = format!("No se pudo actualizar la bandeja. {error}");
+    while let Some((message, pending)) = UI.with_borrow(|ui| {
+        ui.inbox
+            .front()
+            .cloned()
+            .map(|message| (message, ui.inbox.len().saturating_sub(1)))
+    }) {
+        let shown = match &message.content {
+            PendingContent::Text { text } => {
+                crate::share_preview::text_pending(hwnd, &message.sender, text, pending)
+            }
+            PendingContent::Image { path } => {
+                crate::share_preview::image_pending(hwnd, &message.sender, path, pending)
+            }
+            PendingContent::Files { path } => {
+                crate::share_preview::files_pending(hwnd, &message.sender, path, pending)
+            }
+        };
+        match shown {
+            Ok(open_next) => {
+                remove_message_file(&message);
+                UI.with_borrow_mut(|ui| {
+                    ui.inbox.pop_front();
+                    if let Err(error) = save_inbox(&ui.inbox) {
+                        ui.status = format!("No se pudo actualizar la bandeja. {error}");
+                    }
+                });
+                if !open_next {
+                    break;
                 }
-            });
+            }
+            Err(error) => {
+                notify(&format!("No se pudo abrir el mensaje. {error}"));
+                break;
+            }
         }
-        Err(error) => notify(&format!("No se pudo abrir el mensaje. {error}")),
     }
 }
 

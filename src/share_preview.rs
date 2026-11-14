@@ -15,13 +15,14 @@ use windows::Win32::System::DataExchange::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Memory::*;
 use windows::Win32::UI::Controls::{
-    SetWindowTheme, DRAWITEMSTRUCT, EM_SETLIMITTEXT, EM_SETRECT, EM_SETSEL, ODS_FOCUS,
-    ODS_HOTLIGHT, ODS_SELECTED,
+    SetWindowTheme, DRAWITEMSTRUCT, EM_GETFIRSTVISIBLELINE, EM_GETLINECOUNT, EM_LINESCROLL,
+    EM_SETLIMITTEXT, EM_SETRECT, EM_SETSEL, ODS_FOCUS, ODS_HOTLIGHT, ODS_SELECTED,
 };
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
-use windows::Win32::UI::Input::KeyboardAndMouse::{GetFocus, SetFocus};
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetFocus, ReleaseCapture, SetCapture, SetFocus};
 use windows::Win32::UI::Shell::{
-    FOLDERID_Downloads, SHGetKnownFolderPath, ShellExecuteW, KF_FLAG_DEFAULT,
+    DefSubclassProc, FOLDERID_Downloads, SHGetKnownFolderPath, SetWindowSubclass, ShellExecuteW,
+    KF_FLAG_DEFAULT,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -58,8 +59,10 @@ struct Panel<'a> {
     path: Option<&'a Path>,
     view: ContentView,
     confirm: bool,
+    pending: usize,
     accepted: bool,
     done: bool,
+    scroll_drag: bool,
     scale: f32,
     brush: HBRUSH,
     content_brush: HBRUSH,
@@ -91,19 +94,22 @@ impl Panel<'_> {
     }
 }
 
-pub fn text(owner: HWND, sender: &str, text: &str) -> Result<()> {
-    show(
+pub fn text_pending(owner: HWND, sender: &str, text: &str, pending: usize) -> Result<bool> {
+    show_panel(
         owner,
         "Texto recibido",
         &format!("De {sender} · Hace un momento"),
         Some(text),
         None,
-        false,
+        None,
+        Vec::new(),
+        pending,
+        None,
+        None,
     )
-    .map(|_| ())
 }
 
-pub fn image(owner: HWND, sender: &str, path: &Path) -> Result<()> {
+pub fn image_pending(owner: HWND, sender: &str, path: &Path, pending: usize) -> Result<bool> {
     let image = decode_image(path)?;
     show_panel(
         owner,
@@ -113,13 +119,13 @@ pub fn image(owner: HWND, sender: &str, path: &Path) -> Result<()> {
         Some(image),
         Some(path),
         Vec::new(),
+        pending,
         None,
         None,
     )
-    .map(|_| ())
 }
 
-pub fn files(owner: HWND, sender: &str, path: &Path) -> Result<()> {
+pub fn files_pending(owner: HWND, sender: &str, path: &Path, pending: usize) -> Result<bool> {
     let paths = received_paths(path);
     let gallery = if paths.len() > 1 && paths.iter().all(|path| crate::share::is_image(path)) {
         paths
@@ -139,10 +145,10 @@ pub fn files(owner: HWND, sender: &str, path: &Path) -> Result<()> {
             None,
             Some(path),
             gallery,
+            pending,
             None,
             None,
-        )
-        .map(|_| ());
+        );
     }
     let entries = file_entries(&paths);
     let title = if entries.len() == 1 {
@@ -163,10 +169,10 @@ pub fn files(owner: HWND, sender: &str, path: &Path) -> Result<()> {
         None,
         Some(path),
         Vec::new(),
+        pending,
         None,
         None,
     )
-    .map(|_| ())
 }
 
 pub fn confirm(owner: HWND, description: &str, code: &str) -> bool {
@@ -233,6 +239,7 @@ fn show_with_label(
         image,
         None,
         Vec::new(),
+        0,
         primary_label,
         None,
     )
@@ -248,6 +255,7 @@ pub fn edit_device_name(owner: HWND, name: &str) -> Result<Option<String>> {
         None,
         None,
         Vec::new(),
+        0,
         Some("Guardar nombre"),
         Some(&mut edited),
     )?;
@@ -263,6 +271,7 @@ fn show_panel(
     image: Option<Image>,
     path: Option<&Path>,
     gallery: Vec<(PathBuf, Image)>,
+    pending: usize,
     primary_label: Option<&str>,
     edited: Option<&mut String>,
 ) -> Result<bool> {
@@ -351,8 +360,10 @@ fn show_panel(
             path,
             view,
             confirm,
+            pending,
             accepted: false,
             done: false,
+            scroll_drag: false,
             scale,
             brush,
             content_brush,
@@ -419,14 +430,18 @@ fn show_panel(
                 WS_CHILD
                     | WS_VISIBLE
                     | WS_TABSTOP
-                    | if editing { WS_BORDER } else { WS_VSCROLL }
+                    | if editing { WS_BORDER } else { WINDOW_STYLE(0) }
                     | WINDOW_STYLE(style as u32),
-                n(24),
-                n(92 + HEADER_HEIGHT),
-                width - n(48),
-                if editing { n(32) } else { height - n(254) },
+                n(if editing { 24 } else { 32 }),
+                n(if editing {
+                    92 + HEADER_HEIGHT
+                } else {
+                    100 + HEADER_HEIGHT
+                }),
+                width - n(if editing { 48 } else { 76 }),
+                if editing { n(32) } else { height - n(270) },
                 Some(hwnd),
-                editing.then_some(HMENU(4usize as _)),
+                Some(HMENU(4usize as _)),
                 Some(instance.into()),
                 None,
             )?;
@@ -437,10 +452,10 @@ fn show_panel(
             let _ = SetWindowTheme(edit, w!("DarkMode_Explorer"), None);
             if !editing {
                 let mut padding = RECT {
-                    left: n(16),
-                    top: n(14),
-                    right: width - n(64),
-                    bottom: height - n(268),
+                    left: n(8),
+                    top: n(6),
+                    right: width - n(92),
+                    bottom: height - n(282),
                 };
                 SendMessageW(
                     edit,
@@ -448,15 +463,7 @@ fn show_panel(
                     Some(WPARAM(0)),
                     Some(LPARAM((&mut padding as *mut RECT) as isize)),
                 );
-                let region = CreateRoundRectRgn(
-                    0,
-                    0,
-                    width - n(48),
-                    if editing { n(32) } else { height - n(254) },
-                    n(14),
-                    n(14),
-                );
-                let _ = SetWindowRgn(edit, Some(region), true);
+                let _ = SetWindowSubclass(edit, Some(edit_proc), 1, hwnd.0 as usize);
             }
             SendMessageW(
                 edit,
@@ -465,17 +472,49 @@ fn show_panel(
                 Some(LPARAM(1)),
             );
         }
-        let buttons: Vec<(usize, &str, i32, i32)> = match view {
-            ContentView::Text => vec![(2, "Cerrar", 24, 112), (1, "Copiar", 368, 140)],
-            ContentView::Image => vec![
-                (5, "↓  Guardar", 24, 112),
-                (6, "↗  Abrir", 148, 112),
-                (1, "▣  Copiar", 368, 140),
+        let next_label = format!("Siguiente · {}", panel.pending);
+        let buttons: Vec<(usize, String, i32, i32)> = match view {
+            ContentView::Text if panel.pending > 0 => vec![
+                (2, "Cerrar".into(), 24, 96),
+                (9, next_label, 132, 180),
+                (1, "Copiar".into(), 368, 140),
             ],
-            ContentView::Files => vec![(5, "↓  Guardar", 24, 112), (6, "↗  Abrir", 396, 112)],
+            ContentView::Text => vec![
+                (2, "Cerrar".into(), 24, 112),
+                (1, "Copiar".into(), 368, 140),
+            ],
+            ContentView::Image if panel.pending > 0 => vec![
+                (5, "↓  Guardar".into(), 24, 96),
+                (6, "↗  Abrir".into(), 132, 96),
+                (9, next_label, 240, 120),
+                (1, "▣  Copiar".into(), 368, 140),
+            ],
+            ContentView::Image => vec![
+                (5, "↓  Guardar".into(), 24, 112),
+                (6, "↗  Abrir".into(), 148, 112),
+                (1, "▣  Copiar".into(), 368, 140),
+            ],
+            ContentView::Files if panel.pending > 0 => vec![
+                (5, "↓  Guardar".into(), 24, 112),
+                (9, next_label, 148, 180),
+                (6, "↗  Abrir".into(), 396, 112),
+            ],
+            ContentView::Files => vec![
+                (5, "↓  Guardar".into(), 24, 112),
+                (6, "↗  Abrir".into(), 396, 112),
+            ],
             ContentView::Dialog => vec![
-                (1, primary_label.unwrap_or("Aceptar"), 280, 228),
-                (2, if editing { "Cancelar" } else { "Rechazar" }, 24, 120),
+                (1, primary_label.unwrap_or("Aceptar").into(), 280, 228),
+                (
+                    2,
+                    if editing {
+                        "Cancelar".into()
+                    } else {
+                        "Rechazar".into()
+                    },
+                    24,
+                    120,
+                ),
             ],
         };
         for (id, label, x, button_width) in buttons {
@@ -613,6 +652,29 @@ fn show_panel(
     }
 }
 
+unsafe extern "system" fn edit_proc(
+    hwnd: HWND,
+    msg: u32,
+    wp: WPARAM,
+    lp: LPARAM,
+    _id: usize,
+    owner: usize,
+) -> LRESULT {
+    let owner = HWND(owner as _);
+    if msg == WM_MOUSEWHEEL {
+        let delta = ((wp.0 >> 16) & 0xffff) as u16 as i16;
+        let lines = if delta > 0 { -3 } else { 3 };
+        SendMessageW(hwnd, EM_LINESCROLL, Some(WPARAM(0)), Some(LPARAM(lines)));
+        invalidate_scroll(owner);
+        return LRESULT(0);
+    }
+    let result = DefSubclassProc(hwnd, msg, wp, lp);
+    if matches!(msg, WM_KEYDOWN | WM_VSCROLL) {
+        invalidate_scroll(owner);
+    }
+    result
+}
+
 unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     // Retira la barra estándar; la cabecera propia ocupa el área cliente.
     if msg == WM_NCCALCSIZE {
@@ -638,6 +700,36 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
         }
         WM_CLOSE => {
             panel.done = true;
+            LRESULT(0)
+        }
+        WM_LBUTTONDOWN if matches!(panel.view, ContentView::Text | ContentView::Files) => {
+            let (x, y) = client_point(lp);
+            let content = content_rect(hwnd, panel);
+            let n = |value: i32| (value as f32 * panel.scale).round() as i32;
+            if x >= content.right - n(18)
+                && x <= content.right
+                && y >= content.top
+                && y <= content.bottom
+                && scroll_to_pointer(hwnd, panel, &content, y)
+            {
+                panel.scroll_drag = true;
+                let _ = SetCapture(hwnd);
+            }
+            LRESULT(0)
+        }
+        WM_MOUSEMOVE if panel.scroll_drag => {
+            let (_, y) = client_point(lp);
+            let content = content_rect(hwnd, panel);
+            let _ = scroll_to_pointer(hwnd, panel, &content, y);
+            LRESULT(0)
+        }
+        WM_LBUTTONUP if panel.scroll_drag => {
+            panel.scroll_drag = false;
+            let _ = ReleaseCapture();
+            LRESULT(0)
+        }
+        WM_CAPTURECHANGED => {
+            panel.scroll_drag = false;
             LRESULT(0)
         }
         WM_TIMER => {
@@ -717,6 +809,10 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                     panel.current = (panel.current + 1) % panel.gallery.len();
                     let _ = InvalidateRect(Some(hwnd), None, false);
                 }
+                9 if panel.pending > 0 => {
+                    panel.accepted = true;
+                    panel.done = true;
+                }
                 2 | 3 => panel.done = true,
                 _ => {}
             }
@@ -784,6 +880,17 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             let dc = BeginPaint(hwnd, &mut ps);
             let mut client = RECT::default();
             let _ = GetClientRect(hwnd, &mut client);
+            let scroll_paint = scroll_paint_rect(hwnd, panel.scale);
+            if matches!(panel.view, ContentView::Text | ContentView::Files)
+                && ps.rcPaint.left >= scroll_paint.left
+                && ps.rcPaint.right <= scroll_paint.right
+            {
+                FillRect(dc, &ps.rcPaint, panel.content_brush);
+                let content = content_rect(hwnd, panel);
+                paint_scroll_indicator(hwnd, dc, panel, &content);
+                let _ = EndPaint(hwnd, &ps);
+                return LRESULT(0);
+            }
             FillRect(dc, &client, panel.brush);
             let border = CreateSolidBrush(BORDER);
             let _ = FrameRect(dc, &client, border);
@@ -846,23 +953,23 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             }
             SelectObject(dc, panel.font.into());
             let _ = DeleteObject(heading.into());
-            if let Some(image) = panel.current_image() {
-                let box_rect = RECT {
-                    left: n(24),
-                    top: n(154),
-                    right: client.right - n(24),
-                    bottom: client.bottom - n(92),
-                };
+            let content_rect = RECT {
+                left: n(24),
+                top: n(154),
+                right: client.right - n(24),
+                bottom: client.bottom - n(92),
+            };
+            if panel.view != ContentView::Dialog {
                 let fill = CreateSolidBrush(CONTENT);
                 let old_brush = SelectObject(dc, fill.into());
                 let pen = CreatePen(PS_SOLID, 1, BORDER);
                 let old_pen = SelectObject(dc, pen.into());
                 let _ = RoundRect(
                     dc,
-                    box_rect.left,
-                    box_rect.top,
-                    box_rect.right,
-                    box_rect.bottom,
+                    content_rect.left,
+                    content_rect.top,
+                    content_rect.right,
+                    content_rect.bottom,
                     n(14),
                     n(14),
                 );
@@ -870,6 +977,12 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                 SelectObject(dc, old_pen);
                 let _ = DeleteObject(fill.into());
                 let _ = DeleteObject(pen.into());
+            }
+            if matches!(panel.view, ContentView::Text | ContentView::Files) {
+                paint_scroll_indicator(hwnd, dc, panel, &content_rect);
+            }
+            if let Some(image) = panel.current_image() {
+                let box_rect = content_rect;
                 let aw = (box_rect.right - box_rect.left - n(32)).max(1);
                 let ah = (box_rect.bottom - box_rect.top - n(32)).max(1);
                 let scale = (aw as f32 / image.width as f32)
@@ -902,6 +1015,119 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
         }
         _ => DefWindowProcW(hwnd, msg, wp, lp),
     }
+}
+
+fn client_point(lp: LPARAM) -> (i32, i32) {
+    (
+        (lp.0 as u32 & 0xffff) as i16 as i32,
+        ((lp.0 as u32 >> 16) & 0xffff) as i16 as i32,
+    )
+}
+
+unsafe fn content_rect(hwnd: HWND, panel: &Panel<'_>) -> RECT {
+    let mut client = RECT::default();
+    let _ = GetClientRect(hwnd, &mut client);
+    let n = |value: i32| (value as f32 * panel.scale).round() as i32;
+    RECT {
+        left: n(24),
+        top: n(154),
+        right: client.right - n(24),
+        bottom: client.bottom - n(92),
+    }
+}
+
+unsafe fn scroll_paint_rect(hwnd: HWND, scale: f32) -> RECT {
+    let mut client = RECT::default();
+    let _ = GetClientRect(hwnd, &mut client);
+    let n = |value: i32| (value as f32 * scale).round() as i32;
+    RECT {
+        left: client.right - n(40),
+        top: n(164),
+        right: client.right - n(26),
+        bottom: client.bottom - n(98),
+    }
+}
+
+unsafe fn invalidate_scroll(hwnd: HWND) {
+    let scale = GetDpiForWindow(hwnd).max(96) as f32 / 96.0;
+    let rect = scroll_paint_rect(hwnd, scale);
+    let _ = InvalidateRect(Some(hwnd), Some(&rect), false);
+}
+
+unsafe fn line_scroll_state(hwnd: HWND, panel: &Panel<'_>) -> Option<(HWND, i32, i32, i32)> {
+    let edit = GetDlgItem(Some(hwnd), 4).ok()?;
+    let total = SendMessageW(edit, EM_GETLINECOUNT, None, None).0 as i32;
+    let first = SendMessageW(edit, EM_GETFIRSTVISIBLELINE, None, None).0 as i32;
+    let mut edit_rect = RECT::default();
+    GetClientRect(edit, &mut edit_rect).ok()?;
+    let line_height = (20.0 * panel.scale).round().max(1.0) as i32;
+    let visible = ((edit_rect.bottom - edit_rect.top) / line_height).max(1);
+    (total > visible).then_some((edit, total, visible, first))
+}
+
+unsafe fn scroll_to_pointer(hwnd: HWND, panel: &Panel<'_>, content: &RECT, pointer_y: i32) -> bool {
+    let Some((edit, total, visible, first)) = line_scroll_state(hwnd, panel) else {
+        return false;
+    };
+    let n = |value: i32| (value as f32 * panel.scale).round() as i32;
+    let track_top = content.top + n(12);
+    let track_height = (content.bottom - n(12) - track_top).max(1);
+    let thumb_height = ((track_height as f32 * visible as f32 / total as f32).round() as i32)
+        .clamp(n(24), track_height);
+    let travel = (track_height - thumb_height).max(1);
+    let ratio = ((pointer_y - track_top - thumb_height / 2) as f32 / travel as f32).clamp(0.0, 1.0);
+    let target = ((total - visible) as f32 * ratio).round() as i32;
+    SendMessageW(
+        edit,
+        EM_LINESCROLL,
+        Some(WPARAM(0)),
+        Some(LPARAM((target - first) as isize)),
+    );
+    invalidate_scroll(hwnd);
+    true
+}
+
+unsafe fn paint_scroll_indicator(hwnd: HWND, dc: HDC, panel: &Panel<'_>, content: &RECT) {
+    let Some((_, total, visible, first)) = line_scroll_state(hwnd, panel) else {
+        return;
+    };
+    let n = |value: i32| (value as f32 * panel.scale).round() as i32;
+    let track_top = content.top + n(12);
+    let track_bottom = content.bottom - n(12);
+    let track_height = (track_bottom - track_top).max(1);
+    let thumb_height = ((track_height as f32 * visible as f32 / total as f32).round() as i32)
+        .clamp(n(24), track_height);
+    let range = (total - visible).max(1) as f32;
+    let progress = first.max(0) as f32 / range;
+    let thumb_top = track_top + ((track_height - thumb_height) as f32 * progress).round() as i32;
+    let track = CreateSolidBrush(COLORREF(0x463b32));
+    let previous_brush = SelectObject(dc, track.into());
+    let previous_pen = SelectObject(dc, GetStockObject(NULL_PEN));
+    let _ = RoundRect(
+        dc,
+        content.right - n(11),
+        track_top,
+        content.right - n(5),
+        track_bottom,
+        n(5),
+        n(5),
+    );
+    SelectObject(dc, previous_brush);
+    let _ = DeleteObject(track.into());
+    let brush = CreateSolidBrush(COLORREF(0x806f5f));
+    let previous_brush = SelectObject(dc, brush.into());
+    let _ = RoundRect(
+        dc,
+        content.right - n(11),
+        thumb_top,
+        content.right - n(5),
+        thumb_top + thumb_height,
+        n(5),
+        n(5),
+    );
+    SelectObject(dc, previous_brush);
+    SelectObject(dc, previous_pen);
+    let _ = DeleteObject(brush.into());
 }
 
 /// Marca, subtítulo espaciado y una línea de acento discreta.
@@ -1262,7 +1488,7 @@ mod tests {
             )
             .ok()?;
         }
-        text(HWND::default(), "Mi portátil", "Hola 👋\r\nEste es el texto recibido desde otro equipo.\r\n\r\nPuedes seleccionarlo o copiar todo con el botón Copiar.")?;
+        text_pending(HWND::default(), "Mi portátil", "Hola 👋\r\nEste es el texto recibido desde otro equipo.\r\n\r\nPuedes seleccionarlo o copiar todo con el botón Copiar.", 0)?;
         let mut pixels = Vec::new();
         for y in 0..180 {
             for x in 0..320 {
@@ -1289,7 +1515,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("sample.bmp");
         std::fs::write(&path, bmp).unwrap();
-        image(HWND::default(), "Mi portátil", &path)?;
+        image_pending(HWND::default(), "Mi portátil", &path, 0)?;
         confirm(
             HWND::default(),
             "Mi portátil quiere enviarte 2 archivos.\r\n\r\nDocumento.pdf\r\nProyecto.zip",
