@@ -51,7 +51,10 @@ pub enum ContentKind {
 }
 
 pub enum Received {
-    Files(PathBuf),
+    Files {
+        sender: String,
+        path: PathBuf,
+    },
     Text {
         sender: String,
         text: String,
@@ -968,7 +971,12 @@ fn finish_receive(
     if saved.is_ok() {
         let _ = stream.write_all(&[1]).and_then(|()| stream.flush());
     }
-    saved.map(|path| Some(Received::Files(path)))
+    saved.map(|path| {
+        Some(Received::Files {
+            sender: clean_label(&offer.sender),
+            path,
+        })
+    })
 }
 
 fn save_offer(downloads: &Path, stream: &mut impl Read, offer: &Offer) -> Result<PathBuf> {
@@ -1191,7 +1199,7 @@ mod tests {
         assert_eq!(std::fs::read(&path)?, [1, 2, 3, 4]);
         drop(temporary);
         assert!(!path.exists());
-        let Some(Received::Files(path)) = received.next().unwrap() else {
+        let Some(Received::Files { path, .. }) = received.next().unwrap() else {
             panic!("esperaba archivo")
         };
         assert_eq!(

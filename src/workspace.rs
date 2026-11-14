@@ -14,6 +14,7 @@ pub enum ShareAction {
     Files = 1,
     Clipboard = 2,
     Device,
+    Inbox,
 }
 
 #[derive(Default)]
@@ -22,6 +23,7 @@ pub struct ShareState {
     pub device_name: String,
     pub busy: bool,
     pub status: String,
+    pub unread: usize,
 }
 
 const TAB_X: f32 = 16.0;
@@ -29,7 +31,7 @@ const TAB_Y: f32 = 108.0;
 const EMPTY_TAB_Y: f32 = 16.0;
 const TAB_WIDTH: f32 = 36.0;
 const TAB_HEIGHT: f32 = 28.0;
-pub const SHARE_HEIGHT: f32 = 184.0;
+pub const SHARE_HEIGHT: f32 = 220.0;
 const SHARE_TAB_Y: f32 = SHARE_HEIGHT - 40.0;
 
 pub fn share_tab_center_y() -> f32 {
@@ -99,6 +101,10 @@ fn regions(width: f32, page: Page, empty_music: bool) -> Vec<(Hit, [f32; 4])> {
             (
                 Hit::Share(ShareAction::Clipboard),
                 [20.0, 106.0, width - 40.0, 30.0],
+            ),
+            (
+                Hit::Share(ShareAction::Inbox),
+                [20.0, 142.0, width - 40.0, 30.0],
             ),
         ]);
     }
@@ -191,9 +197,9 @@ pub fn draw(
         let (label, icon) = match hit {
             Hit::Share(ShareAction::Device) => {
                 let label = if state.device_name.is_empty() {
-                    "Vincular un dispositivo…".to_string()
+                    "Para: vincula un dispositivo…".to_string()
                 } else {
-                    format!("Enviar a: {}", state.device_name)
+                    format!("Para: {}  ▾", state.device_name)
                 };
                 (label, Some(NoticeIcon::Wireless))
             }
@@ -203,6 +209,16 @@ pub fn draw(
             Hit::Share(ShareAction::Clipboard) => (
                 "Enviar portapapeles".to_string(),
                 Some(NoticeIcon::Keyboard),
+            ),
+            Hit::Share(ShareAction::Inbox) => (
+                if state.unread == 0 {
+                    "Mensajes recibidos".to_string()
+                } else if state.unread == 1 {
+                    "1 mensaje sin leer".to_string()
+                } else {
+                    format!("{} mensajes sin leer", state.unread)
+                },
+                Some(NoticeIcon::Share),
             ),
             _ => continue,
         };
@@ -233,16 +249,16 @@ pub fn draw(
     }
     if page == Page::Share {
         let status = if !state.status.is_empty() {
-            &state.status
+            state.status.clone()
         } else if state.busy {
-            "Solicitud en curso…"
+            "Solicitud en curso…".to_string()
         } else if state.receiving {
-            "~~~"
+            "Recepción activa".to_string()
         } else {
-            "Recepción pausada"
+            "Recepción pausada".to_string()
         };
         labels.push(LabelArea {
-            text: status.to_string(),
+            text: status,
             x: left + 20.0 * scale,
             y: top + 8.0 * scale,
             w: width - 92.0 * scale,
@@ -301,7 +317,7 @@ mod tests {
                 };
                 let top = (bounds.1 + tab_y * scale).round() as u32;
                 let bottom = (bounds.1 + (tab_y + TAB_HEIGHT) * scale).round() as u32 - 1;
-                let mut image = Pixmap::new(600, 400).unwrap();
+                let mut image = Pixmap::new(600, 600).unwrap();
                 draw(
                     &mut image,
                     bounds,
@@ -370,5 +386,30 @@ mod tests {
                 assert_eq!(image.pixel(x, y).unwrap().alpha(), expected);
             }
         }
+    }
+
+    #[test]
+    fn compartir_muestra_estado_y_bandeja_legibles() {
+        let mut image = Pixmap::new(400, 260).unwrap();
+        let labels = draw(
+            &mut image,
+            (0.0, 0.0, 360.0, SHARE_HEIGHT, 24.0),
+            1.0,
+            1.0,
+            Page::Share,
+            false,
+            None,
+            &ShareState {
+                receiving: true,
+                unread: 2,
+                ..Default::default()
+            },
+            crate::settings::IslandColor::default(),
+        );
+        assert!(labels.iter().any(|label| label.text == "Recepción activa"));
+        assert!(labels
+            .iter()
+            .any(|label| label.text == "2 mensajes sin leer"));
+        assert!(labels.iter().all(|label| label.text != "~~~"));
     }
 }

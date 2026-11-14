@@ -1,8 +1,9 @@
 //! Acciones de compartir en la isla y diálogos de confirmación de Windows.
 
 use crate::share_identity::Store;
+use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::ffi::OsString;
 use std::os::windows::ffi::OsStringExt;
 use std::path::PathBuf;
@@ -70,12 +71,27 @@ struct Ui {
     accepting: bool,
     status: String,
     modal: bool,
+    inbox: VecDeque<PendingMessage>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct PendingMessage {
+    sender: String,
+    content: PendingContent,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum PendingContent {
+    Text { text: String },
+    Image { path: PathBuf },
+    Files { path: PathBuf },
 }
 
 thread_local! {
     static UI: RefCell<Ui> = {
         let (tx, rx) = mpsc::channel();
-        RefCell::new(Ui { tx, rx, store: None, pairing: Arc::new(share::Pairing::default()), cancel: None, service_id: 0, receive_code: None, peers: Vec::new(), peer_seen: BTreeMap::new(), selected: None, sending: false, accepting: false, status: String::new(), modal: false })
+        RefCell::new(Ui { tx, rx, store: None, pairing: Arc::new(share::Pairing::default()), cancel: None, service_id: 0, receive_code: None, peers: Vec::new(), peer_seen: BTreeMap::new(), selected: None, sending: false, accepting: false, status: String::new(), modal: false, inbox: load_inbox() })
     };
 }
 
@@ -102,6 +118,9 @@ pub fn init(hwnd: HWND) {
     start_discovery(hwnd);
     if store().is_some_and(|store| store.enabled()) {
         start_receive(hwnd);
+    }
+    if let Some(message) = UI.with_borrow(|ui| ui.inbox.front().cloned()) {
+        notify_received(&message, UI.with_borrow(|ui| ui.inbox.len()));
     }
 }
 
@@ -184,11 +203,12 @@ pub fn panel_state() -> crate::workspace::ShareState {
                 .unwrap_or_default(),
             busy: ui.sending || ui.accepting || ui.modal,
             status: ui.status.clone(),
+            unread: ui.inbox.len(),
         }
     })
 }
 
-fn select_next_device(hwnd: HWND) {
+fn select_device(hwnd: HWND) {
     let Some(store) = store() else {
         return;
     };
@@ -197,19 +217,28 @@ fn select_next_device(hwnd: HWND) {
         start_pairing(hwnd);
         return;
     }
-    UI.with_borrow_mut(|ui| {
-        let next = ui
-            .selected
-            .as_ref()
-            .and_then(|selected| {
-                devices
-                    .iter()
-                    .position(|device| device.certificate == *selected)
-            })
-            .map_or(0, |index| (index + 1) % devices.len());
-        ui.selected = Some(devices[next].certificate.clone());
-        ui.status = format!("Destino: {}", devices[next].display_name());
-    });
+    let _modal = panel_modal();
+    let selected = UI.with_borrow(|ui| ui.selected.clone());
+    let mut items = vec![Item::Label("Enviar a".into())];
+    for (index, device) in devices.iter().enumerate() {
+        items.push(Item::Action {
+            id: index + 1,
+            label: device.display_name().to_owned(),
+            checked: selected.as_ref() == Some(&device.certificate),
+        });
+    }
+    items.push(Item::Separator);
+    items.push(action(1000, "Vincular otro equipo…"));
+    match menu::show(items) {
+        Some(1000) => start_pairing(hwnd),
+        Some(id) if (1..=devices.len()).contains(&id) => {
+            UI.with_borrow_mut(|ui| {
+                ui.selected = Some(devices[id - 1].certificate.clone());
+                ui.status.clear();
+            });
+        }
+        _ => {}
+    }
 }
 
 /// Las acciones del panel se ejecutan fuera del préstamo de App: los diálogos procesan mensajes.
@@ -237,7 +266,8 @@ pub fn perform(hwnd: HWND, action: crate::workspace::ShareAction) {
             Some(payload) => start_send(hwnd, payload),
             None => notify("Copia texto o una imagen primero."),
         },
-        ShareAction::Device => select_next_device(hwnd),
+        ShareAction::Device => select_device(hwnd),
+        ShareAction::Inbox => open_received(hwnd),
     }
     crate::with_app(|app| app.redraw());
 }
@@ -248,15 +278,27 @@ pub fn open(hwnd: HWND) {
     };
     let (receiving, accepting, pairing) =
         UI.with_borrow(|ui| (ui.cancel.is_some(), ui.accepting, ui.pairing.is_open()));
-    let mut items = vec![
-        Item::Label(TITLE.into()),
+    let unread = UI.with_borrow(|ui| ui.inbox.len());
+    let mut items = vec![Item::Label(TITLE.into())];
+    if unread > 0 {
+        items.push(action(
+            7,
+            if unread == 1 {
+                "1 mensaje sin leer".to_string()
+            } else {
+                format!("{unread} mensajes sin leer")
+            },
+        ));
+        items.push(Item::Separator);
+    }
+    items.extend([
         action(1, "Elegir fotos o archivos…"),
         action(2, "Enviar texto o imagen copiada"),
         Item::Separator,
         action(4, "Vincular equipo…"),
         action(5, format!("Tus dispositivos · {}", store.devices().len())),
         Item::Separator,
-    ];
+    ]);
     if accepting {
         items.push(Item::Label("Solicitud entrante en curso".into()));
     }
@@ -288,6 +330,7 @@ pub fn open(hwnd: HWND) {
             UI.with_borrow(|ui| ui.pairing.close());
             notify("Vinculación cerrada. Solo pueden enviar tus equipos guardados.");
         }
+        Some(7) => open_received(hwnd),
         _ => {}
     }
 }
@@ -708,36 +751,186 @@ fn confirm_pair(hwnd: HWND, name: String, code: String, decision: Sender<bool>) 
     UI.with_borrow_mut(|ui| ui.accepting = false);
 }
 
-fn show_received(hwnd: HWND, result: std::result::Result<Option<share::Received>, String>) {
-    match result {
-        Ok(Some(share::Received::Text { sender, text })) => {
-            if let Err(error) = crate::share_preview::text(hwnd, &sender, &text) {
-                notify(&format!("No se pudo mostrar el texto. {error}"));
-            }
-        }
+fn inbox_path() -> Option<PathBuf> {
+    std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .map(|path| path.join("NotchIsla").join("share-inbox.json"))
+}
+
+fn load_inbox() -> VecDeque<PendingMessage> {
+    let Some(path) = inbox_path() else {
+        return VecDeque::new();
+    };
+    let Ok(bytes) = std::fs::read(path) else {
+        return VecDeque::new();
+    };
+    let Ok(mut messages) = serde_json::from_slice::<VecDeque<PendingMessage>>(&bytes) else {
+        return VecDeque::new();
+    };
+    messages.truncate(100);
+    messages.retain(|message| match &message.content {
+        PendingContent::Text { .. } => true,
+        PendingContent::Image { path } | PendingContent::Files { path } => path.exists(),
+    });
+    messages
+}
+
+fn save_inbox(messages: &VecDeque<PendingMessage>) -> std::io::Result<()> {
+    let path = inbox_path().ok_or_else(|| std::io::Error::other("LOCALAPPDATA no disponible"))?;
+    let directory = path.parent().expect("share-inbox tiene carpeta");
+    std::fs::create_dir_all(directory)?;
+    let temporary = path.with_extension("json.tmp");
+    std::fs::write(&temporary, serde_json::to_vec(messages)?)?;
+    if path.exists() {
+        std::fs::remove_file(&path)?;
+    }
+    std::fs::rename(temporary, path)
+}
+
+fn stable_image(path: &std::path::Path) -> std::io::Result<PathBuf> {
+    let directory = inbox_path()
+        .and_then(|path| path.parent().map(|parent| parent.join("share-inbox")))
+        .ok_or_else(|| std::io::Error::other("LOCALAPPDATA no disponible"))?;
+    std::fs::create_dir_all(&directory)?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let destination = directory.join(format!("imagen-{stamp}.bin"));
+    if std::fs::rename(path, &destination).is_err() {
+        std::fs::copy(path, &destination)?;
+    }
+    Ok(destination)
+}
+
+fn message_summary(message: &PendingMessage) -> &'static str {
+    match message.content {
+        PendingContent::Text { .. } => "Te envió un texto",
+        PendingContent::Image { .. } => "Te envió una imagen",
+        PendingContent::Files { .. } => "Sus archivos ya están en Descargas",
+    }
+}
+
+fn notify_received(message: &PendingMessage, unread: usize) {
+    let suffix = if unread > 1 {
+        format!(" · {unread} sin leer")
+    } else {
+        String::new()
+    };
+    crate::with_app(|app| {
+        app.tray.notify(
+            &format!("Mensaje de {}", message.sender),
+            &format!(
+                "{}{}. Haz clic para abrir.",
+                message_summary(message),
+                suffix
+            ),
+        );
+        app.redraw();
+    });
+}
+
+fn queue_received(result: std::result::Result<Option<share::Received>, String>) {
+    let message = match result {
+        Ok(Some(share::Received::Text { sender, text })) => Some(PendingMessage {
+            sender,
+            content: PendingContent::Text { text },
+        }),
         Ok(Some(share::Received::Image {
             sender,
             directory,
             path,
-        })) => {
-            if let Err(error) = crate::share_preview::image(hwnd, &sender, &path) {
-                notify(&format!("No se pudo mostrar la imagen. {error}"));
+        })) => match stable_image(&path) {
+            Ok(path) => {
+                drop(directory);
+                Some(PendingMessage {
+                    sender,
+                    content: PendingContent::Image { path },
+                })
             }
-            drop(directory);
+            Err(error) => {
+                drop(directory);
+                notify(&format!("No se pudo guardar la imagen recibida. {error}"));
+                None
+            }
+        },
+        Ok(Some(share::Received::Files { sender, path })) => Some(PendingMessage {
+            sender,
+            content: PendingContent::Files { path },
+        }),
+        Ok(None) => None,
+        Err(error) => {
+            notify(&format!("No se pudo recibir. {error}"));
+            None
         }
-        Ok(Some(share::Received::Files(path))) => {
-            let message = HSTRING::from(format!("Guardado en:\n{}", path.display()));
+    };
+    let Some(message) = message else {
+        return;
+    };
+    let (unread, save_result) = UI.with_borrow_mut(|ui| {
+        if ui.inbox.len() == 100 {
+            if let Some(old) = ui.inbox.pop_front() {
+                remove_message_file(&old);
+            }
+        }
+        ui.inbox.push_back(message.clone());
+        (ui.inbox.len(), save_inbox(&ui.inbox))
+    });
+    if let Err(error) = save_result {
+        notify(&format!(
+            "El mensaje se recibió, pero no pudo guardarse. {error}"
+        ));
+    }
+    notify_received(&message, unread);
+}
+
+fn remove_message_file(message: &PendingMessage) {
+    if let PendingContent::Image { path } = &message.content {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+pub fn has_unread() -> bool {
+    UI.with_borrow(|ui| !ui.inbox.is_empty())
+}
+
+pub fn open_received(hwnd: HWND) {
+    let Some(message) = UI.with_borrow(|ui| ui.inbox.front().cloned()) else {
+        notify("No hay mensajes pendientes.");
+        return;
+    };
+    let _modal = panel_modal();
+    let shown = match &message.content {
+        PendingContent::Text { text } => crate::share_preview::text(hwnd, &message.sender, text),
+        PendingContent::Image { path } => crate::share_preview::image(hwnd, &message.sender, path),
+        PendingContent::Files { path } => {
+            let detail = HSTRING::from(format!(
+                "{} te envió archivos.\n\nGuardado en:\n{}",
+                message.sender,
+                path.display()
+            ));
             unsafe {
                 MessageBoxW(
-                    None,
-                    &message,
+                    Some(hwnd),
+                    &detail,
                     w!("Envío recibido · Notch Isla"),
                     MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND,
                 );
             }
+            Ok(())
         }
-        Ok(None) => {}
-        Err(error) => notify(&format!("No se pudo recibir. {error}")),
+    };
+    match shown {
+        Ok(()) => {
+            remove_message_file(&message);
+            UI.with_borrow_mut(|ui| {
+                ui.inbox.pop_front();
+                if let Err(error) = save_inbox(&ui.inbox) {
+                    ui.status = format!("No se pudo actualizar la bandeja. {error}");
+                }
+            });
+        }
+        Err(error) => notify(&format!("No se pudo abrir el mensaje. {error}")),
     }
 }
 
@@ -816,9 +1009,7 @@ pub fn on_event(hwnd: HWND) {
                         UI.with_borrow_mut(|ui| ui.accepting = false);
                     }
                     ReceiveEvent::Completed { result, resume } => {
-                        UI.with_borrow_mut(|ui| ui.accepting = true);
-                        show_received(hwnd, result.map_err(|error| error.to_string()));
-                        UI.with_borrow_mut(|ui| ui.accepting = false);
+                        queue_received(result.map_err(|error| error.to_string()));
                         let _ = resume.send(());
                     }
                 }

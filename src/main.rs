@@ -3553,7 +3553,11 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 menu_open = app.tray_menu_open;
             });
             if event == NIN_BALLOONUSERCLICK {
-                apply_update(pending.as_ref());
+                if share_ui::has_unread() {
+                    share_ui::open_received(hwnd);
+                } else {
+                    apply_update(pending.as_ref());
+                }
             } else if (event == WM_RBUTTONUP || event == WM_CONTEXTMENU) && !menu_open {
                 let Some(settings) = settings else {
                     return LRESULT(0);
