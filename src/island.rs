@@ -1616,15 +1616,16 @@ fn draw_button(
             paint.set_color_rgba8(r, g, b, a);
             let tri_w = 6.0 * s;
             let tri_h = 10.0 * s;
-            fill_triangle(pixmap, &paint, cx + 1.0 * s, cy, -tri_w, tri_h);
-            fill_triangle(pixmap, &paint, cx + 7.5 * s, cy, -tri_w, tri_h);
+            // La caja conjunta de los dos triángulos queda centrada en `cx`.
+            fill_triangle(pixmap, &paint, cx - 0.25 * s, cy, -tri_w, tri_h);
+            fill_triangle(pixmap, &paint, cx + 6.25 * s, cy, -tri_w, tri_h);
         }
         Button::Next => {
             paint.set_color_rgba8(r, g, b, a);
             let tri_w = 6.0 * s;
             let tri_h = 10.0 * s;
-            fill_triangle(pixmap, &paint, cx - 7.5 * s, cy, tri_w, tri_h);
-            fill_triangle(pixmap, &paint, cx - 1.0 * s, cy, tri_w, tri_h);
+            fill_triangle(pixmap, &paint, cx - 6.25 * s, cy, tri_w, tri_h);
+            fill_triangle(pixmap, &paint, cx + 0.25 * s, cy, tri_w, tri_h);
         }
     }
 }
