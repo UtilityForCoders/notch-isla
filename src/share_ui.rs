@@ -792,12 +792,7 @@ fn confirm_pair(hwnd: HWND, name: String, code: String, decision: Sender<bool>) 
 }
 
 fn inbox_path() -> Option<PathBuf> {
-    std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .map(|path| {
-            path.join(crate::settings::DATA_DIR)
-                .join("share-inbox.json")
-        })
+    crate::settings::data_dir().map(|path| path.join("share-inbox.json"))
 }
 
 fn load_inbox() -> VecDeque<PendingMessage> {

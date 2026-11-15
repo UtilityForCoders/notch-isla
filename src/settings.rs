@@ -14,6 +14,16 @@ pub const KEY: PCWSTR = w!("Software\\Nocho");
 /// Carpeta de datos en `%LOCALAPPDATA%` (identidad de Compartir cerca y mensajes recibidos).
 pub const DATA_DIR: &str = "Nocho";
 
+/// Carpeta de datos de la app: `%LOCALAPPDATA%\Nocho`. En las pruebas es una carpeta temporal,
+/// para no crear ni tocar los datos reales del usuario (una carpeta creada antes de tiempo
+/// impide traer los de Notch Isla).
+pub fn data_dir() -> Option<std::path::PathBuf> {
+    if cfg!(test) {
+        return Some(std::env::temp_dir().join("nocho-pruebas").join(DATA_DIR));
+    }
+    std::env::var_os("LOCALAPPDATA").map(|base| std::path::PathBuf::from(base).join(DATA_DIR))
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct IslandColor(pub [u8; 3]);
 
