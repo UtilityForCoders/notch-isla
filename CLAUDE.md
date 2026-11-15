@@ -85,6 +85,10 @@ Todos los commits y títulos de PR siguen [Conventional Commits](https://www.con
 - **En PRs, `develop` y `main`** (job `build`), el CI revisa el formato (`cargo fmt --check`),
   pasa clippy (`-D warnings`), corre las pruebas (`cargo test --release`) y compila el `.exe`
   y el instalador. Solo en `main` se firman, si SignPath está configurado.
+  Después arranca la app y la deja en reposo (`scripts/comprobar-app.ps1`): falla si se cae o si
+  gasta más CPU, hilos o memoria de lo presupuestado, o si el `.exe` crece de más.
+- **En PRs, `develop` y `main`** (job `dependencias`), cargo-deny busca vulnerabilidades conocidas
+  en las dependencias de `Cargo.lock`.
 - **En `main`** (job `release`): si la compilación terminó bien y la versión de `Cargo.toml`
   todavía no tiene etiqueta, crea la etiqueta `vx.y.z` y el release "Nocho x.y.z". Adjunta
   `nocho-setup-x.y.z.exe` (el actualizador lo busca exactamente con ese nombre),

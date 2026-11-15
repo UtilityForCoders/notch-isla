@@ -93,6 +93,18 @@ jobs:
             exit 1
           fi
 
+  # Vulnerabilidades conocidas (RustSec) en las dependencias de Cargo.lock.
+  dependencias:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check advisories
+
   build:
     runs-on: windows-latest
     env:
@@ -125,6 +137,12 @@ jobs:
 
       - name: Compilar la app
         run: cargo build --release
+
+      # Arranca la isla, la deja en reposo y falla si se cae o si gasta más de lo presupuestado.
+      # Los límites van holgados (ver el script): en un equipo normal la isla en reposo gasta
+      # menos del 2 % de un núcleo, unos 28 hilos y 30 MB.
+      - name: Arranque y consumo en reposo
+        run: ./scripts/comprobar-app.ps1 -Exe target/release/nocho.exe -MaxCpu 10 -MaxHilos 64 -MaxMemoriaMB 120 -MaxExeKB 4600
 
       - name: Subir el .exe sin firmar
         id: unsigned-exe
