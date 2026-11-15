@@ -1563,7 +1563,13 @@ impl App {
     /// Si ya está corriendo, `tick` ajusta el intervalo en el siguiente cuadro.
     fn redraw(&mut self) {
         let motion = self.render();
-        let target = timer_for(&motion, false, self.frame_ms());
+        self.keep_moving(&motion);
+    }
+
+    /// Arranca el temporizador si el cuadro recién dibujado dejó algo moviéndose (o acorta su
+    /// intervalo si hace falta).
+    fn keep_moving(&mut self, motion: &Motion) {
+        let target = timer_for(motion, false, self.frame_ms());
         if target.is_some_and(|needed| self.timer_ms.is_none_or(|cur| needed < cur))
             || self.timer_ms.is_none()
         {
@@ -1650,12 +1656,15 @@ impl App {
         let want = self.notice.is_some() || !self.idle_hidden;
         // Oculta por inactividad, la ventana sigue mostrada para la franja del borde.
         if self.edge_strip() && !self.shown {
-            self.render();
+            let motion = self.render();
             unsafe {
                 let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
             }
             self.shown = true;
             self.raise();
+            // La letra proyectada empieza a aparecer en este cuadro (p. ej., al salir de pantalla
+            // completa): sin temporizador quedaba congelada a medias, como una sombra sin texto.
+            self.keep_moving(&motion);
         }
         // Ya no corresponde la franja y la isla no está: se oculta la ventana.
         if !want && !self.visible && self.shown && !self.edge_strip() {
