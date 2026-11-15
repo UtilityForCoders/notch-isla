@@ -191,7 +191,7 @@ fn clean_label(name: &str) -> String {
         .take(48)
         .collect();
     if label.trim().is_empty() {
-        "Notch Isla".into()
+        "Nocho".into()
     } else {
         label
     }
@@ -581,9 +581,9 @@ fn connect(store: &Store, peer: &Peer) -> Result<StreamOwned<ClientConnection, S
         .into());
     }
     let detail = match tcp_error.as_ref().map(io::Error::kind) {
-        Some(io::ErrorKind::ConnectionRefused) => "El equipo rechaza la conexión. Reabre Notch Isla y activa Recibir de equipos vinculados allí.",
-        Some(io::ErrorKind::TimedOut) | Some(io::ErrorKind::WouldBlock) => "El equipo se anuncia, pero no responde. Revisa el permiso de red de Notch Isla en Windows y que ambos PCs estén en la misma red.",
-        _ => "No se pudo abrir la conexión al equipo. Revisa su recepción, la red y el permiso de Notch Isla en Windows.",
+        Some(io::ErrorKind::ConnectionRefused) => "El equipo rechaza la conexión. Reabre Nocho y activa Recibir de equipos vinculados allí.",
+        Some(io::ErrorKind::TimedOut) | Some(io::ErrorKind::WouldBlock) => "El equipo se anuncia, pero no responde. Revisa el permiso de red de Nocho en Windows y que ambos PCs estén en la misma red.",
+        _ => "No se pudo abrir la conexión al equipo. Revisa su recepción, la red y el permiso de Nocho en Windows.",
     };
     Err(detail.into())
 }
@@ -738,7 +738,7 @@ fn session(
 ) -> Result<Session> {
     let request: Request = read_message(stream)?;
     if request.version != PROTOCOL {
-        return Err("Actualiza Notch Isla en ambos equipos para vincularlos.".into());
+        return Err("Actualiza Nocho en ambos equipos para vincularlos.".into());
     }
     let certificate = stream
         .conn
@@ -937,7 +937,7 @@ fn finish_receive(
             }
             ContentKind::Image => {
                 let directory = tempfile::Builder::new()
-                    .prefix("notch-preview-")
+                    .prefix("nocho-preview-")
                     .tempdir()?;
                 let path = directory.path().join("imagen");
                 let mut file = File::create_new(&path)?;
@@ -1011,7 +1011,7 @@ fn save_offer(downloads: &Path, stream: &mut impl Read, offer: &Offer) -> Result
     }
     let suffix = directory.path().file_name().unwrap().to_string_lossy();
     let suffix = suffix.trim_start_matches(".notch-isla-");
-    let destination = downloads.join(format!("Notch Isla - {suffix}"));
+    let destination = downloads.join(format!("Nocho - {suffix}"));
     std::fs::rename(directory.path(), &destination)?;
     Ok(destination)
 }

@@ -11,7 +11,7 @@ fn isla_con_desenfoque_sigue_ocultandose_y_recibiendo_clics() {
         );
         CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok().unwrap();
         let instance = GetModuleHandleW(None).unwrap();
-        let class = w!("NotchIslaStabilityProbe");
+        let class = w!("NochoStabilityProbe");
         RegisterClassExW(&WNDCLASSEXW {
             cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
             lpfnWndProc: Some(wndproc),
@@ -52,8 +52,8 @@ fn isla_con_desenfoque_sigue_ocultandose_y_recibiendo_clics() {
         };
         app.x_spring.reset(-32000.0);
         app.hz = 240;
-        let animation_bench = std::env::var_os("NOTCH_ANIMATION_BENCH").is_some();
-        let drag_bench = std::env::var_os("NOTCH_DRAG_BENCH").is_some();
+        let animation_bench = std::env::var_os("NOCHO_ANIMATION_BENCH").is_some();
+        let drag_bench = std::env::var_os("NOCHO_DRAG_BENCH").is_some();
         if !animation_bench && !drag_bench {
             app.monitor_bounds = RECT {
                 left: -32000,
@@ -110,7 +110,7 @@ fn isla_con_desenfoque_sigue_ocultandose_y_recibiendo_clics() {
             app.redraw();
         });
         if animation_bench {
-            let seconds = std::env::var("NOTCH_STRESS_SECONDS")
+            let seconds = std::env::var("NOCHO_STRESS_SECONDS")
                 .ok()
                 .and_then(|value| value.parse::<u64>().ok())
                 .unwrap_or(5)
@@ -473,7 +473,7 @@ fn isla_con_desenfoque_sigue_ocultandose_y_recibiendo_clics() {
             app.settings.pinned_expanded = false;
         });
 
-        let seconds = std::env::var("NOTCH_STRESS_SECONDS")
+        let seconds = std::env::var("NOCHO_STRESS_SECONDS")
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
             .unwrap_or(30)

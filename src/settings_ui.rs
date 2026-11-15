@@ -506,7 +506,7 @@ impl Panel {
             (0, 0, w, h),
             &areas,
             "Configuración",
-            "Notch Isla",
+            "Nocho",
             0.0,
         );
         unsafe {
@@ -554,7 +554,7 @@ where
             return Ok(());
         }
         let instance = GetModuleHandleW(None)?;
-        let class = w!("NotchSettingsWindow");
+        let class = w!("NochoSettingsWindow");
         let resource = PCWSTR(std::ptr::without_provenance::<u16>(1));
         let icon = LoadIconW(Some(instance.into()), resource)?;
         RegisterClassExW(&WNDCLASSEXW {
@@ -589,7 +589,7 @@ where
         let hwnd = CreateWindowExW(
             WS_EX_LAYERED | WS_EX_APPWINDOW,
             class,
-            w!("Notch Isla · Configuración"),
+            w!("Nocho · Configuración"),
             WS_POPUP | WS_SYSMENU | WS_MINIMIZEBOX,
             info.rcWork.left + (info.rcWork.right - info.rcWork.left - width as i32) / 2,
             info.rcWork.top + (info.rcWork.bottom - info.rcWork.top - height as i32) / 2,

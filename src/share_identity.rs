@@ -52,7 +52,7 @@ impl Store {
     pub fn load() -> Result<Self> {
         let directory = std::env::var_os("LOCALAPPDATA")
             .ok_or("No se encontró la carpeta de datos del usuario.")?;
-        Self::at(Path::new(&directory).join("NotchIsla").join("share.dat"))
+        Self::at(Path::new(&directory).join(crate::settings::DATA_DIR).join("share.dat"))
     }
 
     pub(crate) fn at(path: PathBuf) -> Result<Self> {
@@ -220,7 +220,7 @@ fn protect(data: &[u8], encrypt: bool) -> Result<Vec<u8>> {
         if encrypt {
             CryptProtectData(
                 &input,
-                w!("Notch Isla · Equipos vinculados"),
+                w!("Nocho · Equipos vinculados"),
                 None,
                 None,
                 None,

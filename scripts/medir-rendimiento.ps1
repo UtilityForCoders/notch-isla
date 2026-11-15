@@ -1,4 +1,4 @@
-# Mide cuanto gasta la Notch Isla que ya esta abierta: CPU (en % de un nucleo) y memoria.
+# Mide cuanto gasta la Nocho que ya esta abierta: CPU (en % de un nucleo) y memoria.
 # No abre ni cambia nada; solo observa el proceso durante unos segundos.
 #
 # Uso: deja la isla en el estado que quieras medir (en reposo, musica sonando con la isla
@@ -21,7 +21,7 @@ param(
 $proc = if ($IdProceso -gt 0) {
     Get-Process -Id $IdProceso -ErrorAction SilentlyContinue
 } else {
-    Get-Process notch-isla -ErrorAction SilentlyContinue | Select-Object -First 1
+    Get-Process nocho -ErrorAction SilentlyContinue | Select-Object -First 1
 }
 if (-not $proc) {
     Write-Host "La isla no esta abierta."

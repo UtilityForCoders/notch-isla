@@ -795,7 +795,7 @@ fn run(items: Vec<Item>, from_tray: bool, listen_to_keyboard: bool) -> Result<Op
         let host = Host(CreateWindowExW(
             WS_EX_TOOLWINDOW,
             w!("STATIC"),
-            w!("NotchIslaMenuHost"),
+            w!("NochoMenuHost"),
             WS_POPUP,
             0,
             0,
@@ -1020,7 +1020,7 @@ fn create_window(owner: Option<HWND>, passive: bool) -> Result<HWND> {
     static REGISTERED: AtomicBool = AtomicBool::new(false);
     unsafe {
         let instance = GetModuleHandleW(None)?;
-        let class = w!("NotchIslaMenu");
+        let class = w!("NochoMenu");
         if !REGISTERED.swap(true, Ordering::SeqCst) {
             let wc = WNDCLASSEXW {
                 cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
@@ -1042,7 +1042,7 @@ fn create_window(owner: Option<HWND>, passive: bool) -> Result<HWND> {
                     Default::default()
                 },
             class,
-            w!("Menú de Notch Isla"),
+            w!("Menú de Nocho"),
             WS_POPUP,
             0,
             0,
@@ -2037,7 +2037,7 @@ mod tests {
     }
 
     fn save_cascade_preview(st: &State) {
-        if std::env::var_os("NOTCH_MENU_PREVIEW").is_none() {
+        if std::env::var_os("NOCHO_MENU_PREVIEW").is_none() {
             return;
         }
         fn write(st: &State, index: &mut usize, rows: &mut Vec<String>) {
@@ -2237,7 +2237,7 @@ mod tests {
         }
         activate_for_test(taskbar_at(anchor).unwrap());
         let instance = unsafe { GetModuleHandleW(None).unwrap() };
-        let class = w!("NotchIslaCascadeTest");
+        let class = w!("NochoCascadeTest");
         unsafe {
             RegisterClassExW(&WNDCLASSEXW {
                 cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,

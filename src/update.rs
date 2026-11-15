@@ -216,11 +216,11 @@ pub fn check_now(hwnd: HWND) {
     });
 }
 
-/// Versión de esta app. En debug se puede fingir otra con la variable NOTCH_ISLA_VERSION
+/// Versión de esta app. En debug se puede fingir otra con la variable NOCHO_VERSION
 /// (p. ej. "0.1.0") para ver el aviso.
 fn current_version() -> String {
     if cfg!(debug_assertions) {
-        if let Ok(v) = std::env::var("NOTCH_ISLA_VERSION") {
+        if let Ok(v) = std::env::var("NOCHO_VERSION") {
             return v;
         }
     }
@@ -340,7 +340,7 @@ fn install(installer: &Path, version: &str, digest: &str) -> bool {
 /// queda cerrada sin avisar; al abrirse, la isla dice si se actualizó.
 ///
 /// Para que nadie pueda usar este modo (en un .exe firmado) para lanzar otro programa, solo
-/// ejecuta un instalador de Notch Isla en la carpeta temporal, con las opciones conocidas y
+/// ejecuta un instalador de Nocho en la carpeta temporal, con las opciones conocidas y
 /// cuya huella coincide con la recibida (la que publicó GitHub, comprobada por la isla).
 pub fn run_updater(args: &[String]) {
     let (Some(installer), Some(tasks), Some(digest)) = (args.first(), args.get(1), args.get(2))
@@ -385,7 +385,7 @@ fn island_running() -> bool {
         match OpenMutexW(
             SYNCHRONIZATION_SYNCHRONIZE,
             false,
-            w!("Local\\NotchIsla.Instancia"),
+            w!("Local\\Nocho.Instancia"),
         ) {
             Ok(handle) => {
                 let _ = CloseHandle(handle);
@@ -702,7 +702,7 @@ mod tests {
         assert!(!is_plain_version("1.2.3.4.5"));
     }
 
-    /// El modo ayudante no ejecuta nada que no sea un instalador de Notch Isla verificado.
+    /// El modo ayudante no ejecuta nada que no sea un instalador de Nocho verificado.
     #[test]
     fn ayudante_rechaza_otros_programas() {
         let dir = std::env::temp_dir();

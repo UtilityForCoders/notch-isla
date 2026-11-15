@@ -21,7 +21,7 @@ const WIDTH: f32 = 320.0;
 const HEIGHT: f32 = 50.0;
 const GAP: f32 = 8.0;
 const FADE: Duration = Duration::from_millis(140);
-const CLASS: windows::core::PCWSTR = w!("NotchIslaNoticeCard");
+const CLASS: windows::core::PCWSTR = w!("NochoNoticeCard");
 pub const WM_NOTICE_CARD_CLICK: u32 = WM_APP + 14;
 
 extern "system" fn card_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -86,7 +86,7 @@ impl NoticeCard {
             CreateWindowExW(
                 style,
                 CLASS,
-                w!("Aviso de Notch Isla"),
+                w!("Aviso de Nocho"),
                 WS_POPUP,
                 0,
                 0,
