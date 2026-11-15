@@ -17,9 +17,26 @@ use rustls::{
 };
 use serde::{Deserialize, Serialize};
 
-const SERVICE: &str = "_notchisla._tcp.local.";
-const TLS_NAME: &str = "notchisla.local";
+const SERVICE: &str = "_nocho._tcp.local.";
+/// Nombre de las identidades nuevas (va en su certificado y se comprueba al conectar).
+pub(crate) const TLS_NAME: &str = "nocho.local";
+/// Nombre de las identidades que creó Notch Isla (0.8 o anterior). Siguen sirviendo: la propia
+/// y las de los equipos vinculados no se regeneran, para no romper los vínculos.
+const LEGACY_TLS_NAME: &str = "notchisla.local";
 const PROTOCOL: u8 = 2;
+
+/// Nombre con el que se comprueba el certificado de un equipo: el que trae su identidad.
+fn server_name(certificate: &[u8]) -> &'static str {
+    let legacy = LEGACY_TLS_NAME.as_bytes();
+    if certificate
+        .windows(legacy.len())
+        .any(|window| window == legacy)
+    {
+        LEGACY_TLS_NAME
+    } else {
+        TLS_NAME
+    }
+}
 const MAX_HEADER: usize = 16 * 1024;
 const MAX_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_ADDRESSES: usize = 32;
@@ -549,7 +566,8 @@ fn connect(store: &Store, peer: &Peer) -> Result<StreamOwned<ClientConnection, S
             }
         };
         addresses.retain(|candidate| *candidate != address);
-        let connection = ClientConnection::new(config.clone(), ServerName::try_from(TLS_NAME)?)?;
+        let name = ServerName::try_from(server_name(peer.certificate.as_ref()))?;
+        let connection = ClientConnection::new(config.clone(), name)?;
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             break;
@@ -619,7 +637,7 @@ pub fn pair(
     }
     let material = stream
         .conn
-        .export_keying_material([0u8; 32], b"notch-isla-pairing-v2", None)?;
+        .export_keying_material([0u8; 32], b"nocho-pairing-v2", None)?;
     stream
         .sock
         .allow(APPROVAL_TIME + IO_TIME, APPROVAL_TIME + IO_TIME);
@@ -754,10 +772,9 @@ fn session(
         }
         stream.write_all(&[1])?;
         stream.flush()?;
-        let material =
-            stream
-                .conn
-                .export_keying_material([0u8; 32], b"notch-isla-pairing-v2", None)?;
+        let material = stream
+            .conn
+            .export_keying_material([0u8; 32], b"nocho-pairing-v2", None)?;
         let (confirm, answer) = std::sync::mpsc::channel();
         let name = clean_label(&request.sender);
         event(ReceiveEvent::Pair {
@@ -814,7 +831,7 @@ fn service_info(port: u16, certificate: &[u8], pairing: bool) -> Result<ServiceI
     Ok(ServiceInfo::new(
         SERVICE,
         &code,
-        &format!("notchisla-{code}.local."),
+        &format!("nocho-{code}.local."),
         "",
         port,
         properties,
@@ -983,7 +1000,7 @@ fn finish_receive(
 
 fn save_offer(downloads: &Path, stream: &mut impl Read, offer: &Offer) -> Result<PathBuf> {
     let directory = tempfile::Builder::new()
-        .prefix(".notch-isla-")
+        .prefix(".nocho-")
         .tempdir_in(downloads)?;
     for (index, entry) in offer.entries.iter().enumerate() {
         let name: String = entry
@@ -1010,7 +1027,7 @@ fn save_offer(downloads: &Path, stream: &mut impl Read, offer: &Offer) -> Result
         file.sync_all()?;
     }
     let suffix = directory.path().file_name().unwrap().to_string_lossy();
-    let suffix = suffix.trim_start_matches(".notch-isla-");
+    let suffix = suffix.trim_start_matches(".nocho-");
     let destination = downloads.join(format!("Nocho - {suffix}"));
     std::fs::rename(directory.path(), &destination)?;
     Ok(destination)
@@ -1044,6 +1061,15 @@ mod tests {
             pairable,
         };
         Ok((listener, peer))
+    }
+
+    #[test]
+    fn identidades_de_notch_isla_se_verifican_con_su_nombre() -> Result<()> {
+        let legacy = rcgen::generate_simple_self_signed(vec![LEGACY_TLS_NAME.into()])?;
+        let current = rcgen::generate_simple_self_signed(vec![TLS_NAME.into()])?;
+        assert_eq!(server_name(legacy.cert.der()), LEGACY_TLS_NAME);
+        assert_eq!(server_name(current.cert.der()), TLS_NAME);
+        Ok(())
     }
 
     #[test]

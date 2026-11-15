@@ -646,10 +646,7 @@ mod tests {
             assert_eq!(json, fresh_json);
             assert_eq!(tag, "v0.5.2");
             assert_eq!(version, "0.5.2");
-            Some((
-                PathBuf::from("nocho-setup-0.5.2.exe"),
-                "reciente".into(),
-            ))
+            Some((PathBuf::from("nocho-setup-0.5.2.exe"), "reciente".into()))
         })
         .unwrap()
         .unwrap();
