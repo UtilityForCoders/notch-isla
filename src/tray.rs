@@ -160,7 +160,7 @@ impl Tray {
             hIcon: self.icon,
             ..Default::default()
         };
-        for (dst, src) in data.szTip.iter_mut().zip("Notch Isla".encode_utf16()) {
+        for (dst, src) in data.szTip.iter_mut().zip("Nocho".encode_utf16()) {
             *dst = src;
         }
         data
@@ -215,7 +215,7 @@ fn build_settings_items(state: &MenuState) -> Vec<Item> {
         checked,
     };
     let mut items = vec![
-        Item::Label(format!("Notch Isla v{}", env!("CARGO_PKG_VERSION"))),
+        Item::Label(format!("Nocho v{}", env!("CARGO_PKG_VERSION"))),
         Item::Separator,
     ];
     let mut update_label = state.update.map(str::to_string);
@@ -312,7 +312,7 @@ fn build_settings_items(state: &MenuState) -> Vec<Item> {
     )];
     items.push(action(
         CMD_ISLAND_COLOR,
-        &format!("Color del notch · #{:06X}", settings.island_color.rgb()),
+        &format!("Color de la isla · #{:06X}", settings.island_color.rgb()),
         false,
     ));
     blur.push(Item::Slider {
@@ -739,7 +739,7 @@ pub fn show_island_menu(
     }
 }
 
-/// Carga el recurso 1 de app.rc (assets/icon.ico) al tamaño de la bandeja.
+/// Carga el recurso 1 de app.rc (assets/nocho.ico) al tamaño de la bandeja.
 #[allow(clippy::manual_dangling_ptr)]
 fn load_app_icon() -> Result<HICON> {
     unsafe {

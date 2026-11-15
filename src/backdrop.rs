@@ -216,7 +216,7 @@ impl Backdrop {
         let compositor = compositor()?;
         unsafe {
             let instance = GetModuleHandleW(None)?;
-            let class = windows::core::w!("NotchIslaDesenfoque");
+            let class = windows::core::w!("NochoDesenfoque");
             RegisterClassW(&WNDCLASSW {
                 hInstance: instance.into(),
                 lpszClassName: class,
@@ -230,7 +230,7 @@ impl Backdrop {
                     | WS_EX_TOOLWINDOW
                     | WS_EX_TOPMOST,
                 class,
-                windows::core::w!("Fondo de Notch Isla"),
+                windows::core::w!("Fondo de Nocho"),
                 WS_POPUP | WS_DISABLED,
                 0,
                 0,
@@ -541,7 +541,7 @@ mod tests {
             let instance = GetModuleHandleW(None).unwrap();
             let source = CreateWindowExW(
                 WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
-                windows::core::w!("NotchIslaDesenfoque"),
+                windows::core::w!("NochoDesenfoque"),
                 windows::core::w!("Patrón de prueba"),
                 WS_POPUP,
                 200,
@@ -660,7 +660,7 @@ mod tests {
             };
             let content = CreateWindowExW(
                 WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
-                windows::core::w!("NotchIslaDesenfoque"),
+                windows::core::w!("NochoDesenfoque"),
                 windows::core::w!("Isla de prueba"),
                 WS_POPUP,
                 200,
@@ -765,7 +765,7 @@ mod tests {
             projector.moved_by(50);
             pump();
             // Captura opcional del patrón propio (no del escritorio completo) para revisión visual.
-            if let Ok(path) = std::env::var("NOTCH_BLUR_CAPTURE") {
+            if let Ok(path) = std::env::var("NOCHO_BLUR_CAPTURE") {
                 use windows::Win32::Graphics::Gdi::{BitBlt, SRCCOPY};
                 let capture = crate::Surface::new(400, 200).unwrap();
                 let screen = GetDC(None);

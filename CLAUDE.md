@@ -86,9 +86,11 @@ Todos los commits y títulos de PR siguen [Conventional Commits](https://www.con
   pasa clippy (`-D warnings`), corre las pruebas (`cargo test --release`) y compila el `.exe`
   y el instalador. Solo en `main` se firman, si SignPath está configurado.
 - **En `main`** (job `release`): si la compilación terminó bien y la versión de `Cargo.toml`
-  todavía no tiene etiqueta, crea la etiqueta `vx.y.z` y el release "Notch Isla x.y.z". Adjunta
-  `notch-isla-setup-x.y.z.exe` (el actualizador lo busca exactamente con ese nombre) y
-  `notch-isla.exe`, y lo marca como el último.
+  todavía no tiene etiqueta, crea la etiqueta `vx.y.z` y el release "Nocho x.y.z". Adjunta
+  `nocho-setup-x.y.z.exe` (el actualizador lo busca exactamente con ese nombre),
+  `nocho.exe` y una copia del instalador llamada `notch-isla-setup-x.y.z.exe`, que es el
+  nombre que busca Notch Isla 0.8 (el nombre anterior de la app) para actualizarse sola. Lo
+  marca como el último.
 - Las notas se arman con `.github/scripts/notas-release.sh`, a partir de los commits `feat`,
   `fix` y `perf` desde la versión anterior. Por eso las descripciones de esos commits se
   escriben pensando en los usuarios. Las notas se pueden corregir a mano en GitHub después de

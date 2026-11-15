@@ -561,14 +561,19 @@ fn start_discovery(hwnd: HWND) {
     };
     let report = reporter(hwnd);
     let spawned = thread::Builder::new()
-        .name("notch-discovery".into())
+        .name("nocho-discovery".into())
         .spawn(move || loop {
             while !discovery_wanted() {
                 thread::park();
             }
-            report(Event::Discovery(
-                share::discover(&store).map_err(|error| error.to_string()),
-            ));
+            // Solo se envía a equipos vinculados: sin ninguno, buscar en la red es trabajo
+            // perdido (un hilo y sockets nuevos cada pocos segundos). Al vincular uno, la
+            // búsqueda sigue sola.
+            if !store.devices().is_empty() {
+                report(Event::Discovery(
+                    share::discover(&store).map_err(|error| error.to_string()),
+                ));
+            }
             thread::park_timeout(Duration::from_secs(5));
         });
     if let Ok(handle) = spawned {
@@ -789,7 +794,10 @@ fn confirm_pair(hwnd: HWND, name: String, code: String, decision: Sender<bool>) 
 fn inbox_path() -> Option<PathBuf> {
     std::env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
-        .map(|path| path.join("NotchIsla").join("share-inbox.json"))
+        .map(|path| {
+            path.join(crate::settings::DATA_DIR)
+                .join("share-inbox.json")
+        })
 }
 
 fn load_inbox() -> VecDeque<PendingMessage> {
@@ -995,9 +1003,10 @@ pub fn on_event(hwnd: HWND) {
                 }
             }
             Event::Discovery(result) => {
+                // Los equipos encontrados no se dibujan (solo aceleran el próximo envío), así que
+                // no hace falta redibujar la isla cada vez que termina una búsqueda.
                 if let Ok(peers) = result {
                     UI.with_borrow_mut(|ui| update_discovered_peers(ui, peers));
-                    crate::with_app(|app| app.redraw());
                 }
             }
             Event::Sent(result) => {

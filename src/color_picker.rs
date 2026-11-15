@@ -319,7 +319,13 @@ impl Picker {
         rect!(TRACK_X, BUTTON_Y, 118.0, 34.0, 8.0, [47, 47, 53, 255]);
         rect!(CX + 12.0, BUTTON_Y, 118.0, 34.0, 8.0, [68, 68, 83, 255]);
         for (text, x, y, width, strong) in [
-            ("Color del notch".into(), TRACK_X, TOP + 15.0, TRACK_W, true),
+            (
+                "Color de la isla".into(),
+                TRACK_X,
+                TOP + 15.0,
+                TRACK_W,
+                true,
+            ),
             ("Brillo".into(), TRACK_X, TRACK_Y - 24.0, 80.0, false),
             (
                 format!("#{}", self.hex),

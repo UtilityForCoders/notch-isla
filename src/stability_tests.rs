@@ -11,7 +11,7 @@ fn isla_con_desenfoque_sigue_ocultandose_y_recibiendo_clics() {
         );
         CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok().unwrap();
         let instance = GetModuleHandleW(None).unwrap();
-        let class = w!("NotchIslaStabilityProbe");
+        let class = w!("NochoStabilityProbe");
         RegisterClassExW(&WNDCLASSEXW {
             cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
             lpfnWndProc: Some(wndproc),
@@ -52,8 +52,8 @@ fn isla_con_desenfoque_sigue_ocultandose_y_recibiendo_clics() {
         };
         app.x_spring.reset(-32000.0);
         app.hz = 240;
-        let animation_bench = std::env::var_os("NOTCH_ANIMATION_BENCH").is_some();
-        let drag_bench = std::env::var_os("NOTCH_DRAG_BENCH").is_some();
+        let animation_bench = std::env::var_os("NOCHO_ANIMATION_BENCH").is_some();
+        let drag_bench = std::env::var_os("NOCHO_DRAG_BENCH").is_some();
         if !animation_bench && !drag_bench {
             app.monitor_bounds = RECT {
                 left: -32000,
@@ -110,7 +110,7 @@ fn isla_con_desenfoque_sigue_ocultandose_y_recibiendo_clics() {
             app.redraw();
         });
         if animation_bench {
-            let seconds = std::env::var("NOTCH_STRESS_SECONDS")
+            let seconds = std::env::var("NOCHO_STRESS_SECONDS")
                 .ok()
                 .and_then(|value| value.parse::<u64>().ok())
                 .unwrap_or(5)
@@ -473,7 +473,7 @@ fn isla_con_desenfoque_sigue_ocultandose_y_recibiendo_clics() {
             app.settings.pinned_expanded = false;
         });
 
-        let seconds = std::env::var("NOTCH_STRESS_SECONDS")
+        let seconds = std::env::var("NOCHO_STRESS_SECONDS")
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
             .unwrap_or(30)
@@ -565,5 +565,185 @@ fn isla_con_desenfoque_sigue_ocultandose_y_recibiendo_clics() {
             "recursos GDI estables: {baseline_gdi} -> {gdi}"
         );
         eprintln!("{seconds} s de isla real: {hides} ocultaciones, {clicks} clics, {actions} cambios; GDI {baseline_gdi} -> {gdi}");
+    }
+}
+
+/// Ventanas visibles de este hilo (isla, proyector de la letra y sus fondos), por clase.
+fn visible_windows() -> Vec<String> {
+    use windows::core::BOOL;
+    use windows::Win32::System::Threading::GetCurrentThreadId;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        EnumThreadWindows, GetClassNameW, IsWindowVisible,
+    };
+    unsafe extern "system" fn collect(hwnd: HWND, list: LPARAM) -> BOOL {
+        let list = &mut *(list.0 as *mut Vec<String>);
+        if IsWindowVisible(hwnd).as_bool() {
+            let mut class = [0u16; 64];
+            let len = GetClassNameW(hwnd, &mut class) as usize;
+            list.push(String::from_utf16_lossy(&class[..len]));
+        }
+        BOOL(1)
+    }
+    let mut list = Vec::new();
+    unsafe {
+        let _ = EnumThreadWindows(
+            GetCurrentThreadId(),
+            Some(collect),
+            LPARAM(&mut list as *mut _ as isize),
+        );
+    }
+    list
+}
+
+fn pump(duration: Duration) {
+    let until = Instant::now() + duration;
+    while Instant::now() < until {
+        let mut msg = MSG::default();
+        unsafe {
+            if PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+                DispatchMessageW(&msg);
+                ui::promote_timers();
+            } else {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+    }
+}
+
+#[test]
+#[ignore = "ejercita la isla real fuera de pantalla; requiere DWM y escritorio interactivo"]
+fn letra_proyectada_se_oculta_entera_en_pantalla_completa() {
+    isla_entra_y_sale_de_pantalla_completa(false);
+}
+
+#[test]
+#[ignore = "ejercita la isla real fuera de pantalla; requiere DWM y escritorio interactivo"]
+fn isla_abierta_vuelve_a_la_franja_al_salir_de_pantalla_completa() {
+    isla_entra_y_sale_de_pantalla_completa(true);
+}
+
+/// Con la letra proyectada, una app pasa a pantalla completa y después se vuelve a una ventana
+/// normal. `abierta`: la isla estaba abierta (no escondida en el borde) al entrar.
+/// `NOCHO_TRANSLUCENT=1` usa el fondo desenfocado.
+fn isla_entra_y_sale_de_pantalla_completa(abierta: bool) {
+    unsafe {
+        windows::Win32::UI::HiDpi::SetThreadDpiAwarenessContext(
+            DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+        );
+        CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok().unwrap();
+        let instance = GetModuleHandleW(None).unwrap();
+        let class = w!("NochoLetraFullscreen");
+        RegisterClassExW(&WNDCLASSEXW {
+            cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+            lpfnWndProc: Some(wndproc),
+            hInstance: instance.into(),
+            lpszClassName: class,
+            ..Default::default()
+        });
+        let hwnd = CreateWindowExW(
+            WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+            class,
+            class,
+            WS_POPUP,
+            -32000,
+            -32000,
+            1,
+            1,
+            None,
+            None,
+            Some(instance.into()),
+            None,
+        )
+        .unwrap();
+        let mut settings = Settings::load();
+        settings.translucent = std::env::var_os("NOCHO_TRANSLUCENT").is_some();
+        settings.hide_fullscreen = true;
+        settings.real_bars = false;
+        settings.lyrics_island = false;
+        settings.lyrics_projector = true;
+        settings.pinned_expanded = false;
+        settings.hotkey = None;
+        let mut app = App::new(hwnd, monitors::find(""), settings).unwrap();
+        app.tray.remove();
+        app.pos = POINT {
+            x: -32000,
+            y: -32000,
+        };
+        app.x_spring.reset(-32000.0);
+        app.media = Some(NowPlaying {
+            title: "Prueba local".into(),
+            artist: "Sin sesión multimedia real".into(),
+            album: String::new(),
+            playing: true,
+            cover: None,
+            timeline: Some(media::Timeline {
+                position: 1.0,
+                duration: 3600.0,
+                read_at: Instant::now(),
+            }),
+            app_icon: None,
+            app_id: String::new(),
+            sessions: (0, 1),
+        });
+        app.lyrics.insert(
+            lyrics::key("Prueba local", "Sin sesión multimedia real"),
+            (0..40)
+                .map(|i| lyrics::Verse {
+                    start: i as f32 * 4.0,
+                    text: format!("Verso de prueba número {i}"),
+                    words: Vec::new(),
+                })
+                .collect(),
+        );
+        // Escondida en el borde (solo la franja y la letra debajo) o abierta.
+        app.idle_hidden = !abierta;
+        APP.with(|cell| *cell.borrow_mut() = Some(app));
+        with_app(|app| {
+            app.update_visibility();
+            app.redraw();
+        });
+        pump(Duration::from_millis(800));
+        let before = visible_windows();
+        eprintln!("con letra: {before:?}");
+
+        // La app en primer plano pasa a pantalla completa (como lo detecta el sondeo).
+        with_app(|app| app.set_fullscreen(true));
+        pump(Duration::from_millis(800));
+        let during = visible_windows();
+        eprintln!("en pantalla completa: {during:?}");
+
+        // Vuelve a una ventana normal: la letra debe terminar de aparecer, no quedar a medias
+        // como una sombra sin texto, y la isla debe quedar en la franja, no abierta y contraída.
+        with_app(|app| app.set_fullscreen(false));
+        pump(Duration::from_millis(800));
+        let after = visible_windows();
+        let (mut presence, mut island_open) = (0.0, true);
+        with_app(|app| {
+            presence = app.projector.as_ref().map_or(0.0, |p| p.presence());
+            island_open = app.visible || app.presence.value > 0.0;
+        });
+        eprintln!(
+            "al salir: {after:?}, letra a la vista {presence:.2}, isla abierta {island_open}"
+        );
+
+        with_app(|app| {
+            app.set_timer(None);
+            app.tray.remove();
+        });
+        let _ = DestroyWindow(hwnd);
+        APP.with(|cell| cell.borrow_mut().take());
+        assert!(
+            before.iter().any(|c| c.ends_with("Letra")),
+            "la letra debía estar proyectada: {before:?}"
+        );
+        assert!(
+            during.is_empty(),
+            "en pantalla completa no debe quedar nada visible: {during:?}"
+        );
+        assert!(
+            presence > 0.99,
+            "al volver, la letra debe terminar de aparecer: {presence:.2}"
+        );
+        assert!(!island_open, "al volver, la isla debe quedar en la franja");
     }
 }
