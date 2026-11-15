@@ -101,9 +101,21 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+      # cargo-deny se compila desde crates.io: este repositorio solo admite acciones de GitHub
+      # y de autores verificados, y su acción oficial no lo es.
+      - name: Caché de cargo-deny
+        id: cache-deny
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          command: check advisories
+          path: ~/.cargo/bin/cargo-deny
+          key: cargo-deny-0.20.2-${{ runner.os }}
+
+      - name: Instalar cargo-deny
+        if: steps.cache-deny.outputs.cache-hit != 'true'
+        run: cargo install cargo-deny --locked --version 0.20.2
+
+      - name: Buscar vulnerabilidades
+        run: cargo deny check advisories
 
   build:
     runs-on: windows-latest
