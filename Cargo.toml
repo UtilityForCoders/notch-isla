@@ -1,9 +1,9 @@
 [package]
-name = "notch-isla"
+name = "nocho"
 version = "0.8.0"
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/UtilityForCoders/notch-isla"
+repository = "https://github.com/UtilityForCoders/Nocho"
 description = "Isla dinámica minimalista para Windows, enfocada en controlar la música."
 
 [dependencies]

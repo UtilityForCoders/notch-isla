@@ -1,6 +1,9 @@
-# notch-isla
+<img src="assets/nocho.png" alt="Logo de Nocho" width="96">
+
+# Nocho
 
 Isla dinámica (estilo Dynamic Island) para Windows 10/11, escrita en Rust.
+Hasta la versión 0.8 se llamaba **Notch Isla**: al actualizar, Nocho conserva sus ajustes, el inicio con Windows y los equipos vinculados.
 Objetivo: controlar la música que suena en el PC (Spotify, YouTube, etc.) desde una píldora en el borde superior de la pantalla, consumiendo lo mínimo posible.
 
 ## Estado
@@ -25,28 +28,30 @@ cargo run            # desarrollo con renderizado optimizado y consola para mens
 cargo run --release  # versión optimizada, sin consola
 ```
 
-El ejecutable final queda en `target\release\notch-isla.exe`.
+El ejecutable final queda en `target\release\nocho.exe`.
 
 El perfil de desarrollo conserva símbolos y comprobaciones de debug, con optimización de la app y sus dependencias para que el rasterizado no limite las animaciones. Para comparar la fluidez o medir el consumo final, usa `cargo run --release`.
 
 ### Instalador
 
-`installer\build.ps1` compila la app y genera `target\installer\notch-isla-setup-<versión>.exe` con [Inno Setup 6](https://jrsoftware.org/isinfo.php) (la versión sale de `Cargo.toml`):
+`installer\build.ps1` compila la app y genera `target\installer\nocho-setup-<versión>.exe` con [Inno Setup 6](https://jrsoftware.org/isinfo.php) (la versión sale de `Cargo.toml`):
 
 ```powershell
 winget install --id JRSoftware.InnoSetup -e --scope user   # una sola vez
 .\installer\build.ps1
 ```
 
-El instalador no pide permisos de administrador: instala en `%LOCALAPPDATA%\Programs\Notch Isla`, crea el acceso del menú Inicio (y del escritorio, si se elige), ofrece **Iniciar con Windows** y queda en *Aplicaciones instaladas* con su desinstalador, que cierra la isla y quita el inicio automático.
+El instalador no pide permisos de administrador: instala en `%LOCALAPPDATA%\Programs\Nocho`, crea el acceso del menú Inicio (y del escritorio, si se elige), ofrece **Iniciar con Windows** y queda en *Aplicaciones instaladas* con su desinstalador, que cierra la isla y quita el inicio automático.
 
 ### Ícono
 
-El ícono (`assets/icon.ico`) se dibuja por código y se incrusta en el `.exe` al compilar (`build.rs` + `app.rc`, con el `rc.exe` del Windows SDK). Para regenerarlo después de cambiar el diseño en `examples/icon.rs`:
+El ícono (`assets/nocho.ico`) sale del logo `assets/nocho.png` (fondo transparente) y se incrusta en el `.exe` al compilar (`build.rs` + `app.rc`, con el `rc.exe` del Windows SDK). El instalador usa el mismo archivo. Para regenerarlo después de cambiar el logo:
 
 ```powershell
-cargo run --example icon
+powershell -ExecutionPolicy Bypass -File scripts\generar-icono.ps1
 ```
+
+El script centra el logo, lo agranda hasta ocupar casi todo el cuadro y guarda los tamaños de 16 a 256 px que usa Windows.
 
 **Uso:**
 
@@ -58,7 +63,7 @@ cargo run --example icon
 - Debajo, una barra de progreso con el color de la carátula; haz clic en ella para saltar a ese punto de la canción (si la app informa el tiempo).
 - Gira la rueda del mouse sobre la isla para subir o bajar el volumen de la app que suena (como en el Mezclador de volumen de Windows); con **Ctrl** apretado cambia el volumen general. Una barra sobre la línea de la cabecera muestra el nivel un momento. Si no se encuentra el sonido de la app, la rueda cambia el volumen general. En los navegadores el volumen es el de todo el navegador, no el de una pestaña.
 - **Clic derecho sobre la isla**: elige por qué salida suena la app (por ejemplo, Spotify en los audífonos y el resto en los parlantes), o devuélvela a la predeterminada del sistema. Windows lo recuerda para esa app. Usa una función interna de Windows (la misma del Mezclador de volumen) sin documentación oficial: si una actualización de Windows la cambia, el menú lo indica y el resto de la isla sigue funcionando igual. Algunas apps tardan unos segundos en pasarse a la nueva salida o necesitan pausar y reanudar.
-- **Compartir cerca**: vincula tus equipos una sola vez en la misma red local. Abre **Compartir cerca… → Vincular equipo…** en ambos PCs; en uno, selecciona el otro equipo (o pulsa **Buscar de nuevo**) y confirma que el código coincida en ambas pantallas. La vinculación para equipos nuevos se cierra tras dos minutos o al terminar; los equipos guardados pueden seguir enviando mientras Notch Isla esté abierto y **Recibir de equipos vinculados** esté activado. Esta preferencia se conserva al reiniciar. **Configuración → Compartir → No molestar** pausa la recepción sin borrar los equipos vinculados; al desactivarlo vuelve a recibir automáticamente. Para enviar, arrastra fotos o archivos sobre la isla, usa **Elegir fotos o archivos…** o **Enviar texto o imagen copiada** y elige uno de **Tus dispositivos**, con estado **Disponible** o **Sin conexión**. El texto y las imágenes individuales de hasta 32 MB muestran una vista previa con **Copiar**; los demás archivos requieren **Guardar en Descargas** o **Rechazar**. **Tus dispositivos → [equipo] → Olvidar equipo** revoca su acceso local; el otro equipo conserva su propia lista hasta que también lo olvides allí. La identidad y la confianza se guardan cifradas con DPAPI en `%LOCALAPPDATA%\NotchIsla\share.dat`, sin cuentas ni servidor. Admite hasta 20 equipos vinculados, 20 archivos y 1 GB por envío, o 256 KB de texto. Actualiza ambos PCs: las versiones anteriores del protocolo de compartir no se admiten para evitar recibir sin vinculación.
+- **Compartir cerca**: vincula tus equipos una sola vez en la misma red local. Abre **Compartir cerca… → Vincular equipo…** en ambos PCs; en uno, selecciona el otro equipo (o pulsa **Buscar de nuevo**) y confirma que el código coincida en ambas pantallas. La vinculación para equipos nuevos se cierra tras dos minutos o al terminar; los equipos guardados pueden seguir enviando mientras Nocho esté abierto y **Recibir de equipos vinculados** esté activado. Esta preferencia se conserva al reiniciar. **Configuración → Compartir → No molestar** pausa la recepción sin borrar los equipos vinculados; al desactivarlo vuelve a recibir automáticamente. Para enviar, arrastra fotos o archivos sobre la isla, usa **Elegir fotos o archivos…** o **Enviar texto o imagen copiada** y elige uno de **Tus dispositivos**, con estado **Disponible** o **Sin conexión**. El texto y las imágenes individuales de hasta 32 MB muestran una vista previa con **Copiar**; los demás archivos requieren **Guardar en Descargas** o **Rechazar**. **Tus dispositivos → [equipo] → Olvidar equipo** revoca su acceso local; el otro equipo conserva su propia lista hasta que también lo olvides allí. La identidad y la confianza se guardan cifradas con DPAPI en `%LOCALAPPDATA%\Nocho\share.dat`, sin cuentas ni servidor. Admite hasta 20 equipos vinculados, 20 archivos y 1 GB por envío, o 256 KB de texto. Actualiza ambos PCs: las versiones anteriores del protocolo de compartir no se admiten para evitar recibir sin vinculación.
 - **Letra sincronizada** (opcional): en **Configuración → Música y letra**, **Mostrar letra de la canción** tiene dos opciones que se activan por separado. **Con la isla expandida** muestra la letra en la pestaña Música, centrada debajo de los controles, como un carrusel que sube un verso cada vez que empieza el siguiente, solo cuando la canción tiene letra sincronizada disponible; durante la búsqueda o si no hay letra, conserva el reproductor compacto sin un espacio vacío (también se activa con el botón de letra de la isla, que solo aparece cuando hay letra sincronizada confirmada). **Con la línea de reposo** muestra el verso que se canta en un "proyector" bajo la isla: una píldora negra que se ajusta al largo de cada verso, que aparece desvaneciéndose y que sigue a la isla (también cuando se oculta en el borde). Los clics la atraviesan, así que no tapa nada. La letra se pide a [LRCLIB](https://lrclib.net) una vez por canción (se envían título, artista, álbum y duración; ver [PRIVACY.md](PRIVACY.md)). Funciona con las apps que informan el avance de la canción, como Spotify.
 - Si el título o el artista no caben, se desplazan de un lado al otro.
 - **Salida de audio**: al cambiar a otra salida (audífonos, parlantes), aparece una tarjeta debajo de la isla con su nombre. Si la isla está oculta, la tarjeta aparece sola cerca del borde superior.
@@ -66,13 +71,13 @@ cargo run --example icon
 - **Dispositivos y batería**: en **Configuración → Dispositivos**, muestra los periféricos Bluetooth conectados, los mandos que informan batería a Windows y los receptores USB compatibles. Se consulta en segundo plano cada 5 segundos con los avisos de conexión activados, o cada 30 si se desactivan; también se puede **Actualizar ahora**. **Avisar al conectar un dispositivo** muestra su nombre cuando se confirma un nuevo enlace. Un dongle enchufado sin el periférico respondiendo no dispara el aviso. Con una lectura actual de 20 % o menos, la isla avisa una vez por descarga; los niveles aproximados de un mando se indican como tales. El aviso se puede desactivar desde ese apartado. Si el mouse duerme, el último nivel válido queda marcado como **anterior** y no genera avisos. Compatibilidad y pruebas: [docs/battery.md](docs/battery.md).
 - Clic derecho en el ícono de la bandeja: muestra únicamente **Configuración…** y **Salir**. Configuración abre una ventana independiente con las categorías **General**, **Apariencia**, **Música y letra**, **Dispositivos**, **Temporizador**, **Compartir** y **Actualizaciones**. Los cambios se guardan automáticamente. Se puede navegar con Tab, Mayús + Tab, flechas y Enter; las flechas izquierda/derecha ajustan el deslizador seleccionado. La rueda permite recorrer las listas largas; Esc o el botón de cierre cierran la ventana. No tiene un temporizador de refresco continuo.
   - **Pantalla**: en qué monitor va la isla (si hay más de uno).
-  - **Color del notch**: también personaliza los fondos, selecciones, interruptores e indicadores de la ventana de Configuración.
+  - **Color de la isla**: el color de la isla y sus avisos. La ventana de Configuración usa siempre los colores del logo de Nocho.
   - **Temporizador**: de 5 a 60 minutos; al terminar suena y la isla avisa.
   - **Desenfoque del fondo**: una barra permite ajustar la intensidad de 0 a 100 % en vivo, para la isla y la letra flotante. Arrástrala o usa las flechas izquierda y derecha con la barra seleccionada. La intensidad se guarda al cerrar la configuración. Se puede desactivar para usar negro opaco; cambiar la intensidad conserva esa decisión y no lo reactiva. Windows compone el fondo en vivo; si el efecto no está disponible, se usa el fondo opaco.
   - **Expandir al pasar el puntero**: permite volver al modo de apertura sin clic; desactivado por defecto para evitar expansiones accidentales.
   - **Avisar al cambiar la salida de audio**, **Ocultar en pantalla completa**, **Iniciar con Windows** y **Salir**.
-  - Los ajustes se guardan en `HKEY_CURRENT_USER\Software\NotchIsla`.
-- Al minuto de abrirse y luego cada 6 horas, consulta en GitHub si hay una versión nueva (o al momento, con **Buscar actualizaciones** en la bandeja). Si la app está instalada, descarga el instalador en segundo plano, lo verifica (tamaño y SHA-256 publicados por GitHub) y avisa: un clic en el aviso, o en **Instalar la versión X** del menú de la bandeja, actualiza sin ventanas y la isla vuelve a abrirse sola. La isla avisa "Instalando la versión X" antes de cerrarse y, al volver, "Notch Isla se actualizó" o "No se pudo instalar la versión X". Si la instalación falla, un ayudante (una copia temporal de la app) vuelve a abrir la isla igual, así nunca queda cerrada sin aviso. La versión portable solo avisa y abre la página de descarga. Ver [PRIVACY.md](PRIVACY.md).
+  - Los ajustes se guardan en `HKEY_CURRENT_USER\Software\Nocho`.
+- Al minuto de abrirse y luego cada 6 horas, consulta en GitHub si hay una versión nueva (o al momento, con **Buscar actualizaciones** en la bandeja). Si la app está instalada, descarga el instalador en segundo plano, lo verifica (tamaño y SHA-256 publicados por GitHub) y avisa: un clic en el aviso, o en **Instalar la versión X** del menú de la bandeja, actualiza sin ventanas y la isla vuelve a abrirse sola. La isla avisa "Instalando la versión X" antes de cerrarse y, al volver, "Nocho se actualizó" o "No se pudo instalar la versión X". Si la instalación falla, un ayudante (una copia temporal de la app) vuelve a abrir la isla igual, así nunca queda cerrada sin aviso. La versión portable solo avisa y abre la página de descarga. Ver [PRIVACY.md](PRIVACY.md).
 
 Al pulsar **Instalar**, la isla vuelve a consultar el último release y prepara su instalador en segundo plano. Si se publicó otra versión después del aviso, instala esa versión más reciente. Si la consulta falla, no ejecuta el instalador anterior; si la descarga falla, abre la página del último release.
 
@@ -121,9 +126,9 @@ Compara el mismo estado con desenfoque activado y desactivado. El uso de DWM inc
 Para medir la cadencia del renderizado real, la siguiente prueba muestra durante cinco segundos una isla de prueba que se expande y contrae con letra y desenfoque. Usa contenido local y publica el intervalo entre cuadros y el tiempo de dibujo; no mide la presentación final en GPU:
 
 ```powershell
-$env:NOTCH_ANIMATION_BENCH = '1'
+$env:NOCHO_ANIMATION_BENCH = '1'
 cargo test --release stability_tests::isla_con_desenfoque_sigue_ocultandose_y_recibiendo_clics -- --ignored --exact --nocapture --test-threads=1
-Remove-Item Env:\NOTCH_ANIMATION_BENCH
+Remove-Item Env:\NOCHO_ANIMATION_BENCH
 ```
 
 ## Compilación en GitHub Actions

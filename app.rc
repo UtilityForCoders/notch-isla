@@ -1,4 +1,4 @@
-// Recursos del ejecutable. El ícono se genera con `cargo run --example icon`.
-1 ICON "assets/icon.ico"
+// Recursos del ejecutable. El ícono se genera con scripts/generar-icono.ps1.
+1 ICON "assets/nocho.ico"
 // Manifiesto (24 = RT_MANIFEST): controles modernos de Windows, ver app.manifest.
 1 24 "app.manifest"

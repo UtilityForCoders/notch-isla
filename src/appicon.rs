@@ -33,23 +33,24 @@ pub fn load(app_id: &str) -> Option<Pixmap> {
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
     }
-    from_shell(&format!("shell:AppsFolder\\{app_id}"))
-        .or_else(|| exe_path(app_id).and_then(|path| from_shell(&path)))
+    from_shell(&format!("shell:AppsFolder\\{app_id}"), ICON_PX)
+        .or_else(|| exe_path(app_id).and_then(|path| from_shell(&path, ICON_PX)))
+}
+
+/// Logo de Nocho (el ícono de este ejecutable) a `px` píxeles de lado, para dibujarlo en las
+/// ventanas propias. Se llama desde el hilo de la interfaz, que ya tiene COM listo.
+pub fn own(px: i32) -> Option<Pixmap> {
+    let exe = std::env::current_exe().ok()?;
+    from_shell(exe.to_str()?, px)
 }
 
 /// Pide al shell el ícono de un elemento (una app de la carpeta de apps o un .exe).
-fn from_shell(name: &str) -> Option<Pixmap> {
+fn from_shell(name: &str, px: i32) -> Option<Pixmap> {
     unsafe {
         let factory: IShellItemImageFactory =
             SHCreateItemFromParsingName(&HSTRING::from(name), None).ok()?;
         let bitmap = factory
-            .GetImage(
-                SIZE {
-                    cx: ICON_PX,
-                    cy: ICON_PX,
-                },
-                SIIGBF_ICONONLY,
-            )
+            .GetImage(SIZE { cx: px, cy: px }, SIIGBF_ICONONLY)
             .ok()?;
         let pixmap = to_pixmap(bitmap);
         let _ = DeleteObject(bitmap.into());
