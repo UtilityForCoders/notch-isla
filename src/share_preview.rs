@@ -304,7 +304,7 @@ fn show_panel(
     unsafe {
         let instance = GetModuleHandleW(None)?;
         // MAKEINTRESOURCEW(1): Win32 interpreta la dirección numérica como el ID de
-        // assets/icon.ico, no como una cadena ni como memoria para desreferenciar.
+        // assets/nocho.ico, no como una cadena ni como memoria para desreferenciar.
         let resource = PCWSTR(std::ptr::without_provenance::<u16>(1));
         let icon = LoadIconW(Some(instance.into()), resource)?;
         let class = w!("NotchIslaSharePreview");

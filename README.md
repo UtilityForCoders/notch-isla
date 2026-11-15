@@ -42,11 +42,13 @@ El instalador no pide permisos de administrador: instala en `%LOCALAPPDATA%\Prog
 
 ### Ícono
 
-El ícono (`assets/icon.ico`) se dibuja por código y se incrusta en el `.exe` al compilar (`build.rs` + `app.rc`, con el `rc.exe` del Windows SDK). Para regenerarlo después de cambiar el diseño en `examples/icon.rs`:
+El ícono (`assets/nocho.ico`) sale del logo `assets/nocho.png` (fondo transparente) y se incrusta en el `.exe` al compilar (`build.rs` + `app.rc`, con el `rc.exe` del Windows SDK). El instalador usa el mismo archivo. Para regenerarlo después de cambiar el logo:
 
 ```powershell
-cargo run --example icon
+powershell -ExecutionPolicy Bypass -File scripts\generar-icono.ps1
 ```
+
+El script centra el logo, lo agranda hasta ocupar casi todo el cuadro y guarda los tamaños de 16 a 256 px que usa Windows.
 
 **Uso:**
 

@@ -35,7 +35,7 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 ; Windows 10 1809: lo mínimo para SMTC.
 MinVersion=10.0.17763
-SetupIconFile=..\assets\icon.ico
+SetupIconFile=..\assets\nocho.ico
 UninstallDisplayIcon={app}\{#AppExe}
 UninstallDisplayName={#AppName}
 WizardStyle=modern
