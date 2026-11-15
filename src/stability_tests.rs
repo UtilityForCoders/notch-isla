@@ -613,13 +613,26 @@ fn pump(duration: Duration) {
 #[test]
 #[ignore = "ejercita la isla real fuera de pantalla; requiere DWM y escritorio interactivo"]
 fn letra_proyectada_se_oculta_entera_en_pantalla_completa() {
+    isla_entra_y_sale_de_pantalla_completa(false);
+}
+
+#[test]
+#[ignore = "ejercita la isla real fuera de pantalla; requiere DWM y escritorio interactivo"]
+fn isla_abierta_vuelve_a_la_franja_al_salir_de_pantalla_completa() {
+    isla_entra_y_sale_de_pantalla_completa(true);
+}
+
+/// Con la letra proyectada, una app pasa a pantalla completa y después se vuelve a una ventana
+/// normal. `abierta`: la isla estaba abierta (no escondida en el borde) al entrar.
+/// `NOCHO_TRANSLUCENT=1` usa el fondo desenfocado.
+fn isla_entra_y_sale_de_pantalla_completa(abierta: bool) {
     unsafe {
         windows::Win32::UI::HiDpi::SetThreadDpiAwarenessContext(
             DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
         );
         CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok().unwrap();
         let instance = GetModuleHandleW(None).unwrap();
-        let class = w!("NotchIslaLetraFullscreen");
+        let class = w!("NochoLetraFullscreen");
         RegisterClassExW(&WNDCLASSEXW {
             cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
             lpfnWndProc: Some(wndproc),
@@ -643,7 +656,7 @@ fn letra_proyectada_se_oculta_entera_en_pantalla_completa() {
         )
         .unwrap();
         let mut settings = Settings::load();
-        settings.translucent = std::env::var_os("NOTCH_TRANSLUCENT").is_some();
+        settings.translucent = std::env::var_os("NOCHO_TRANSLUCENT").is_some();
         settings.hide_fullscreen = true;
         settings.real_bars = false;
         settings.lyrics_island = false;
@@ -682,8 +695,8 @@ fn letra_proyectada_se_oculta_entera_en_pantalla_completa() {
                 })
                 .collect(),
         );
-        // Escondida en el borde: solo la franja y la letra debajo.
-        app.idle_hidden = true;
+        // Escondida en el borde (solo la franja y la letra debajo) o abierta.
+        app.idle_hidden = !abierta;
         APP.with(|cell| *cell.borrow_mut() = Some(app));
         with_app(|app| {
             app.update_visibility();
@@ -700,13 +713,18 @@ fn letra_proyectada_se_oculta_entera_en_pantalla_completa() {
         eprintln!("en pantalla completa: {during:?}");
 
         // Vuelve a una ventana normal: la letra debe terminar de aparecer, no quedar a medias
-        // como una sombra sin texto.
+        // como una sombra sin texto, y la isla debe quedar en la franja, no abierta y contraída.
         with_app(|app| app.set_fullscreen(false));
         pump(Duration::from_millis(800));
         let after = visible_windows();
-        let mut presence = 0.0;
-        with_app(|app| presence = app.projector.as_ref().map_or(0.0, |p| p.presence()));
-        eprintln!("al salir: {after:?}, letra a la vista {presence:.2}");
+        let (mut presence, mut island_open) = (0.0, true);
+        with_app(|app| {
+            presence = app.projector.as_ref().map_or(0.0, |p| p.presence());
+            island_open = app.visible || app.presence.value > 0.0;
+        });
+        eprintln!(
+            "al salir: {after:?}, letra a la vista {presence:.2}, isla abierta {island_open}"
+        );
 
         with_app(|app| {
             app.set_timer(None);
@@ -726,5 +744,6 @@ fn letra_proyectada_se_oculta_entera_en_pantalla_completa() {
             presence > 0.99,
             "al volver, la letra debe terminar de aparecer: {presence:.2}"
         );
+        assert!(!island_open, "al volver, la isla debe quedar en la franja");
     }
 }
