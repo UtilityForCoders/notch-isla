@@ -256,7 +256,7 @@ fn slide_shift(slide: &mut Option<LyricSlide>, key: &str, index: isize) -> f32 {
     slide.as_ref().map_or(0.0, |s| s.shift(now))
 }
 
-/// Deja constancia de un fallo interno en `%LOCALAPPDATA%Nochoallo.log`. La app no tiene
+/// Deja constancia de un fallo interno en `%LOCALAPPDATA%\Nocho\fallo.log`. La app no tiene
 /// consola: sin esto, un fallo solo se ve como que la isla desapareció.
 fn log_panics() {
     std::panic::set_hook(Box::new(|info| {
