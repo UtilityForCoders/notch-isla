@@ -29,14 +29,14 @@ use crate::{autostart, settings};
 pub const WM_UPDATE: u32 = WM_APP + 4;
 
 /// Página de descarga, para la versión portable o si la descarga falló.
-pub const DOWNLOAD_URL: &str = "https://github.com/UtilityForCoders/notch-isla/releases/latest";
+pub const DOWNLOAD_URL: &str = "https://github.com/UtilityForCoders/Nocho/releases/latest";
 
 const API_HOST: &str = "api.github.com";
-const API_PATH: &str = "/repos/UtilityForCoders/notch-isla/releases/latest";
+const API_PATH: &str = "/repos/UtilityForCoders/Nocho/releases/latest";
 const DOWNLOAD_HOST: &str = "github.com";
-const REPO_PATH: &str = "/UtilityForCoders/notch-isla";
+const REPO_PATH: &str = "/UtilityForCoders/Nocho";
 
-/// Entrada del desinstalador que crea Inno Setup (el AppId de installer/notch-isla.iss + "_is1").
+/// Entrada del desinstalador que crea Inno Setup (el AppId de installer/nocho.iss + "_is1").
 const UNINSTALL_KEY: PCWSTR = w!(
     "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{977B762C-4545-4D26-8CF9-CC072B365CC0}_is1"
 );
@@ -216,11 +216,11 @@ pub fn check_now(hwnd: HWND) {
     });
 }
 
-/// Versión de esta app. En debug se puede fingir otra con la variable NOTCH_ISLA_VERSION
+/// Versión de esta app. En debug se puede fingir otra con la variable NOCHO_VERSION
 /// (p. ej. "0.1.0") para ver el aviso.
 fn current_version() -> String {
     if cfg!(debug_assertions) {
-        if let Ok(v) = std::env::var("NOTCH_ISLA_VERSION") {
+        if let Ok(v) = std::env::var("NOCHO_VERSION") {
             return v;
         }
     }
@@ -310,7 +310,7 @@ fn install(installer: &Path, version: &str, digest: &str) -> bool {
     };
     settings::set_pending_update(Some(version));
     // La copia va fuera de la carpeta de la app: el instalador reemplaza ese .exe.
-    let helper = std::env::temp_dir().join("notch-isla-actualizador.exe");
+    let helper = std::env::temp_dir().join("nocho-actualizador.exe");
     let started = std::env::current_exe()
         .and_then(|exe| std::fs::copy(exe, &helper))
         .and_then(|_| {
@@ -340,7 +340,7 @@ fn install(installer: &Path, version: &str, digest: &str) -> bool {
 /// queda cerrada sin avisar; al abrirse, la isla dice si se actualizó.
 ///
 /// Para que nadie pueda usar este modo (en un .exe firmado) para lanzar otro programa, solo
-/// ejecuta un instalador de Notch Isla en la carpeta temporal, con las opciones conocidas y
+/// ejecuta un instalador de Nocho en la carpeta temporal, con las opciones conocidas y
 /// cuya huella coincide con la recibida (la que publicó GitHub, comprobada por la isla).
 pub fn run_updater(args: &[String]) {
     let (Some(installer), Some(tasks), Some(digest)) = (args.first(), args.get(1), args.get(2))
@@ -353,7 +353,7 @@ pub fn run_updater(args: &[String]) {
     let expected_name = installer
         .file_name()
         .and_then(|n| n.to_str())
-        .and_then(|n| n.strip_prefix("notch-isla-setup-"))
+        .and_then(|n| n.strip_prefix("nocho-setup-"))
         .and_then(|n| n.strip_suffix(".exe"))
         .is_some_and(is_plain_version);
     if !expected_place
@@ -374,7 +374,7 @@ pub fn run_updater(args: &[String]) {
         }
         std::thread::sleep(Duration::from_millis(500));
     }
-    if let Some(exe) = install_location().map(|dir| dir.join("notch-isla.exe")) {
+    if let Some(exe) = install_location().map(|dir| dir.join("nocho.exe")) {
         let _ = std::process::Command::new(exe).spawn();
     }
 }
@@ -385,7 +385,7 @@ fn island_running() -> bool {
         match OpenMutexW(
             SYNCHRONIZATION_SYNCHRONIZE,
             false,
-            w!("Local\\NotchIsla.Instancia"),
+            w!("Local\\Nocho.Instancia"),
         ) {
             Ok(handle) => {
                 let _ = CloseHandle(handle);
@@ -419,7 +419,7 @@ pub fn take_install_result() -> Option<(bool, String)> {
 
 /// El instalador de `version` está en la carpeta temporal y se escribió hace poco.
 fn just_installed(version: &str) -> bool {
-    let path = std::env::temp_dir().join(format!("notch-isla-setup-{version}.exe"));
+    let path = std::env::temp_dir().join(format!("nocho-setup-{version}.exe"));
     std::fs::metadata(path)
         .and_then(|m| m.modified())
         .ok()
@@ -467,7 +467,7 @@ fn is_installed() -> bool {
 /// la huella SHA-256 que informa GitHub. Si ya estaba descargado y es correcto, lo reutiliza.
 /// Devuelve dónde quedó y su huella.
 fn download_installer(json: &str, tag: &str, version: &str) -> Option<(PathBuf, String)> {
-    let name = format!("notch-isla-setup-{version}.exe");
+    let name = format!("nocho-setup-{version}.exe");
     // Datos del archivo en la lista de "assets": vienen después de su nombre.
     let asset = &json[json.find(&format!("\"{name}\""))?..];
     let size = json_number(asset, "size")?;
@@ -511,7 +511,7 @@ const MAX_DOWNLOAD: usize = 32 * 1024 * 1024;
 /// GET por HTTPS. `json` = pedir la respuesta de la API de GitHub. Lo usa también la letra.
 pub(crate) fn get(host: &str, path: &str, json: bool) -> Option<Vec<u8>> {
     unsafe {
-        let agent = HSTRING::from(format!("notch-isla/{}", env!("CARGO_PKG_VERSION")));
+        let agent = HSTRING::from(format!("nocho/{}", env!("CARGO_PKG_VERSION")));
         let session = Handle(WinHttpOpen(
             &agent,
             WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
@@ -633,7 +633,7 @@ mod tests {
             true,
             |_, _, version| {
                 Some((
-                    PathBuf::from(format!("notch-isla-setup-{version}.exe")),
+                    PathBuf::from(format!("nocho-setup-{version}.exe")),
                     "anterior".into(),
                 ))
             },
@@ -646,17 +646,14 @@ mod tests {
             assert_eq!(json, fresh_json);
             assert_eq!(tag, "v0.5.2");
             assert_eq!(version, "0.5.2");
-            Some((
-                PathBuf::from("notch-isla-setup-0.5.2.exe"),
-                "reciente".into(),
-            ))
+            Some((PathBuf::from("nocho-setup-0.5.2.exe"), "reciente".into()))
         })
         .unwrap()
         .unwrap();
         assert_eq!(latest.version, "0.5.2");
         assert_eq!(
             latest.installer.unwrap(),
-            PathBuf::from("notch-isla-setup-0.5.2.exe")
+            PathBuf::from("nocho-setup-0.5.2.exe")
         );
         assert_eq!(latest.digest, "reciente");
     }
@@ -702,11 +699,11 @@ mod tests {
         assert!(!is_plain_version("1.2.3.4.5"));
     }
 
-    /// El modo ayudante no ejecuta nada que no sea un instalador de Notch Isla verificado.
+    /// El modo ayudante no ejecuta nada que no sea un instalador de Nocho verificado.
     #[test]
     fn ayudante_rechaza_otros_programas() {
         let dir = std::env::temp_dir();
-        let fake = dir.join("notch-isla-setup-9.9.9.exe");
+        let fake = dir.join("nocho-setup-9.9.9.exe");
         std::fs::write(&fake, b"no es un instalador").unwrap();
         let real_digest = sha256_hex(b"no es un instalador").unwrap();
         let arg = |p: &Path| p.to_string_lossy().to_string();

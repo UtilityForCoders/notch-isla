@@ -466,8 +466,7 @@ impl TextRenderer {
                                 );
                                 continue;
                             }
-                            // Cerca del centro el verso pasa de normal a negrita fundiendo
-                            // ambos, así el cambio de peso no salta.
+                            // Cuánto se acerca al centro: aclara de a poco el verso que se canta.
                             let bold = (1.0 - pos.abs()).clamp(0.0, 1.0);
                             // El que se canta: lo cantado en blanco y el resto tenue. Al
                             // llegar al centro va bajando hacia el tenue, así no parpadea.
@@ -476,39 +475,41 @@ impl TextRenderer {
                                 Some(_) => alpha + (UNSUNG_ALPHA - alpha) * bold,
                                 None => alpha,
                             };
-                            for (is_bold, weight) in [(true, bold), (false, 1.0 - bold)] {
-                                let full = a * alpha * weight;
-                                if full <= 0.001 {
-                                    continue;
-                                }
-                                let (format, natural) = if is_bold {
-                                    (&self.lyric_current, LYRIC_BOLD_SIZE)
-                                } else {
-                                    (&self.lyric_secondary, LYRIC_SIZE)
-                                };
-                                let rows = lyric_rows(pos, top, size, is_bold);
-                                if rows == 0.0 {
-                                    continue;
-                                }
-                                let h = rows * natural * s * LYRIC_LINE_SPACING;
-                                if let Some(line) = cached_line(
-                                    &self.dwrite,
-                                    format,
-                                    &mut self.lyric_cache,
-                                    is_bold,
-                                    text,
-                                ) {
-                                    draw_lyric(
-                                        target,
-                                        brush,
-                                        &transform,
-                                        line,
-                                        (lx, cy + top * s, lw, h),
-                                        size / natural,
-                                        (1.0, 1.0, 1.0, a * base * weight),
-                                        sung.map(|p| (p, full)),
-                                    );
-                                }
+                            // Un solo peso por verso: negrita en la mitad más cercana al
+                            // centro. Fundir negrita y normal dejaba dos textos desfasados
+                            // (la negrita es más ancha y corta los renglones en otro lugar).
+                            let is_bold = pos.abs() < 0.5;
+                            let full = a * alpha;
+                            if full <= 0.001 {
+                                continue;
+                            }
+                            let (format, natural) = if is_bold {
+                                (&self.lyric_current, LYRIC_BOLD_SIZE)
+                            } else {
+                                (&self.lyric_secondary, LYRIC_SIZE)
+                            };
+                            let rows = lyric_rows(pos, top, size, is_bold);
+                            if rows == 0.0 {
+                                continue;
+                            }
+                            let h = rows * natural * s * LYRIC_LINE_SPACING;
+                            if let Some(line) = cached_line(
+                                &self.dwrite,
+                                format,
+                                &mut self.lyric_cache,
+                                is_bold,
+                                text,
+                            ) {
+                                draw_lyric(
+                                    target,
+                                    brush,
+                                    &transform,
+                                    line,
+                                    (lx, cy + top * s, lw, h),
+                                    size / natural,
+                                    (1.0, 1.0, 1.0, a * base),
+                                    sung.map(|p| (p, full)),
+                                );
                             }
                         }
                     }

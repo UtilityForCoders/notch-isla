@@ -2,7 +2,7 @@
 # Uso (desde cualquier carpeta):  .\installer\build.ps1
 # Requiere Inno Setup 6:          winget install --id JRSoftware.InnoSetup -e --scope user
 #
-# -SkipCargo: no compila; empaqueta el target\release\notch-isla.exe que ya está ahí. Lo usa
+# -SkipCargo: no compila; empaqueta el target\release\nocho.exe que ya está ahí. Lo usa
 # GitHub Actions para meter en el instalador el .exe ya firmado.
 
 param([switch]$SkipCargo)
@@ -25,7 +25,7 @@ $iscc = @(
 ) | Where-Object { Test-Path $_ } | Select-Object -First 1
 if (-not $iscc) { throw "No se encontró Inno Setup 6 (ISCC.exe)" }
 
-& $iscc /Q "/DAppVersion=$version" installer\notch-isla.iss
+& $iscc /Q "/DAppVersion=$version" installer\nocho.iss
 if ($LASTEXITCODE -ne 0) { throw "ISCC falló" }
 
-Write-Host "Instalador: target\installer\notch-isla-setup-$version.exe"
+Write-Host "Instalador: target\installer\nocho-setup-$version.exe"

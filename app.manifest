@@ -2,7 +2,7 @@
 <!-- Manifiesto del ejecutable: controles modernos de Windows (menús con el estilo actual en
      lugar del clásico), versiones de Windows compatibles y sin pedir permisos de administrador. -->
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
-  <assemblyIdentity type="win32" name="NotchIsla" version="1.0.0.0" processorArchitecture="*"/>
+  <assemblyIdentity type="win32" name="Nocho" version="1.0.0.0" processorArchitecture="*"/>
   <dependency>
     <dependentAssembly>
       <assemblyIdentity type="win32" name="Microsoft.Windows.Common-Controls" version="6.0.0.0"

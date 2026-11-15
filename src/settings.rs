@@ -1,5 +1,5 @@
 //! Ajustes del menú de la bandeja, guardados en el registro del usuario
-//! (HKCU\Software\NotchIsla; no requiere permisos de administrador).
+//! (HKCU\Software\Nocho; no requiere permisos de administrador).
 
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::ERROR_SUCCESS;
@@ -10,7 +10,9 @@ use windows::Win32::System::Registry::{
 
 use crate::hotkey::{self, Hotkey};
 
-const KEY: PCWSTR = w!("Software\\NotchIsla");
+pub const KEY: PCWSTR = w!("Software\\Nocho");
+/// Carpeta de datos en `%LOCALAPPDATA%` (identidad de Compartir cerca y mensajes recibidos).
+pub const DATA_DIR: &str = "Nocho";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct IslandColor(pub [u8; 3]);

@@ -92,7 +92,7 @@ impl Projector {
     pub fn new(scale: f32) -> Result<Self> {
         unsafe {
             let instance = GetModuleHandleW(None)?;
-            let class = w!("NotchIslaLetra");
+            let class = w!("NochoLetra");
             let wc = WNDCLASSEXW {
                 cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
                 lpfnWndProc: Some(passthrough_proc),
@@ -108,7 +108,7 @@ impl Projector {
                     | WS_EX_TOOLWINDOW
                     | WS_EX_NOACTIVATE,
                 class,
-                w!("Letra de Notch Isla"),
+                w!("Letra de Nocho"),
                 WS_POPUP,
                 0,
                 0,
@@ -158,6 +158,12 @@ impl Projector {
                 frames_drawn: 0,
             })
         }
+    }
+
+    /// Cuánto se ve (0 = escondido, 1 = a la vista).
+    #[cfg(test)]
+    pub fn presence(&self) -> f32 {
+        self.presence.value
     }
 
     /// Oculta de inmediato, incluso si se detiene el temporizador por pantalla completa.

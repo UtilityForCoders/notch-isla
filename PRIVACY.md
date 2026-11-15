@@ -4,7 +4,7 @@
 
 ## Español
 
-Notch Isla no tiene telemetría, estadísticas de uso, anuncios ni cuentas.
+Nocho no tiene telemetría, estadísticas de uso, anuncios ni cuentas.
 
 Se conecta a internet solo para dos cosas. **Actualizaciones**: un minuto después de abrirse y luego cada 6 horas, la app pide a GitHub (`api.github.com`) el número de la última versión publicada. Si hay una versión nueva y la app está instalada, descarga su instalador desde `github.com` a la carpeta temporal; solo se instala si haces clic en el aviso. Las peticiones no llevan datos tuyos, solo el nombre y la versión de la app. Como cualquier conexión, GitHub ve tu dirección IP; se aplica la [declaración de privacidad de GitHub](https://docs.github.com/es/site-policy/privacy-policies/github-general-privacy-statement).
 
@@ -21,17 +21,17 @@ Para funcionar, la app usa información que ya está en tu PC, solo en memoria y
 
 Lo que la app escribe en tu PC:
 
-- Sus **ajustes** del menú de la bandeja, en `HKEY_CURRENT_USER\Software\NotchIsla`.
-- La opción **Iniciar con Windows**, si la activas: un valor llamado `NotchIsla` en `HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run`. Se quita al desactivar la opción o al desinstalar la app.
+- Sus **ajustes** del menú de la bandeja, en `HKEY_CURRENT_USER\Software\Nocho`.
+- La opción **Iniciar con Windows**, si la activas: un valor llamado `Nocho` en `HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run`. Se quita al desactivar la opción o al desinstalar la app.
 - Si eliges una **salida de audio para una app**, Windows la guarda en su propia configuración de sonido (la misma del Mezclador de volumen); se quita eligiendo **Predeterminada del sistema**.
 
-**Compartir cerca** funciona en la red local, sin cuentas ni servidor. Con **Recibir de equipos vinculados** activado, la app anuncia el nombre del PC y su certificado público mediante mDNS mientras está abierta; la recepción permanece disponible hasta que la pauses y esa preferencia se conserva al reiniciar. Solo los equipos vinculados pueden enviar contenido. Para agregar uno nuevo, abres una ventana de vinculación de dos minutos y confirmas un código en ambos PCs. Las conexiones usan TLS con autenticación de ambos equipos. El certificado, la clave privada, los nombres y certificados de los equipos vinculados y la preferencia de recepción se guardan en `%LOCALAPPDATA%\NotchIsla\share.dat`, cifrados con DPAPI para el usuario de Windows. **Olvidar equipo** revoca la confianza en este PC. Al enviar, el destinatario recibe el nombre de tu PC, los nombres y tamaños de los elementos y el contenido seleccionado. El portapapeles se lee solo al elegir **Enviar texto o imagen copiada**; recibir no lo modifica hasta pulsar **Copiar**. El texto recibido se mantiene en memoria y las imágenes se guardan temporalmente hasta cerrar la vista previa. Los demás archivos solo se guardan en Descargas después de aceptarlos.
+**Compartir cerca** funciona en la red local, sin cuentas ni servidor. Con **Recibir de equipos vinculados** activado, la app anuncia el nombre del PC y su certificado público mediante mDNS mientras está abierta; la recepción permanece disponible hasta que la pauses y esa preferencia se conserva al reiniciar. Solo los equipos vinculados pueden enviar contenido. Para agregar uno nuevo, abres una ventana de vinculación de dos minutos y confirmas un código en ambos PCs. Las conexiones usan TLS con autenticación de ambos equipos. El certificado, la clave privada, los nombres y certificados de los equipos vinculados y la preferencia de recepción se guardan en `%LOCALAPPDATA%\Nocho\share.dat`, cifrados con DPAPI para el usuario de Windows. **Olvidar equipo** revoca la confianza en este PC. Al enviar, el destinatario recibe el nombre de tu PC, los nombres y tamaños de los elementos y el contenido seleccionado. El portapapeles se lee solo al elegir **Enviar texto o imagen copiada**; recibir no lo modifica hasta pulsar **Copiar**. El texto recibido se mantiene en memoria y las imágenes se guardan temporalmente hasta cerrar la vista previa. Los demás archivos solo se guardan en Descargas después de aceptarlos.
 
-Preguntas: abre un *issue* en https://github.com/UtilityForCoders/notch-isla/issues
+Preguntas: abre un *issue* en https://github.com/UtilityForCoders/Nocho/issues
 
 ## English
 
-Notch Isla has no telemetry, usage statistics, ads, or accounts.
+Nocho has no telemetry, usage statistics, ads, or accounts.
 
 It connects to the internet for only two things. **Updates**: one minute after it starts and then every 6 hours, the app asks GitHub (`api.github.com`) for the number of the latest published version. If there is a new version and the app is installed, it downloads the installer from `github.com` to the temporary folder; it is installed only if you click the notification. The requests carry none of your data, only the app's name and version. As with any connection, GitHub sees your IP address; the [GitHub General Privacy Statement](https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement) applies.
 
@@ -48,10 +48,10 @@ To work, the app uses information already on your PC, only in memory and only wh
 
 What the app writes to your PC:
 
-- Its tray-menu **settings**, under `HKEY_CURRENT_USER\Software\NotchIsla`.
-- The **Start with Windows** option, if you enable it: a value named `NotchIsla` under `HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run`. It is removed when you turn the option off or uninstall the app.
+- Its tray-menu **settings**, under `HKEY_CURRENT_USER\Software\Nocho`.
+- The **Start with Windows** option, if you enable it: a value named `Nocho` under `HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run`. It is removed when you turn the option off or uninstall the app.
 - If you choose an **audio output for an app**, Windows stores it in its own sound settings (the same as the Volume mixer); choosing **Predeterminada del sistema** (system default) removes it.
 
-**Nearby sharing** works on the local network without accounts or a server. With **Recibir de equipos vinculados** (receive from paired devices) enabled, the app advertises your computer name and public certificate using mDNS while running. Receiving stays available until paused, and that preference survives restarts. Only paired devices can send content. Adding a device opens a two-minute pairing window and requires confirming the same code on both computers. Connections use TLS with mutual device authentication. The certificate, private key, paired device names and certificates, and receiving preference are stored in `%LOCALAPPDATA%\NotchIsla\share.dat`, encrypted with Windows DPAPI for the current user. **Olvidar equipo** (forget device) revokes trust on this PC. A recipient receives your computer name, item names and sizes, and the selected content. The clipboard is read only when choosing **Enviar texto o imagen copiada** (send copied text or image); receiving changes it only after clicking **Copiar** (copy). Received text stays in memory and images are stored temporarily until their preview closes. Other files are saved to Downloads only after acceptance.
+**Nearby sharing** works on the local network without accounts or a server. With **Recibir de equipos vinculados** (receive from paired devices) enabled, the app advertises your computer name and public certificate using mDNS while running. Receiving stays available until paused, and that preference survives restarts. Only paired devices can send content. Adding a device opens a two-minute pairing window and requires confirming the same code on both computers. Connections use TLS with mutual device authentication. The certificate, private key, paired device names and certificates, and receiving preference are stored in `%LOCALAPPDATA%\Nocho\share.dat`, encrypted with Windows DPAPI for the current user. **Olvidar equipo** (forget device) revokes trust on this PC. A recipient receives your computer name, item names and sizes, and the selected content. The clipboard is read only when choosing **Enviar texto o imagen copiada** (send copied text or image); receiving changes it only after clicking **Copiar** (copy). Received text stays in memory and images are stored temporarily until their preview closes. Other files are saved to Downloads only after acceptance.
 
-Questions: open an issue at https://github.com/UtilityForCoders/notch-isla/issues
+Questions: open an issue at https://github.com/UtilityForCoders/Nocho/issues

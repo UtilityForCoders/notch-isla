@@ -189,7 +189,7 @@ pub fn confirm(owner: HWND, description: &str, code: &str) -> bool {
 }
 
 pub fn pair(owner: HWND, name: &str, code: &str) -> bool {
-    let content = format!("{name}\r\n\r\n{code}\r\n\r\nComprueba que el otro equipo muestre exactamente el mismo código.\r\n\r\nAl vincularlo podrá enviarte texto e imágenes mientras Notch Isla esté abierto. Los archivos seguirán pidiendo confirmación para guardarse.");
+    let content = format!("{name}\r\n\r\n{code}\r\n\r\nComprueba que el otro equipo muestre exactamente el mismo código.\r\n\r\nAl vincularlo podrá enviarte texto e imágenes mientras Nocho esté abierto. Los archivos seguirán pidiendo confirmación para guardarse.");
     show_with_label(
         owner,
         "Vincular equipo",
@@ -304,10 +304,10 @@ fn show_panel(
     unsafe {
         let instance = GetModuleHandleW(None)?;
         // MAKEINTRESOURCEW(1): Win32 interpreta la dirección numérica como el ID de
-        // assets/icon.ico, no como una cadena ni como memoria para desreferenciar.
+        // assets/nocho.ico, no como una cadena ni como memoria para desreferenciar.
         let resource = PCWSTR(std::ptr::without_provenance::<u16>(1));
         let icon = LoadIconW(Some(instance.into()), resource)?;
-        let class = w!("NotchIslaSharePreview");
+        let class = w!("NochoSharePreview");
         let _ = RegisterClassW(&WNDCLASSW {
             lpfnWndProc: Some(proc),
             hInstance: instance.into(),
@@ -319,7 +319,7 @@ fn show_panel(
         let hwnd = CreateWindowExW(
             WS_EX_CONTROLPARENT,
             class,
-            w!("Compartir cerca · Notch Isla"),
+            w!("Compartir cerca · Nocho"),
             WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
@@ -1145,7 +1145,7 @@ unsafe fn paint_header(dc: HDC, panel: &Panel<'_>, client: &RECT) {
         DI_NORMAL,
     );
     for (label, size, weight, top, color, spacing) in [
-        ("Notch Isla", 18, 600, 12, TEXT, 0),
+        ("Nocho", 18, 600, 12, TEXT, 0),
         ("COMPARTIR CERCA", 10, 500, 38, ACCENT, 1),
     ] {
         let font = CreateFontW(

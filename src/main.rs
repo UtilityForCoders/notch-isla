@@ -14,6 +14,7 @@ mod island;
 mod lyrics;
 mod media;
 mod menu;
+mod migration;
 mod monitors;
 mod notice_card;
 mod projector;
@@ -270,10 +271,12 @@ fn main() -> Result<()> {
 
         // Una sola isla: si ya hay otra abierta, esta se cierra sin hacer nada.
         // El mutex vive mientras `_instance` exista, es decir, hasta que termine `main`.
-        let _instance = CreateMutexW(None, false, w!("Local\\NotchIsla.Instancia"))?;
-        if GetLastError() == ERROR_ALREADY_EXISTS {
+        let _instance = CreateMutexW(None, false, w!("Local\\Nocho.Instancia"))?;
+        if GetLastError() == ERROR_ALREADY_EXISTS || migration::legacy_running() {
             return Ok(());
         }
+        // Antes de leer ajustes o datos: trae lo que dejó Notch Isla (0.8 o anterior).
+        migration::run();
 
         // COM en el hilo de la ventana: lo necesita Core Audio (volumen con la rueda).
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
@@ -282,7 +285,7 @@ fn main() -> Result<()> {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 
         let instance = GetModuleHandleW(None)?;
-        let class_name = w!("NotchIslaWindow");
+        let class_name = w!("NochoWindow");
         let wc = WNDCLASSEXW {
             cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
             style: CS_DBLCLKS,
@@ -301,7 +304,7 @@ fn main() -> Result<()> {
         let hwnd = CreateWindowExW(
             WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
             class_name,
-            w!("Notch Isla"),
+            w!("Nocho"),
             WS_POPUP,
             0,
             0,
@@ -415,7 +418,7 @@ impl HighRefreshDriver {
         let hwnd_raw = hwnd.0 as isize;
 
         std::thread::Builder::new()
-            .name("notch-vsync".into())
+            .name("nocho-vsync".into())
             .spawn(move || {
                 let hwnd = HWND(hwnd_raw as *mut core::ffi::c_void);
                 let waiter = frame_wait::FrameWait::new();
@@ -1177,7 +1180,7 @@ impl App {
                     icon: NoticeIcon::Done,
                     color: GREEN,
                 },
-                "Notch Isla se actualizó",
+                "Nocho se actualizó",
                 &format!("Ahora tienes la versión {version}"),
                 NOTICE_UPDATE_MS,
             );
@@ -1228,7 +1231,7 @@ impl App {
                     icon: NoticeIcon::Done,
                     color: GREEN,
                 },
-                "Notch Isla está al día",
+                "Nocho está al día",
                 &format!("Tienes la última versión ({})", env!("CARGO_PKG_VERSION")),
                 NOTICE_MS + 1000,
             );
@@ -1560,7 +1563,13 @@ impl App {
     /// Si ya está corriendo, `tick` ajusta el intervalo en el siguiente cuadro.
     fn redraw(&mut self) {
         let motion = self.render();
-        let target = timer_for(&motion, false, self.frame_ms());
+        self.keep_moving(&motion);
+    }
+
+    /// Arranca el temporizador si el cuadro recién dibujado dejó algo moviéndose (o acorta su
+    /// intervalo si hace falta).
+    fn keep_moving(&mut self, motion: &Motion) {
+        let target = timer_for(motion, false, self.frame_ms());
         if target.is_some_and(|needed| self.timer_ms.is_none_or(|cur| needed < cur))
             || self.timer_ms.is_none()
         {
@@ -1641,18 +1650,31 @@ impl App {
             self.update_hovered = false;
             self.workspace_hover = None;
             self.aim_expansion(false);
+            // Se olvidó el puntero sin pasar por `set_hovered`, así que no queda programada la
+            // vuelta a la franja: al salir de la pantalla completa la isla reaparecía abierta y
+            // contraída, y se expandía con solo acercar el mouse. Vuelve al reposo, encogida en
+            // la franja, también con los controles fijados: reabrirse sola al volver a una
+            // ventana se ve brusco. Un clic en la franja la abre como siempre.
+            self.idle_hidden = true;
+            self.spring.reset(0.0);
+            unsafe {
+                let _ = KillTimer(Some(self.hwnd), COLLAPSE_TIMER);
+            }
             return;
         }
 
         let want = self.notice.is_some() || !self.idle_hidden;
         // Oculta por inactividad, la ventana sigue mostrada para la franja del borde.
         if self.edge_strip() && !self.shown {
-            self.render();
+            let motion = self.render();
             unsafe {
                 let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
             }
             self.shown = true;
             self.raise();
+            // La letra proyectada empieza a aparecer en este cuadro (p. ej., al salir de pantalla
+            // completa): sin temporizador quedaba congelada a medias, como una sombra sin texto.
+            self.keep_moving(&motion);
         }
         // Ya no corresponde la franja y la isla no está: se oculta la ventana.
         if !want && !self.visible && self.shown && !self.edge_strip() {
@@ -2425,7 +2447,8 @@ impl App {
                     (self.pos.x, self.pos.y, sw, sh),
                     (x, y, w, h, r),
                     (self.settings.blur_radius as f32 * self.scale).round() as u32,
-                    self.presence.value,
+                    // Opaco como el contenido: la isla entra y sale deslizándose.
+                    1.0,
                 )
             })
         } else if !self.settings.translucent {
@@ -2674,17 +2697,13 @@ impl App {
             cy: self.surface.height as i32,
         };
         let src = POINT::default();
-        // Opacidad global: la isla se desvanece mientras entra o sale de la pantalla.
-        // Con la línea del borde, opaca: la isla sube sin desvanecerse y la línea queda visible.
-        let opacity = if strip {
-            255
-        } else {
-            (self.presence.value.clamp(0.0, 1.0) * 255.0) as u8
-        };
+        // Siempre opaca: la isla entra y sale deslizándose por el borde superior. Desvanecer la
+        // ventana entera dejaba el cuadro oscuro casi invisible sobre fondos oscuros mientras
+        // los iconos y textos blancos seguían viéndose, como si flotaran.
         let blend = BLENDFUNCTION {
             BlendOp: AC_SRC_OVER as u8,
             BlendFlags: 0,
-            SourceConstantAlpha: opacity,
+            SourceConstantAlpha: 255,
             AlphaFormat: AC_SRC_ALPHA as u8,
         };
         // Windows solo vuelve a componer la zona que cambió.
@@ -3551,12 +3570,12 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                     );
                 } else if found.installer.is_some() {
                     app.tray.notify(
-                        &format!("Notch Isla {version} lista para instalar"),
+                        &format!("Nocho {version} lista para instalar"),
                         "Haz clic aquí para actualizar. La isla se cierra y vuelve en unos segundos.",
                     );
                 } else {
                     app.tray.notify(
-                        &format!("Notch Isla {version} disponible"),
+                        &format!("Nocho {version} disponible"),
                         "Haz clic aquí para descargarla, o búscala en el menú del ícono.",
                     );
                 }
@@ -3833,7 +3852,7 @@ mod tests {
         unsafe {
             CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok().unwrap();
             let instance = GetModuleHandleW(None).unwrap();
-            let class = w!("NotchWorkspacePreview");
+            let class = w!("NochoWorkspacePreview");
             RegisterClassExW(&WNDCLASSEXW {
                 cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
                 lpfnWndProc: Some(wndproc),
@@ -3844,7 +3863,7 @@ mod tests {
             let hwnd = CreateWindowExW(
                 WS_EX_LAYERED | windows::Win32::UI::WindowsAndMessaging::WS_EX_APPWINDOW,
                 class,
-                w!("Notch Isla · Panel de prueba"),
+                w!("Nocho · Panel de prueba"),
                 WS_POPUP,
                 0,
                 0,
@@ -3867,7 +3886,7 @@ mod tests {
             app.tray.remove();
             app.pos.y += 150;
             app.idle_hidden = false;
-            if std::env::var_os("NOTCH_PREVIEW_INDICATORS").is_some() {
+            if std::env::var_os("NOCHO_PREVIEW_INDICATORS").is_some() {
                 app.battery_visible = true;
                 app.battery_low = true;
                 app.battery_devices = vec![battery::Device {
@@ -3883,7 +3902,7 @@ mod tests {
                 }];
                 app.low_battery_devices = app.battery_devices.clone();
             }
-            if std::env::var_os("NOTCH_PREVIEW_MEDIA").is_some() {
+            if std::env::var_os("NOCHO_PREVIEW_MEDIA").is_some() {
                 app.set_media(Some(NowPlaying {
                     title: "Bad Apple!!".into(),
                     artist: "nomico".into(),
@@ -3908,7 +3927,7 @@ mod tests {
                 app.redraw();
             });
             SetTimer(Some(hwnd), 999, 100, None);
-            let seconds = std::env::var("NOTCH_PREVIEW_SECONDS")
+            let seconds = std::env::var("NOCHO_PREVIEW_SECONDS")
                 .ok()
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(45);
@@ -3930,7 +3949,7 @@ mod tests {
         unsafe {
             CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok().unwrap();
             let instance = GetModuleHandleW(None).unwrap();
-            let class = w!("NotchWorkspacePolicyTest");
+            let class = w!("NochoWorkspacePolicyTest");
             RegisterClassExW(&WNDCLASSEXW {
                 cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
                 lpfnWndProc: Some(default_proc),
@@ -4210,7 +4229,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "prueba prolongada de refresco alto; NOTCH_STRESS_SECONDS controla su duración"]
+    #[ignore = "prueba prolongada de refresco alto; NOCHO_STRESS_SECONDS controla su duración"]
     fn refresco_alto_no_satura_la_cola_ni_bloquea_temporizadores() {
         use std::cell::Cell;
         thread_local! {
@@ -4241,7 +4260,7 @@ mod tests {
         }
         unsafe {
             let instance = GetModuleHandleW(None).unwrap();
-            let class = w!("NotchIslaStressRefresh");
+            let class = w!("NochoStressRefresh");
             RegisterClassExW(&WNDCLASSEXW {
                 cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
                 lpfnWndProc: Some(stress_proc),
@@ -4264,7 +4283,7 @@ mod tests {
                 None,
             )
             .unwrap();
-            let real_vsync = std::env::var_os("NOTCH_REAL_VSYNC").is_some();
+            let real_vsync = std::env::var_os("NOCHO_REAL_VSYNC").is_some();
             let hz = if real_vsync {
                 monitors::refresh_rate(monitors::find(""))
             } else {
@@ -4282,7 +4301,7 @@ mod tests {
             driver.set_active(true);
             DRIVER.with(|cell| *cell.borrow_mut() = Some(driver));
             SetTimer(Some(hwnd), 99, 20, None);
-            let seconds = std::env::var("NOTCH_STRESS_SECONDS")
+            let seconds = std::env::var("NOCHO_STRESS_SECONDS")
                 .ok()
                 .and_then(|value| value.parse::<u64>().ok())
                 .unwrap_or(10)
@@ -4462,7 +4481,7 @@ mod tests {
     #[ignore]
     fn medir_envio_a_windows() {
         unsafe {
-            let class = w!("NotchIslaPrueba");
+            let class = w!("NochoPrueba");
             let wc = WNDCLASSEXW {
                 cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
                 lpfnWndProc: Some(default_proc),
@@ -4704,7 +4723,7 @@ mod tests {
                 h,
                 (0, 0, w, h),
                 &areas,
-                "Notch Isla",
+                "Nocho",
                 "Prueba",
                 0.0,
             );

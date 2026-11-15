@@ -273,6 +273,9 @@ pub struct Monitor {
     shared: Arc<Mutex<Snapshot>>,
     sender: mpsc::SyncSender<Request>,
     connection_notices: Arc<AtomicBool>,
+    /// Se pidió un escaneo (p. ej., Windows avisó que se conectó o desconectó algo): el próximo
+    /// vuelve a enumerar las colecciones HID. Se marca aunque haya un escaneo en curso.
+    hid_changed: Arc<AtomicBool>,
 }
 
 impl Monitor {
@@ -285,6 +288,8 @@ impl Monitor {
         let state = shared.clone();
         let connection_notices = Arc::new(AtomicBool::new(connections));
         let enabled = connection_notices.clone();
+        let hid_changed = Arc::new(AtomicBool::new(false));
+        let changed = hid_changed.clone();
         let hwnd = hwnd.0 as isize;
         std::thread::spawn(move || {
             let initialized = unsafe { RoInitialize(RO_INIT_MULTITHREADED) }.is_ok();
@@ -292,8 +297,9 @@ impl Monitor {
             let _ = RawGameController::RawGameControllers();
             std::thread::sleep(Duration::from_millis(500));
             let mut stability = LinkStability::default();
+            let mut hid = HidList::default();
             loop {
-                let mut snapshot = scan();
+                let mut snapshot = scan(&mut hid, changed.swap(false, Ordering::SeqCst));
                 let mut previous = state.lock().unwrap_or_else(|e| e.into_inner());
                 stability.update(&mut snapshot, &previous);
                 *previous = snapshot;
@@ -319,6 +325,7 @@ impl Monitor {
             shared,
             sender,
             connection_notices,
+            hid_changed,
         }
     }
 
@@ -330,6 +337,7 @@ impl Monitor {
     }
 
     pub fn refresh(&self) {
+        self.hid_changed.store(true, Ordering::SeqCst);
         let mut state = self.shared.lock().unwrap_or_else(|e| e.into_inner());
         if !state.scanning && self.sender.try_send(Request::Refresh).is_ok() {
             state.scanning = true;
@@ -508,11 +516,42 @@ fn preserve_last_readings(current: &mut Snapshot, previous: &Snapshot) {
     }
 }
 
-fn scan() -> Snapshot {
-    scan_with_diagnostics(false)
+/// Colecciones HID guardadas entre escaneos. Enumerarlas es lo más caro de un escaneo y la
+/// lista solo cambia al conectar o desconectar algo, que Windows avisa (`WM_DEVICECHANGE`
+/// llama a `Monitor::refresh`). Los receptores siguen consultándose en cada escaneo: el enlace
+/// con el mouse cambia sin que cambie la lista. Cada `INTERVAL` se vuelve a enumerar igual, por
+/// si se perdió algún aviso.
+#[derive(Default)]
+struct HidList {
+    api: Option<HidApi>,
+    enumerated: Option<Instant>,
 }
 
-fn scan_with_diagnostics(trace: bool) -> Snapshot {
+impl HidList {
+    fn get(&mut self, changed: bool) -> hidapi::HidResult<&HidApi> {
+        let stale = changed || self.enumerated.is_none_or(|at| at.elapsed() >= INTERVAL);
+        if stale {
+            // Si la enumeración falla, se reintenta en el próximo escaneo.
+            self.enumerated = None;
+            match self.api.as_mut() {
+                Some(api) => api.refresh_devices()?,
+                None => self.api = Some(HidApi::new()?),
+            }
+            self.enumerated = Some(Instant::now());
+        }
+        self.api
+            .as_ref()
+            .ok_or_else(|| hidapi::HidError::HidApiError {
+                message: "HID sin inicializar".into(),
+            })
+    }
+}
+
+fn scan(hid: &mut HidList, hid_changed: bool) -> Snapshot {
+    scan_with_diagnostics(hid, hid_changed, false)
+}
+
+fn scan_with_diagnostics(hid: &mut HidList, hid_changed: bool, trace: bool) -> Snapshot {
     let mut snapshot = Snapshot::default();
     let at = Instant::now();
     if let Err(e) = bluetooth(&mut snapshot.devices, trace) {
@@ -529,7 +568,10 @@ fn scan_with_diagnostics(trace: bool) -> Snapshot {
     if trace {
         println!("Mandos: {:.2} s", at.elapsed().as_secs_f32());
     }
-    if let Err(e) = receivers(&mut snapshot.devices, trace) {
+    if let Err(e) = hid
+        .get(hid_changed)
+        .and_then(|api| receivers(api, &mut snapshot.devices, trace))
+    {
         snapshot.unavailable.insert(Source::Receiver);
         snapshot.errors.push(format!("Receptores USB: {e}"));
     }
@@ -588,7 +630,13 @@ fn property_percent(device: &DeviceInformation) -> Option<Level> {
     (p <= 100).then_some(Level::Percent(p as u8))
 }
 
-fn bluetooth(out: &mut Vec<Device>, trace: bool) -> windows::core::Result<()> {
+/// Nodos PnP Bluetooth presentes y la batería que Windows guarda en ellos, por contenedor.
+type PnpBatteries = (
+    windows::Devices::Enumeration::DeviceInformationCollection,
+    HashMap<GUID, Level>,
+);
+
+fn pnp_batteries(trace: bool) -> windows::core::Result<PnpBatteries> {
     // La batería que conoce Windows está en el nodo PnP, no siempre en el AEP.
     let nodes = finish(
         DeviceInformation::FindAllAsyncWithKindAqsFilterAndAdditionalProperties(
@@ -609,6 +657,13 @@ fn bluetooth(out: &mut Vec<Device>, trace: bool) -> windows::core::Result<()> {
             batteries.insert(container, level);
         }
     }
+    Ok((nodes, batteries))
+}
+
+fn bluetooth(out: &mut Vec<Device>, trace: bool) -> windows::core::Result<()> {
+    // Los nodos PnP solo aportan la batería guardada de un dispositivo ya conectado: sin
+    // ninguno conectado (lo normal), no se consultan. Es la consulta más cara del escaneo.
+    let mut pnp: Option<PnpBatteries> = None;
     // El selector de conexión evita el descubrimiento de radio. El emparejamiento
     // pertenece al endpoint Bluetooth (AEP), no a la interfaz de dispositivo.
     for le in [false, true] {
@@ -693,11 +748,17 @@ fn bluetooth(out: &mut Vec<Device>, trace: bool) -> windows::core::Result<()> {
             let address = address
                 .map(|a| format!("{a:012X}"))
                 .unwrap_or_else(|| id.to_string());
+            if pnp.is_none() {
+                pnp = Some(pnp_batteries(trace)?);
+            }
+            let Some((nodes, batteries)) = pnp.as_ref() else {
+                continue;
+            };
             let cached_level = property(&info, BT_ENDPOINT_CONTAINER)
                 .and_then(|p| p.GetGuid().ok())
                 .and_then(|key| batteries.get(&key).copied())
                 .or_else(|| {
-                    (&nodes).into_iter().find_map(|node| {
+                    nodes.into_iter().find_map(|node| {
                         node.Id()
                             .ok()
                             .filter(|s| s.to_string().to_uppercase().contains(&address))
@@ -991,15 +1052,14 @@ fn mchose(device: &HidDevice, trace: bool) -> Option<(Level, bool)> {
     None
 }
 
-fn receivers(out: &mut Vec<Device>, trace: bool) -> hidapi::HidResult<()> {
-    let api = HidApi::new()?;
+fn receivers(api: &HidApi, out: &mut Vec<Device>, trace: bool) -> hidapi::HidResult<()> {
     let mut seen = HashSet::new();
     let mut handled = HashSet::new();
     for info in api.device_list() {
         let vendor = info.vendor_id();
         let product = info.product_id();
         let name = info.product_string().unwrap_or("Periférico USB");
-        let ajazz_family = known_ajazz_apex(vendor, product, usages(&api, vendor, product));
+        let ajazz_family = known_ajazz_apex(vendor, product, usages(api, vendor, product));
         let known_ajazz = ajazz_family && info.usage_page() == 0xffff && info.usage() == 2;
         let known_compx = matches!(vendor, 0x248a | 0x249a)
             && matches!(product, 0x5c2f | 0x5b2f)
@@ -1036,7 +1096,7 @@ fn receivers(out: &mut Vec<Device>, trace: bool) -> hidapi::HidResult<()> {
         if !seen.insert(id.clone()) {
             continue;
         }
-        let value = info.open_device(&api).ok().and_then(|device| {
+        let value = info.open_device(api).ok().and_then(|device| {
             if known_ajazz {
                 ajazz(&device, trace).map(|l| (l, false))
             } else if known_compx {
@@ -1055,7 +1115,7 @@ fn receivers(out: &mut Vec<Device>, trace: bool) -> hidapi::HidResult<()> {
             kind: if known_ajazz || known_compx || known_mchose {
                 DeviceKind::Mouse
             } else {
-                kind_from_hid_usages(usages(&api, vendor, product))
+                kind_from_hid_usages(usages(api, vendor, product))
             },
             connection: "USB / 2.4 GHz",
             level: value.map(|v| v.0),
@@ -1072,8 +1132,8 @@ fn receivers(out: &mut Vec<Device>, trace: bool) -> hidapi::HidResult<()> {
         });
         handled.insert((vendor, product));
     }
-    handled.extend(hidpp::scan(&api, out, trace));
-    standard_battery(&api, out, &handled, trace);
+    handled.extend(hidpp::scan(api, out, trace));
+    standard_battery(api, out, &handled, trace);
     Ok(())
 }
 
@@ -1155,7 +1215,7 @@ pub fn diagnostics() {
     // WGI termina de enumerar los mandos de forma asíncrona.
     let _ = RawGameController::RawGameControllers();
     std::thread::sleep(Duration::from_millis(500));
-    let snapshot = scan_with_diagnostics(true);
+    let snapshot = scan_with_diagnostics(&mut HidList::default(), true, true);
     for device in &snapshot.devices {
         println!(
             "{} | {} | {} | {}{} | {}",

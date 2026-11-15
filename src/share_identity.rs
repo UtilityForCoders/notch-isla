@@ -52,7 +52,11 @@ impl Store {
     pub fn load() -> Result<Self> {
         let directory = std::env::var_os("LOCALAPPDATA")
             .ok_or("No se encontró la carpeta de datos del usuario.")?;
-        Self::at(Path::new(&directory).join("NotchIsla").join("share.dat"))
+        Self::at(
+            Path::new(&directory)
+                .join(crate::settings::DATA_DIR)
+                .join("share.dat"),
+        )
     }
 
     pub(crate) fn at(path: PathBuf) -> Result<Self> {
@@ -71,7 +75,8 @@ impl Store {
                 state
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                let identity = rcgen::generate_simple_self_signed(vec!["notchisla.local".into()])?;
+                let identity =
+                    rcgen::generate_simple_self_signed(vec![crate::share::TLS_NAME.into()])?;
                 State {
                     version: 1,
                     certificate: identity.cert.der().to_vec(),
@@ -220,7 +225,7 @@ fn protect(data: &[u8], encrypt: bool) -> Result<Vec<u8>> {
         if encrypt {
             CryptProtectData(
                 &input,
-                w!("Notch Isla · Equipos vinculados"),
+                w!("Nocho · Equipos vinculados"),
                 None,
                 None,
                 None,
