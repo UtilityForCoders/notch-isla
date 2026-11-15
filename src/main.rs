@@ -1652,13 +1652,13 @@ impl App {
             self.aim_expansion(false);
             // Se olvidó el puntero sin pasar por `set_hovered`, así que no queda programada la
             // vuelta a la franja: al salir de la pantalla completa la isla reaparecía abierta y
-            // contraída, y se expandía con solo acercar el mouse. Vuelve al reposo, salvo que
-            // los controles estén fijados.
-            if !self.settings.pinned_expanded {
-                self.idle_hidden = true;
-                unsafe {
-                    let _ = KillTimer(Some(self.hwnd), COLLAPSE_TIMER);
-                }
+            // contraída, y se expandía con solo acercar el mouse. Vuelve al reposo, encogida en
+            // la franja, también con los controles fijados: reabrirse sola al volver a una
+            // ventana se ve brusco. Un clic en la franja la abre como siempre.
+            self.idle_hidden = true;
+            self.spring.reset(0.0);
+            unsafe {
+                let _ = KillTimer(Some(self.hwnd), COLLAPSE_TIMER);
             }
             return;
         }
@@ -2447,7 +2447,8 @@ impl App {
                     (self.pos.x, self.pos.y, sw, sh),
                     (x, y, w, h, r),
                     (self.settings.blur_radius as f32 * self.scale).round() as u32,
-                    self.presence.value,
+                    // Opaco como el contenido: la isla entra y sale deslizándose.
+                    1.0,
                 )
             })
         } else if !self.settings.translucent {
@@ -2696,17 +2697,13 @@ impl App {
             cy: self.surface.height as i32,
         };
         let src = POINT::default();
-        // Opacidad global: la isla se desvanece mientras entra o sale de la pantalla.
-        // Con la línea del borde, opaca: la isla sube sin desvanecerse y la línea queda visible.
-        let opacity = if strip {
-            255
-        } else {
-            (self.presence.value.clamp(0.0, 1.0) * 255.0) as u8
-        };
+        // Siempre opaca: la isla entra y sale deslizándose por el borde superior. Desvanecer la
+        // ventana entera dejaba el cuadro oscuro casi invisible sobre fondos oscuros mientras
+        // los iconos y textos blancos seguían viéndose, como si flotaran.
         let blend = BLENDFUNCTION {
             BlendOp: AC_SRC_OVER as u8,
             BlendFlags: 0,
-            SourceConstantAlpha: opacity,
+            SourceConstantAlpha: 255,
             AlphaFormat: AC_SRC_ALPHA as u8,
         };
         // Windows solo vuelve a componer la zona que cambió.
