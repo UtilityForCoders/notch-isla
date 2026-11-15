@@ -33,8 +33,26 @@ pub fn run() {
     run_at_startup();
 }
 
-/// Hay una Notch Isla (0.8 o anterior) abierta: dos islas a la vez se pisarían.
-pub fn legacy_running() -> bool {
+/// Cuánto se espera a que se cierre una Notch Isla abierta.
+const LEGACY_WAIT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Espera a que no haya una Notch Isla (0.8 o anterior) abierta, porque dos islas a la vez se
+/// pisarían. Al actualizarse, la Notch Isla vieja se cierra mientras el instalador ya abre Nocho:
+/// si Nocho se cerrara al verla, nadie la volvería a abrir (el ayudante de la 0.8 solo busca su
+/// propia isla). `false` si después de `LEGACY_WAIT` sigue abierta.
+pub fn wait_for_legacy() -> bool {
+    let until = std::time::Instant::now() + LEGACY_WAIT;
+    while legacy_running() {
+        if std::time::Instant::now() >= until {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    true
+}
+
+/// Hay una Notch Isla (0.8 o anterior) abierta.
+fn legacy_running() -> bool {
     unsafe {
         match OpenMutexW(SYNCHRONIZATION_SYNCHRONIZE, false, LEGACY_MUTEX) {
             Ok(handle) => {

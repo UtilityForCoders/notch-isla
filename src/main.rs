@@ -272,7 +272,7 @@ fn main() -> Result<()> {
         // Una sola isla: si ya hay otra abierta, esta se cierra sin hacer nada.
         // El mutex vive mientras `_instance` exista, es decir, hasta que termine `main`.
         let _instance = CreateMutexW(None, false, w!("Local\\Nocho.Instancia"))?;
-        if GetLastError() == ERROR_ALREADY_EXISTS || migration::legacy_running() {
+        if GetLastError() == ERROR_ALREADY_EXISTS || !migration::wait_for_legacy() {
             return Ok(());
         }
         // Antes de leer ajustes o datos: trae lo que dejó Notch Isla (0.8 o anterior).
