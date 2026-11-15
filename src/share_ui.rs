@@ -533,9 +533,13 @@ fn start_discovery(hwnd: HWND) {
     };
     let report = reporter(hwnd);
     thread::spawn(move || loop {
-        report(Event::Discovery(
-            share::discover(&store).map_err(|error| error.to_string()),
-        ));
+        // Solo se envía a equipos vinculados: sin ninguno, buscar en la red es trabajo perdido
+        // (un hilo y sockets nuevos cada pocos segundos). Al vincular uno, la búsqueda sigue sola.
+        if !store.devices().is_empty() {
+            report(Event::Discovery(
+                share::discover(&store).map_err(|error| error.to_string()),
+            ));
+        }
         thread::sleep(std::time::Duration::from_secs(5));
     });
 }
@@ -959,9 +963,10 @@ pub fn on_event(hwnd: HWND) {
                 }
             }
             Event::Discovery(result) => {
+                // Los equipos encontrados no se dibujan (solo aceleran el próximo envío), así que
+                // no hace falta redibujar la isla cada vez que termina una búsqueda.
                 if let Ok(peers) = result {
                     UI.with_borrow_mut(|ui| update_discovered_peers(ui, peers));
-                    crate::with_app(|app| app.redraw());
                 }
             }
             Event::Sent(result) => {
