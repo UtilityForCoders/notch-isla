@@ -1,5 +1,5 @@
 //! Identidad TLS y equipos de confianza, cifrados con DPAPI para el usuario de Windows.
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Mutex;
 
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
@@ -50,13 +50,9 @@ impl std::fmt::Debug for Store {
 
 impl Store {
     pub fn load() -> Result<Self> {
-        let directory = std::env::var_os("LOCALAPPDATA")
-            .ok_or("No se encontró la carpeta de datos del usuario.")?;
-        Self::at(
-            Path::new(&directory)
-                .join(crate::settings::DATA_DIR)
-                .join("share.dat"),
-        )
+        let directory =
+            crate::settings::data_dir().ok_or("No se encontró la carpeta de datos del usuario.")?;
+        Self::at(directory.join("share.dat"))
     }
 
     pub(crate) fn at(path: PathBuf) -> Result<Self> {
