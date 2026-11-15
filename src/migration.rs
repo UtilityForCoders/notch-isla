@@ -4,7 +4,7 @@
 //!
 //! Cada paso solo actúa si existe el dato viejo y todavía no el nuevo: repetirlo no hace nada.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{CloseHandle, ERROR_SUCCESS};
@@ -97,15 +97,68 @@ fn registry() {
     }
 }
 
-/// Renombra `%LOCALAPPDATA%\NotchIsla` a la carpeta nueva.
+/// Pasa `%LOCALAPPDATA%\NotchIsla` a la carpeta nueva.
 fn data_dir() {
     let Some(base) = std::env::var_os("LOCALAPPDATA").map(PathBuf::from) else {
         return;
     };
-    let (old, new) = (base.join(LEGACY_DIR), base.join(settings::DATA_DIR));
-    if old.is_dir() && !new.exists() {
-        let _ = std::fs::rename(old, new);
+    move_data(&base.join(LEGACY_DIR), &base.join(settings::DATA_DIR));
+}
+
+/// Copia los datos de `old` a `new` y después borra `old`. No se renombra la carpeta: basta
+/// con que el indexador o el antivirus la tengan abierta para que Windows lo impida. Solo
+/// actúa si `new` no tiene datos todavía (puede existir vacía si algo la creó antes).
+fn move_data(old: &Path, new: &Path) {
+    let new_is_empty = match std::fs::read_dir(new) {
+        Ok(mut entries) => entries.next().is_none(),
+        Err(_) => !new.exists(),
+    };
+    if !old.is_dir() || !new_is_empty {
+        return;
     }
+    if copy_tree(old, new).is_err() {
+        // A medias no sirve: se deja la carpeta vieja intacta y se reintenta al próximo inicio.
+        let _ = std::fs::remove_dir_all(new);
+        return;
+    }
+    fix_inbox_paths(old, new);
+    let _ = std::fs::remove_dir_all(old);
+}
+
+fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let target = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_tree(&entry.path(), &target)?;
+        } else {
+            std::fs::copy(entry.path(), target)?;
+        }
+    }
+    Ok(())
+}
+
+/// Los mensajes recibidos guardan la ruta completa de sus imágenes, dentro de la carpeta de
+/// datos: se cambian a la carpeta nueva para no perderlos.
+fn fix_inbox_paths(old: &Path, new: &Path) {
+    let inbox = new.join("share-inbox.json");
+    let (Ok(text), Some(old), Some(new)) = (
+        std::fs::read_to_string(&inbox),
+        json_path(old),
+        json_path(new),
+    ) else {
+        return;
+    };
+    if text.contains(&old) {
+        let _ = std::fs::write(&inbox, text.replace(&old, &new));
+    }
+}
+
+/// La ruta tal como queda escrita dentro de un texto JSON (con las barras escapadas).
+fn json_path(path: &Path) -> Option<String> {
+    let quoted = serde_json::to_string(path.to_str()?).ok()?;
+    Some(quoted.trim_matches('"').to_owned())
 }
 
 /// Cambia el valor viejo de "Iniciar con Windows" por el nuevo, que apunta a este ejecutable.
@@ -126,5 +179,50 @@ fn run_at_startup() {
             let _ = RegDeleteKeyValueW(HKEY_CURRENT_USER, autostart::RUN_KEY, LEGACY_RUN_VALUE);
         }
         autostart::set(true);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mueve_los_datos_y_corrige_las_rutas_de_los_mensajes() {
+        let base = tempfile::tempdir().unwrap();
+        let (old, new) = (base.path().join("NotchIsla"), base.path().join("Nocho"));
+        std::fs::create_dir_all(old.join("share-inbox")).unwrap();
+        std::fs::write(old.join("share.dat"), b"identidad").unwrap();
+        let image = old.join("share-inbox").join("1.png");
+        std::fs::write(&image, b"png").unwrap();
+        let inbox =
+            serde_json::json!([{ "sender": "PC", "content": { "kind": "image", "path": image } }]);
+        std::fs::write(old.join("share-inbox.json"), inbox.to_string()).unwrap();
+        // Una carpeta nueva vacía no impide la migración.
+        std::fs::create_dir_all(&new).unwrap();
+
+        move_data(&old, &new);
+
+        assert!(!old.exists());
+        assert_eq!(std::fs::read(new.join("share.dat")).unwrap(), b"identidad");
+        let moved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(new.join("share-inbox.json")).unwrap()).unwrap();
+        let path = PathBuf::from(moved[0]["content"]["path"].as_str().unwrap());
+        assert_eq!(path, new.join("share-inbox").join("1.png"));
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn no_pisa_datos_que_ya_estan_en_la_carpeta_nueva() {
+        let base = tempfile::tempdir().unwrap();
+        let (old, new) = (base.path().join("NotchIsla"), base.path().join("Nocho"));
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::create_dir_all(&new).unwrap();
+        std::fs::write(old.join("share.dat"), b"vieja").unwrap();
+        std::fs::write(new.join("share.dat"), b"nueva").unwrap();
+
+        move_data(&old, &new);
+
+        assert_eq!(std::fs::read(new.join("share.dat")).unwrap(), b"nueva");
+        assert!(old.exists());
     }
 }
