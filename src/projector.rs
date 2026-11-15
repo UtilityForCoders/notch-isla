@@ -160,6 +160,12 @@ impl Projector {
         }
     }
 
+    /// Cuánto se ve (0 = escondido, 1 = a la vista).
+    #[cfg(test)]
+    pub fn presence(&self) -> f32 {
+        self.presence.value
+    }
+
     /// Oculta de inmediato, incluso si se detiene el temporizador por pantalla completa.
     pub fn hide(&mut self) {
         if let Some(backdrop) = self.backdrop.as_mut() {
