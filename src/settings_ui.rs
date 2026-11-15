@@ -37,6 +37,24 @@ const CONTENT_X: f32 = 208.0;
 const CONTENT_Y: f32 = 132.0;
 const CONTENT_BOTTOM: f32 = 500.0;
 
+// Colores de la marca, tomados del logo de Nocho: la cinta crema y la cinta pizarra.
+/// Crema del logo: acentos, interruptores encendidos y deslizadores.
+const CREAM: [u8; 3] = [237, 227, 210];
+/// Pizarra del logo: categoría elegida.
+const SLATE: [u8; 3] = [71, 75, 88];
+/// Fondo de la ventana: la pizarra llevada casi a negro.
+const BASE: [u8; 3] = [21, 23, 28];
+const SIDEBAR: [u8; 3] = [29, 32, 39];
+const ROW: [u8; 3] = [35, 38, 46];
+const FOCUS: [u8; 3] = [50, 54, 65];
+/// Interruptor apagado y riel del deslizador.
+const TRACK: [u8; 3] = [60, 64, 76];
+/// Perilla sobre el riel apagado; sobre el crema va la pizarra oscura.
+const KNOB: [u8; 3] = [246, 241, 232];
+const KNOB_ON: [u8; 3] = [33, 36, 44];
+/// Lado del logo en la cabecera (píxeles lógicos).
+const LOGO: f32 = 34.0;
+
 enum Event {
     Down(f32, f32),
     Move(f32, f32),
@@ -130,7 +148,8 @@ struct Panel {
     focus: usize,
     dragging: Option<usize>,
     picker: Option<Picker>,
-    color: IslandColor,
+    /// Logo de Nocho para la cabecera (`None` si el shell no lo entregó).
+    logo: Option<tiny_skia::Pixmap>,
 }
 
 impl Panel {
@@ -237,13 +256,13 @@ impl Panel {
             ..Default::default()
         };
         self.surface.pixmap.fill(Color::TRANSPARENT);
-        let [accent_r, accent_g, accent_b] = self.color.light();
-        let [base_r, base_g, base_b] = self.color.blend(10, 12);
-        let [side_r, side_g, side_b] = self.color.blend(18, 18);
-        let [selected_r, selected_g, selected_b] = self.color.blend(34, 48);
-        let [row_r, row_g, row_b] = self.color.blend(24, 14);
-        let [focus_r, focus_g, focus_b] = self.color.blend(38, 30);
-        let [toggle_r, toggle_g, toggle_b] = self.color.blend(76, 72);
+        let [accent_r, accent_g, accent_b] = CREAM;
+        let [base_r, base_g, base_b] = BASE;
+        let [side_r, side_g, side_b] = SIDEBAR;
+        let [selected_r, selected_g, selected_b] = SLATE;
+        let [row_r, row_g, row_b] = ROW;
+        let [focus_r, focus_g, focus_b] = FOCUS;
+        let [toggle_r, toggle_g, toggle_b] = CREAM;
         macro_rules! rect {
             ($x:expr, $y:expr, $w:expr, $h:expr, $r:expr, $color:expr) => {{
                 let [r, g, b, a] = $color;
@@ -274,6 +293,31 @@ impl Panel {
             };
         }
         rect!(0.0, 0.0, WIDTH, HEIGHT, 18.0, [base_r, base_g, base_b, 255]);
+        if let Some(logo) = &self.logo {
+            // El logo está pensado para fondo claro: sobre el fondo oscuro su cinta pizarra se
+            // perdería. Va sobre una tesela clara, como el ícono de una app.
+            rect!(
+                18.0,
+                14.0,
+                LOGO + 6.0,
+                LOGO + 6.0,
+                11.0,
+                [255, 255, 255, 255]
+            );
+            let size = (LOGO - 4.0) * s;
+            let zoom = size / logo.width() as f32;
+            self.surface.pixmap.draw_pixmap(
+                0,
+                0,
+                logo.as_ref(),
+                &tiny_skia::PixmapPaint {
+                    quality: tiny_skia::FilterQuality::Bicubic,
+                    ..Default::default()
+                },
+                tiny_skia::Transform::from_row(zoom, 0.0, 0.0, zoom, 23.0 * s, 19.0 * s),
+                None,
+            );
+        }
         rect!(
             12.0,
             76.0,
@@ -298,7 +342,14 @@ impl Panel {
             8.0,
             [focus_r, focus_g, focus_b, 255]
         );
-        rect!(WIDTH - 75.0, 32.0, 10.0, 1.5, 0.75, [220, 230, 244, 255]);
+        rect!(
+            WIDTH - 75.0,
+            32.0,
+            10.0,
+            1.5,
+            0.75,
+            [CREAM[0], CREAM[1], CREAM[2], 255]
+        );
         label!("×", WIDTH - 39.0, 22.0, 18.0, true, 1.0);
         for (i, category) in self.categories.iter().enumerate() {
             let y = 88.0 + i as f32 * 42.0;
@@ -386,7 +437,7 @@ impl Panel {
                             if *checked {
                                 [toggle_r, toggle_g, toggle_b, 255]
                             } else {
-                                [64, 77, 96, 255]
+                                [TRACK[0], TRACK[1], TRACK[2], 255]
                             }
                         );
                         rect!(
@@ -395,7 +446,10 @@ impl Panel {
                             12.0,
                             12.0,
                             6.0,
-                            [240, 246, 255, 255]
+                            {
+                                let [r, g, b] = if *checked { KNOB_ON } else { KNOB };
+                                [r, g, b, 255]
+                            }
                         );
                     } else {
                         label!(
@@ -424,7 +478,7 @@ impl Panel {
                         width,
                         4.0,
                         2.0,
-                        [62, 78, 103, 255]
+                        [TRACK[0], TRACK[1], TRACK[2], 255]
                     );
                     rect!(
                         CONTENT_X + 16.0,
@@ -440,7 +494,7 @@ impl Panel {
                         12.0,
                         12.0,
                         6.0,
-                        [230, 242, 255, 255]
+                        [KNOB[0], KNOB[1], KNOB[2], 255]
                     );
                 }
                 Item::DeviceStatus {
@@ -488,8 +542,8 @@ impl Panel {
         let areas = LayoutAreas {
             labels,
             text: TextArea {
-                x: 24.0 * s,
-                w: 580.0 * s,
+                x: (36.0 + LOGO) * s,
+                w: (570.0 - LOGO) * s,
                 cy: 38.0 * s,
                 alpha: if self.picker.is_some() { 0.35 } else { 1.0 },
             },
@@ -624,7 +678,7 @@ where
             focus: 0,
             dragging: None,
             picker: None,
-            color,
+            logo: crate::appicon::own((LOGO * scale * 2.0).ceil() as i32),
         };
         panel.render();
         let _ = ShowWindow(hwnd, SW_SHOW);
@@ -694,7 +748,6 @@ where
                         PickerAction::Cancel => panel.picker = None,
                         PickerAction::Apply(selected) => {
                             color = selected;
-                            panel.color = selected;
                             panel.picker = None;
                             panel.categories = command(Change::Color(selected)).0;
                         }
