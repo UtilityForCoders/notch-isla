@@ -294,17 +294,10 @@ impl Panel {
         }
         rect!(0.0, 0.0, WIDTH, HEIGHT, 18.0, [base_r, base_g, base_b, 255]);
         if let Some(logo) = &self.logo {
-            // El logo está pensado para fondo claro: sobre el fondo oscuro su cinta pizarra se
-            // perdería. Va sobre una tesela clara, como el ícono de una app.
-            rect!(
-                18.0,
-                14.0,
-                LOGO + 6.0,
-                LOGO + 6.0,
-                11.0,
-                [255, 255, 255, 255]
-            );
-            let size = (LOGO - 4.0) * s;
+            // Directo sobre el fondo, sin tesela: sobre una tesela clara el logo se ve recortado
+            // y sobre una oscura se pierde su cinta pizarra.
+            let (x, y) = (20.0, 16.0);
+            let size = (LOGO + 2.0) * s;
             let zoom = size / logo.width() as f32;
             self.surface.pixmap.draw_pixmap(
                 0,
@@ -314,7 +307,7 @@ impl Panel {
                     quality: tiny_skia::FilterQuality::Bicubic,
                     ..Default::default()
                 },
-                tiny_skia::Transform::from_row(zoom, 0.0, 0.0, zoom, 23.0 * s, 19.0 * s),
+                tiny_skia::Transform::from_row(zoom, 0.0, 0.0, zoom, x * s, y * s),
                 None,
             );
         }
