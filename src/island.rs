@@ -3,8 +3,8 @@
 //! La isla es un cuadro flotante con las cuatro esquinas redondeadas, separada del borde superior
 //! de la pantalla por `TOP_GAP` (sin tocar el techo).
 //! En reposo queda una línea superior; al abrirse muestra directamente el reproductor.
-//! Expandida muestra una tarjeta completa flotante: reproductor con tiempos y controles a la izquierda,
-//! y letra sincronizada a la derecha.
+//! Expandida muestra una tarjeta completa flotante: cabecera con pestañas, reproductor con
+//! carátula, tiempos y controles centrados, y debajo la letra sincronizada si está activa.
 
 use tiny_skia::{
     FillRule, FilterQuality, Paint, Path, PathBuilder, Pattern, Pixmap, SpreadMode, Transform,
@@ -14,12 +14,16 @@ use tiny_skia::{
 /// Línea desde la que empieza la animación de apertura.
 const RESTING: (f32, f32, f32) = (88.0, 3.0, 1.5);
 
-/// Expandida compacta (sin letra): tarjeta flotante con reproductor.
-pub const EXPANDED_COMPACT: (f32, f32, f32) = (290.0, 148.0, 24.0);
+/// Expandida compacta (sin letra): tarjeta flotante con cabecera y reproductor.
+pub const EXPANDED_COMPACT: (f32, f32, f32) = (320.0, 194.0, 24.0);
 
-/// Expandida amplia (con letra sincronizada): tarjeta completa con reproductor y letra.
-pub const EXPANDED_LYRICS: (f32, f32, f32) = (550.0, EXPANDED_COMPACT.1, 24.0);
-pub const EMPTY_MUSIC_HEIGHT: f32 = 60.0;
+/// Alto lógico que suma la letra sincronizada, debajo de los controles.
+const LYRICS_EXTRA: f32 = 92.0;
+
+/// Expandida con letra sincronizada: el mismo ancho, más alta para los versos.
+pub const EXPANDED_LYRICS: (f32, f32, f32) =
+    (EXPANDED_COMPACT.0, EXPANDED_COMPACT.1 + LYRICS_EXTRA, 24.0);
+pub const EMPTY_MUSIC_HEIGHT: f32 = 86.0;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Shape {
@@ -42,13 +46,15 @@ pub const EXPANDED_CONTENT_START: f32 = 0.45;
 /// Medidas del panel izquierdo de reproducción (píxeles lógicos).
 const COVER_PAD_X: f32 = 20.0;
 /// Margen superior lógico de la carátula dentro del reproductor.
-const COVER_PAD_TOP: f32 = 16.0;
+const COVER_PAD_TOP: f32 = crate::workspace::HEADER_HEIGHT + 8.0;
 /// Lado lógico de la carátula expandida.
-const COVER_SIZE: f32 = 48.0;
-const PROGRESS_Y: f32 = COVER_PAD_TOP + COVER_SIZE + 18.0;
+const COVER_SIZE: f32 = 52.0;
+const PROGRESS_Y: f32 = COVER_PAD_TOP + COVER_SIZE + 20.0;
+/// Centro vertical lógico de la fila de controles, centrada bajo la barra de progreso.
+const BUTTONS_Y: f32 = PROGRESS_Y + 36.0;
 /// Radio lógico de las esquinas de la carátula.
 const COVER_RADIUS: f32 = 10.0;
-/// Ancho lógico reservado al reproductor, independiente del panel de letra.
+/// Ancho lógico del reproductor (la letra va debajo, con el mismo ancho).
 const PLAYER_W: f32 = EXPANDED_COMPACT.0 - 2.0 * COVER_PAD_X;
 
 /// Barra de progreso: grosor (normal y con mouse encima) y zona de clic.
@@ -155,7 +161,7 @@ pub enum Hit {
 const UPDATE_COLOR: [u8; 3] = [75, 166, 255];
 const BATTERY_COLOR: [u8; 3] = [255, 174, 66];
 const BATTERY_NORMAL_COLOR: [u8; 3] = [210, 218, 232];
-const INDICATOR_HIT_R: f32 = 8.0;
+const INDICATOR_HIT_R: f32 = 10.0;
 
 #[derive(Clone, Copy, Default)]
 pub struct Indicators {
@@ -168,13 +174,15 @@ pub struct Indicators {
 fn indicator_center(g: &Geometry, p: f32, battery: bool, update: bool) -> (f32, f32) {
     let p = p.clamp(0.0, 1.0);
     let s = g.scale;
-    let right = g.x1() - (14.0 + 10.0 * p) * s;
+    let right = g.x1() - (14.0 + 14.0 * p) * s;
     let x = if battery && update {
-        right - (20.0 + 6.0 * p) * s
+        right - (22.0 + 6.0 * p) * s
     } else {
         right
     };
-    (x, g.y0 + ((17.0 - 3.0 * p) * s).min(g.h / 2.0))
+    // Abierta, queda alineado con las pestañas de la cabecera.
+    let header = crate::workspace::header_center_y();
+    (x, g.y0 + ((17.0 + (header - 17.0) * p) * s).min(g.h / 2.0))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -256,14 +264,14 @@ fn draw_indicators(pixmap: &mut Pixmap, g: &Geometry, p: f32, indicators: Indica
         fill_rounded_rect(
             pixmap,
             &paint,
-            cx - 8.0 * s,
-            cy - 9.0 * s,
-            16.0 * s,
-            18.0 * s,
-            5.0 * s,
+            cx - 10.0 * s,
+            cy - 10.0 * s,
+            20.0 * s,
+            20.0 * s,
+            6.0 * s,
         );
         paint.set_color_rgba8(r, green, b, 245);
-        draw_notice_icon(pixmap, &paint, icon, cx, cy, 0.52 * s);
+        draw_notice_icon(pixmap, &paint, icon, cx, cy, 0.56 * s);
     }
 }
 
@@ -532,23 +540,22 @@ pub fn backdrop_geometry(
 
 /// Tamaño lógico de la isla expandida (ancho, alto) para `shape` = (`lyrics_p`, `notice_p`).
 fn expanded_size(shape: Shape) -> (f32, f32) {
-    let lyrics_p = if shape.empty_music {
+    let lyrics_p = if shape.empty_music || shape.share {
         0.0
     } else {
         shape.lyrics.clamp(-0.1, 1.15)
     };
     let n = shape.notice.clamp(-0.1, 1.1);
     let toward_notice = |music: f32, notice: f32| music + (notice - music) * n;
-    let music_w = EXPANDED_COMPACT.0 + (EXPANDED_LYRICS.0 - EXPANDED_COMPACT.0) * lyrics_p;
     (
-        toward_notice(music_w, NOTICE.0),
+        toward_notice(EXPANDED_COMPACT.0, NOTICE.0),
         toward_notice(
             if shape.share {
                 crate::workspace::SHARE_HEIGHT
             } else if shape.empty_music {
                 EMPTY_MUSIC_HEIGHT
             } else {
-                EXPANDED_COMPACT.1
+                EXPANDED_COMPACT.1 + LYRICS_EXTRA * lyrics_p
             },
             NOTICE.1,
         ),
@@ -607,23 +614,17 @@ fn text_column(g: &Geometry, s: f32) -> (f32, f32) {
     (x, w.max(0.0))
 }
 
-/// Centros de los cuatro botones en la fila inferior del reproductor.
+/// Centros de los botones: anterior, reproducir y siguiente al centro del reproductor, y el
+/// de la letra junto al borde derecho.
 fn button_centers(
     g: &Geometry,
     s: f32,
     lyrics_available: bool,
 ) -> impl Iterator<Item = (Button, f32, f32)> {
-    let cy = g.y0 + crate::workspace::tab_center_y(false) * s;
-    // Medidos desde el borde derecho del reproductor: siguen pegados a él si cambia el ancho.
-    let right = g.x0 + EXPANDED_COMPACT.0 * s;
-    let lyrics_cx = right - 31.0 * s;
-    let media_cx = right
-        - if lyrics_available {
-            112.0 * s
-        } else {
-            93.0 * s
-        };
-    let gap = 38.0 * s;
+    let cy = g.y0 + BUTTONS_Y * s;
+    let media_cx = g.x0 + EXPANDED_COMPACT.0 / 2.0 * s;
+    let lyrics_cx = g.x0 + (EXPANDED_COMPACT.0 - COVER_PAD_X - 16.0) * s;
+    let gap = 54.0 * s;
     [
         (Button::Lyrics, lyrics_cx, cy),
         (Button::Prev, media_cx - gap, cy),
@@ -820,14 +821,15 @@ pub fn draw(
         });
     }
     if shape.empty_music {
-        let y = g.y0 + crate::workspace::tab_center_y(true) * s;
-        let alpha = g.alpha * ((g.h / s - 39.0) / 12.0).clamp(0.0, 1.0);
+        let header = crate::workspace::HEADER_HEIGHT;
+        let y = g.y0 + (header + (EMPTY_MUSIC_HEIGHT - header) / 2.0) * s;
+        let alpha = g.alpha * ((g.h / s - header - 10.0) / 12.0).clamp(0.0, 1.0);
         return Some(LayoutAreas {
             labels: vec![LabelArea {
                 text: "Sin reproducción".into(),
-                x: g.x0 + 102.0 * s,
+                x: g.x0 + (COVER_PAD_X + 4.0) * s,
                 y: y - 10.0 * s,
-                w: (EXPANDED_COMPACT.0 - 122.0) * s,
+                w: (PLAYER_W - 8.0) * s,
                 h: 20.0 * s,
                 alpha,
                 strong: false,
@@ -924,7 +926,8 @@ pub fn draw(
 
     // Áreas de texto: título/artista
     let (text_x, text_w) = text_column(&g, s);
-    let title_inset = if indicators.battery { 42.0 } else { 34.0 };
+    // Espacio de las barras de audio a la derecha del título.
+    let title_inset = 34.0;
     let title_area = TextArea {
         x: text_x,
         w: (text_w
@@ -958,13 +961,15 @@ pub fn draw(
             if li.lines.is_empty() && li.status.is_none() {
                 None
             } else {
-                let lyrics_x = g.x0 + (COVER_PAD_X + PLAYER_W + 18.0) * s;
-                let lyrics_w = (g.x1() - lyrics_x - 18.0 * s).max(0.0);
+                // Debajo de los controles, centrada; mientras la isla crece, el recorte llega
+                // solo hasta su borde inferior.
+                let cy = g.y0 + (EXPANDED_COMPACT.1 + LYRICS_EXTRA / 2.0 - 8.0) * s;
+                let room = g.y0 + g.h - 6.0 * s - cy;
                 Some(LyricsArea {
-                    x: lyrics_x,
-                    w: lyrics_w,
-                    cy: g.y0 + g.h / 2.0,
-                    half_height: (g.h / 2.0 - 14.0 * s).clamp(0.0, 70.0 * s),
+                    x: g.x0 + COVER_PAD_X * s,
+                    w: PLAYER_W * s,
+                    cy,
+                    half_height: room.clamp(0.0, 46.0 * s),
                     lines: li.lines,
                     shift: li.shift,
                     sung: li.sung,

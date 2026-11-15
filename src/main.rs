@@ -1773,14 +1773,7 @@ impl App {
                 self.presence.value,
                 self.shape(),
             );
-            if let Some(hit) = workspace::hit_test(
-                bounds,
-                self.scale,
-                self.page,
-                self.shape().empty_music,
-                x,
-                y,
-            ) {
+            if let Some(hit) = workspace::hit_test(bounds, self.scale, self.page, x, y) {
                 return Some(hit);
             }
         }
@@ -2494,22 +2487,20 @@ impl App {
                     self.scale,
                     alpha,
                     self.page,
-                    shape.empty_music,
                     self.workspace_hover,
                     &panel,
                     self.settings.island_color,
                 );
-                if let Some((level, fade)) = volume.filter(|_| {
-                    self.page == workspace::Page::Music
-                        && bounds.2 >= (island::EXPANDED_COMPACT.0 - 0.5) * self.scale
-                }) {
+                // El volumen se ve sobre el separador de la cabecera, en cualquier página.
+                if let Some((level, fade)) =
+                    volume.filter(|_| bounds.2 >= (island::EXPANDED_COMPACT.0 - 0.5) * self.scale)
+                {
                     workspace::draw_volume(
                         &mut self.surface.pixmap,
                         bounds,
                         self.scale,
                         alpha * fade,
                         level,
-                        shape.empty_music,
                         self.settings.island_color,
                     );
                 }
@@ -4067,14 +4058,13 @@ mod tests {
                 1.0,
                 app.shape(),
             );
+            let (tab_x, tab_y) = workspace::tab_center(workspace::Page::Music);
             assert!(
-                app.hit_at(
-                    bounds.0 + 40.0 * app.scale,
-                    bounds.1 + workspace::share_tab_center_y() * app.scale
-                ) == Some(Hit::Tab(workspace::Page::Music))
+                app.hit_at(bounds.0 + tab_x * app.scale, bounds.1 + tab_y * app.scale)
+                    == Some(Hit::Tab(workspace::Page::Music))
             );
             assert!(
-                app.hit_at(bounds.0 + 70.0 * app.scale, bounds.1 + 85.0 * app.scale)
+                app.hit_at(bounds.0 + 70.0 * app.scale, bounds.1 + 120.0 * app.scale)
                     == Some(Hit::Share(workspace::ShareAction::Files))
             );
             app.battery_visible = true;
@@ -4789,7 +4779,8 @@ mod tests {
         let scale = 1.25;
         let width = (lw * scale).ceil() as u32;
         let mut previous = (i32::MIN, i32::MAX);
-        for (expanded, lyrics) in [(0.0, 1.0), (1.0, 0.0), (1.0, 1.0)] {
+        // De la línea al aviso y al reproductor: cada forma es más ancha que la anterior.
+        for (expanded, notice) in [(0.0, 0.0), (1.0, 1.0), (1.0, 0.0)] {
             let (left, _, visible_width, _, _) = island::backdrop_geometry(
                 width as f32,
                 lh * scale,
@@ -4797,7 +4788,7 @@ mod tests {
                 expanded,
                 1.0,
                 island::Shape {
-                    lyrics,
+                    notice,
                     ..Default::default()
                 },
             );
