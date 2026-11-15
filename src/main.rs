@@ -1652,13 +1652,13 @@ impl App {
             self.aim_expansion(false);
             // Se olvidó el puntero sin pasar por `set_hovered`, así que no queda programada la
             // vuelta a la franja: al salir de la pantalla completa la isla reaparecía abierta y
-            // contraída, y se expandía con solo acercar el mouse. Vuelve al reposo, salvo que
-            // los controles estén fijados.
-            if !self.settings.pinned_expanded {
-                self.idle_hidden = true;
-                unsafe {
-                    let _ = KillTimer(Some(self.hwnd), COLLAPSE_TIMER);
-                }
+            // contraída, y se expandía con solo acercar el mouse. Vuelve al reposo, encogida en
+            // la franja, también con los controles fijados: reabrirse sola al volver a una
+            // ventana se ve brusco. Un clic en la franja la abre como siempre.
+            self.idle_hidden = true;
+            self.spring.reset(0.0);
+            unsafe {
+                let _ = KillTimer(Some(self.hwnd), COLLAPSE_TIMER);
             }
             return;
         }
