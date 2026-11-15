@@ -49,6 +49,7 @@ Todos los commits y títulos de PR siguen [Conventional Commits](https://www.con
 | `feature/<descripcion-corta>` | `develop` | `develop` | Funciones, correcciones normales, documentación, refactor. |
 | `release/<x.y.z>` | `develop` | `main` y `develop` | Preparar una versión: cambio de versión y últimos arreglos. |
 | `hotfix/<x.y.z>` | `main` | `main` y `develop` | Arreglo urgente sobre una versión ya publicada. |
+| `docs/<descripcion-corta>` | `main` | `main` | Publicar documentación ya fusionada en `develop` (README, guías) sin sacar una versión. Solo cambia documentación. |
 
 - Nunca se hacen commits directos en `main` ni en `develop`: todo entra por PR.
 - Nombres de rama en minúsculas, con guiones y sin tildes: `feature/deteccion-pantalla-completa`.
@@ -57,6 +58,9 @@ Todos los commits y títulos de PR siguen [Conventional Commits](https://www.con
   - `release/*` y `hotfix/*` en `main`: **merge commit**, sin squash, para que `main` y `develop`
     compartan historia.
   - Después, la misma rama se fusiona de vuelta en `develop`.
+  - `docs/*` en `main`: **merge commit**. No hace falta llevarla a `develop`, porque sus
+    commits ya están ahí: se crea desde `main` llevando (cherry-pick) los commits de
+    documentación ya fusionados en `develop`. El título del PR es de tipo `docs`.
 - Se borra la rama después de fusionarla.
 
 ## Versiones y releases
@@ -77,11 +81,14 @@ Todos los commits y títulos de PR siguen [Conventional Commits](https://www.con
 ## CI/CD (`.github/workflows/build.yml`)
 
 - **En cada PR** (job `politica`), el CI comprueba:
-  - que la rama vaya al destino correcto: a `main` solo `release/x.y.z` y `hotfix/x.y.z`; a
-    `develop`, `feature/*`, `release/*`, `hotfix/*` y `dependabot/*`;
+  - que la rama vaya al destino correcto: a `main` solo `release/x.y.z`, `hotfix/x.y.z` y
+    `docs/*`; a `develop`, `feature/*`, `release/*`, `hotfix/*` y `dependabot/*`;
   - que el título siga Conventional Commits;
-  - hacia `main`, que la versión de `Cargo.toml` no esté publicada y coincida con el nombre
-    de la rama.
+  - hacia `main` desde `release/*` o `hotfix/*`, que la versión de `Cargo.toml` no esté
+    publicada y coincida con el nombre de la rama;
+  - hacia `main` desde `docs/*`, que el título sea de tipo `docs` y que solo cambien
+    `README.md`, `PRIVACY.md`, `SECURITY.md`, `LICENSE` o `docs/`. Como no cambia la versión,
+    no se publica ningún release.
 - **En PRs, `develop` y `main`** (job `build`), el CI revisa el formato (`cargo fmt --check`),
   pasa clippy (`-D warnings`), corre las pruebas (`cargo test --release`) y compila el `.exe`
   y el instalador. Solo en `main` se firman, si SignPath está configurado.

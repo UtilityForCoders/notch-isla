@@ -54,8 +54,8 @@ jobs:
         run: |
           case "$BASE_REF" in
             main)
-              [[ $HEAD_REF =~ ^(release|hotfix)/[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
-                echo "::error::A main solo entran release/x.y.z y hotfix/x.y.z (esta rama: $HEAD_REF)."
+              [[ $HEAD_REF =~ ^(release|hotfix)/[0-9]+\.[0-9]+\.[0-9]+$ || $HEAD_REF =~ ^docs/[a-z0-9-]+$ ]] || {
+                echo "::error::A main solo entran release/x.y.z, hotfix/x.y.z y docs/* (esta rama: $HEAD_REF)."
                 exit 1
               } ;;
             develop)
@@ -78,8 +78,28 @@ jobs:
             exit 1
           }
 
+      # docs/* hacia main: actualiza la documentación publicada sin sacar una versión. Solo
+      # puede tocar documentación; el job release se salta porque la versión ya está publicada.
+      - name: Solo documentación hacia main
+        if: github.base_ref == 'main' && startsWith(github.head_ref, 'docs/')
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          [[ $TITLE == docs:* || $TITLE == docs\(* ]] || {
+            echo "::error::Una rama docs/* hacia main lleva un título de tipo docs (ej.: \"docs: mejorar el README\")."
+            exit 1
+          }
+          otros=$(git diff --name-only "origin/$BASE_REF...HEAD" \
+            | grep -Ev '^(README\.md|PRIVACY\.md|SECURITY\.md|LICENSE|docs/.*)$' || true)
+          if [[ -n $otros ]]; then
+            echo "::error::Una rama docs/* hacia main solo puede cambiar documentación. Cambia también:"
+            echo "$otros"
+            exit 1
+          fi
+
       - name: Versión nueva hacia main
-        if: github.base_ref == 'main'
+        if: github.base_ref == 'main' && !startsWith(github.head_ref, 'docs/')
         env:
           HEAD_REF: ${{ github.head_ref }}
         run: |
