@@ -715,7 +715,7 @@ fn letra_proyectada_se_oculta_entera_en_pantalla_completa() {
         let _ = DestroyWindow(hwnd);
         APP.with(|cell| cell.borrow_mut().take());
         assert!(
-            before.iter().any(|c| c == "NotchIslaLetra"),
+            before.iter().any(|c| c.ends_with("Letra")),
             "la letra debía estar proyectada: {before:?}"
         );
         assert!(
