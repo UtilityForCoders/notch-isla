@@ -1,4 +1,4 @@
-# Compila notch-isla.exe y el instalador en GitHub Actions y, en main, publica el release.
+# Compila nocho.exe y el instalador en GitHub Actions y, en main, publica el release.
 #
 # Flujo (Git Flow, ver CLAUDE.md):
 # - Pull requests: se revisa que la rama vaya al destino correcto y que el título siga
@@ -130,8 +130,8 @@ jobs:
         id: unsigned-exe
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: notch-isla-exe-sin-firmar
-          path: target/release/notch-isla.exe
+          name: nocho-exe-sin-firmar
+          path: target/release/nocho.exe
 
       - name: Firmar el .exe (SignPath)
         if: env.SIGNING == 'true'
@@ -139,6 +139,7 @@ jobs:
         with:
           api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
           organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          # Nombre del proyecto en SignPath (se configura allá, no depende del nombre de la app).
           project-slug: notch-isla
           signing-policy-slug: release-signing
           artifact-configuration-slug: exe
@@ -149,7 +150,7 @@ jobs:
       - name: Usar el .exe firmado
         if: env.SIGNING == 'true'
         shell: pwsh
-        run: Copy-Item signed-exe/notch-isla.exe target/release/notch-isla.exe -Force
+        run: Copy-Item signed-exe/nocho.exe target/release/nocho.exe -Force
 
       - name: Instalar Inno Setup
         run: choco install innosetup --no-progress -y
@@ -162,7 +163,7 @@ jobs:
         id: unsigned-setup
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: notch-isla-setup-sin-firmar
+          name: nocho-setup-sin-firmar
           path: target/installer/*.exe
 
       - name: Firmar el instalador (SignPath)
@@ -182,7 +183,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
-          Copy-Item target/release/notch-isla.exe dist/
+          Copy-Item target/release/nocho.exe dist/
           if ($env:SIGNING -eq 'true') {
             Copy-Item signed-setup/*.exe dist/
           } else {
@@ -193,7 +194,7 @@ jobs:
       - name: Subir los archivos finales
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: notch-isla-${{ github.sha }}
+          name: nocho-${{ github.sha }}
           path: dist/*.exe
 
     outputs:
@@ -234,7 +235,7 @@ jobs:
         if: steps.version.outputs.publish == 'true'
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: notch-isla-${{ github.sha }}
+          name: nocho-${{ github.sha }}
           path: dist
 
       - name: Comprobar los archivos
@@ -243,9 +244,12 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           # El actualizador de la app busca el instalador exactamente con este nombre.
-          for file in "dist/notch-isla-setup-$VERSION.exe" dist/notch-isla.exe; do
+          for file in "dist/nocho-setup-$VERSION.exe" dist/nocho.exe; do
             [[ -s $file ]] || { echo "::error::Falta $file"; exit 1; }
           done
+          # Notch Isla 0.8 y anteriores buscan el instalador con su nombre viejo: una copia
+          # idéntica con ese nombre les permite actualizarse solas a Nocho.
+          cp "dist/nocho-setup-$VERSION.exe" "dist/notch-isla-setup-$VERSION.exe"
           ls -l dist
 
       - name: Armar las notas
@@ -266,8 +270,9 @@ jobs:
           # Crea la etiqueta vX.Y.Z en este commit junto con el release.
           gh release create "v$VERSION" \
             --target "$GITHUB_SHA" \
-            --title "Notch Isla $VERSION" \
+            --title "Nocho $VERSION" \
             --notes-file notas.md \
             --latest \
-            "dist/notch-isla-setup-$VERSION.exe" \
-            dist/notch-isla.exe
+            "dist/nocho-setup-$VERSION.exe" \
+            dist/nocho.exe \
+            "dist/notch-isla-setup-$VERSION.exe"

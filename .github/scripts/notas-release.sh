@@ -64,8 +64,9 @@ cat <<EOF
 
 ## Descargas
 
-- \`notch-isla-setup-${version}.exe\`: instalador (recomendado, necesario para las actualizaciones automáticas). No pide permisos de administrador y actualiza encima de la versión anterior.
-- \`notch-isla.exe\`: versión portable, sin instalar.
+- \`nocho-setup-${version}.exe\`: instalador (recomendado, necesario para las actualizaciones automáticas). No pide permisos de administrador y actualiza encima de la versión anterior.
+- \`nocho.exe\`: versión portable, sin instalar.
+- \`notch-isla-setup-${version}.exe\`: el mismo instalador con el nombre anterior de la app, para que Notch Isla 0.8 y anteriores se actualicen solas a Nocho.
 EOF
 
 # FIRMADO=true lo pone el workflow cuando SignPath firmó los archivos.
