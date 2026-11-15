@@ -256,7 +256,31 @@ fn slide_shift(slide: &mut Option<LyricSlide>, key: &str, index: isize) -> f32 {
     slide.as_ref().map_or(0.0, |s| s.shift(now))
 }
 
+/// Deja constancia de un fallo interno en `%LOCALAPPDATA%\Nocho\fallo.log`. La app no tiene
+/// consola: sin esto, un fallo solo se ve como que la isla desapareció.
+fn log_panics() {
+    std::panic::set_hook(Box::new(|info| {
+        use std::io::Write;
+        let Some(base) = std::env::var_os("LOCALAPPDATA") else {
+            return;
+        };
+        let directory = std::path::PathBuf::from(base).join(settings::DATA_DIR);
+        let _ = std::fs::create_dir_all(&directory);
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(directory.join("fallo.log"))
+        {
+            let when = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |elapsed| elapsed.as_secs());
+            let _ = writeln!(file, "[{when}] Nocho {}: {info}", env!("CARGO_PKG_VERSION"));
+        }
+    }));
+}
+
 fn main() -> Result<()> {
+    log_panics();
     unsafe {
         // Copia temporal lanzada para actualizar: espera al instalador y vuelve a abrir la isla.
         let args: Vec<String> = std::env::args().collect();
