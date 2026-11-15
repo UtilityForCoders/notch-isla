@@ -456,10 +456,11 @@ impl TextRenderer {
                             };
                             if text.is_empty() {
                                 // Pausa sin letra: una nota musical para que no quede vacío.
+                                let k = s * size / LYRIC_SIZE;
                                 draw_note(
                                     target,
                                     brush,
-                                    (lx, cy + top * s),
+                                    (lx + lw / 2.0 - 11.0 * k, cy + top * s),
                                     s * size / LYRIC_SIZE,
                                     a * alpha,
                                 );
@@ -818,6 +819,8 @@ fn make_carousel_format(
     };
     let format = make_format_wrapped(dwrite, weight, size, bold)?;
     unsafe {
+        // La letra va centrada bajo los controles.
+        format.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
         format.SetLineSpacing(
             DWRITE_LINE_SPACING_METHOD_UNIFORM,
             size * LYRIC_LINE_SPACING,
@@ -874,12 +877,14 @@ fn draw_lyric(
             let _ = line.layout.SetMaxHeight(h);
         }
         brush.SetColor(&D2D1_COLOR_F { r, g, b, a });
+        // El texto va centrado: crece y se encoge desde el centro de su fila.
+        let anchor = x + w / 2.0;
         target.SetTransform(&Matrix3x2 {
             M11: zoom,
             M12: 0.0,
             M21: 0.0,
             M22: zoom,
-            M31: transform.M31 + x * (1.0 - zoom),
+            M31: transform.M31 + anchor * (1.0 - zoom),
             M32: transform.M32 + y * (1.0 - zoom),
         });
         target.DrawTextLayout(

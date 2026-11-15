@@ -56,6 +56,7 @@ const CMD_SHARE: usize = 23;
 const CMD_SETTINGS: usize = 24;
 const CMD_LINKED_DEVICES: usize = 25;
 const CMD_LYRICS_VOICE: usize = 26;
+const CMD_SHARE_DND: usize = 27;
 /// Las opciones de los submenús van numeradas a partir de estas bases.
 const CMD_MONITOR: usize = 200;
 const CMD_TIMER: usize = 300;
@@ -71,6 +72,7 @@ pub const TIMER_MINUTES: [u32; 6] = [5, 10, 15, 25, 45, 60];
 pub enum Command {
     LinkedDevices,
     Share,
+    ToggleShareDnd,
     ToggleBatteryNotices,
     ToggleConnectionNotices,
     RefreshBattery,
@@ -363,6 +365,11 @@ fn build_settings_items(state: &MenuState) -> Vec<Item> {
     });
     items.push(Item::Separator);
     // Con una versión nueva ya encontrada, la opción de arriba la instala; esta igual consulta.
+    items.push(action(
+        CMD_SHARE_DND,
+        "No molestar (pausar recepción)",
+        !crate::share_ui::receiving_enabled(),
+    ));
     items.push(action(CMD_SHARE, "Compartir cerca…", false));
     items.push(action(CMD_LINKED_DEVICES, "Equipos vinculados…", false));
     items.push(action(CMD_CHECK_UPDATES, "Buscar actualizaciones", false));
@@ -387,6 +394,7 @@ fn id_to_command(id: usize, state: &MenuState) -> Option<Command> {
         CMD_LYRICS_VOICE => Some(Command::ToggleLyricsVoice),
         CMD_REAL_BARS => Some(Command::ToggleRealBars),
         CMD_SHARE => Some(Command::Share),
+        CMD_SHARE_DND => Some(Command::ToggleShareDnd),
         CMD_LINKED_DEVICES => Some(Command::LinkedDevices),
         CMD_CHECK_UPDATES => Some(Command::CheckUpdates),
         CMD_CENTER => Some(Command::Center),
@@ -465,7 +473,7 @@ fn categories(state: &MenuState) -> Vec<crate::settings_ui::Category> {
                 CMD_CENTER | CMD_HIGH_REFRESH | CMD_ISLAND_COLOR => 1,
                 CMD_REAL_BARS => 2,
                 CMD_NOTICES => 3,
-                CMD_SHARE | CMD_LINKED_DEVICES => 5,
+                CMD_SHARE | CMD_LINKED_DEVICES | CMD_SHARE_DND => 5,
                 CMD_UPDATE | CMD_CHECK_UPDATES => 6,
                 _ => 0,
             },
@@ -492,6 +500,7 @@ pub(crate) fn is_toggle(id: usize) -> bool {
             | CMD_PIN_EXPANDED
             | CMD_BATTERY_NOTICES
             | CMD_CONNECTION_NOTICES
+            | CMD_SHARE_DND
     )
 }
 

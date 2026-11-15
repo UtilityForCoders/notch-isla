@@ -1,6 +1,10 @@
-//! Pestañas y acciones del panel principal, compartiendo geometría para dibujo y clics.
+//! Cabecera con pestañas y acciones del panel principal, compartiendo geometría para dibujo
+//! y clics.
+//!
+//! La cabecera (Compartir y Música, con una línea bajo la pestaña activa) va arriba en todas
+//! las páginas; el contenido de cada página empieza debajo de `HEADER_HEIGHT`.
 use crate::island::{self, Hit, LabelArea, NoticeIcon};
-use tiny_skia::{FillRule, Paint, PathBuilder, Pixmap, Transform};
+use tiny_skia::{PathBuilder, Pixmap};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Page {
@@ -14,6 +18,8 @@ pub enum ShareAction {
     Files = 1,
     Clipboard = 2,
     Device,
+    Inbox,
+    Receiving,
 }
 
 #[derive(Default)]
@@ -22,83 +28,70 @@ pub struct ShareState {
     pub device_name: String,
     pub busy: bool,
     pub status: String,
+    pub unread: usize,
 }
 
-const TAB_X: f32 = 16.0;
-const TAB_Y: f32 = 108.0;
-const EMPTY_TAB_Y: f32 = 16.0;
-const TAB_WIDTH: f32 = 36.0;
-const TAB_HEIGHT: f32 = 28.0;
-pub const SHARE_HEIGHT: f32 = 184.0;
-const SHARE_TAB_Y: f32 = SHARE_HEIGHT - 40.0;
+/// Margen lateral del contenido.
+const PAD: f32 = 16.0;
+const TAB_Y: f32 = 8.0;
+const TAB_HEIGHT: f32 = 30.0;
+/// Línea fina que separa la cabecera del contenido (el volumen se dibuja sobre ella).
+const SEPARATOR_Y: f32 = 42.0;
+/// Alto lógico de la cabecera: el contenido de las páginas empieza aquí.
+pub const HEADER_HEIGHT: f32 = 46.0;
 
-pub fn share_tab_center_y() -> f32 {
-    SHARE_TAB_Y + TAB_HEIGHT / 2.0
-}
+const DEVICE_Y: f32 = 52.0;
+const DEVICE_H: f32 = 34.0;
+const CARD_Y: f32 = DEVICE_Y + DEVICE_H + 8.0;
+const CARD_H: f32 = 62.0;
+const ROW_Y: f32 = CARD_Y + CARD_H + 8.0;
+const ROW_H: f32 = 32.0;
+const STATUS_Y: f32 = ROW_Y + ROW_H + 8.0;
+pub const SHARE_HEIGHT: f32 = STATUS_Y + 24.0;
 
-pub fn tab_center_y(empty_music: bool) -> f32 {
-    (if empty_music { EMPTY_TAB_Y } else { TAB_Y }) + TAB_HEIGHT / 2.0
-}
-
-fn fill_tab(pixmap: &mut Pixmap, paint: &Paint, left: f32, top: f32, scale: f32, tab: Page) {
-    let x = left + TAB_X * scale;
-    let seam = (x + TAB_WIDTH * scale).round();
-    let y = top.round();
-    let bottom = (top + TAB_HEIGHT * scale).round();
-    let (outer, inward) = match tab {
-        Page::Music => (x.round(), 1.0),
-        Page::Share => ((x + 2.0 * TAB_WIDTH * scale).round(), -1.0),
-    };
-    let radius = 10.0 * scale;
-    let bend = radius * 0.552_284_8;
-    let corner = outer + inward * radius;
-    let control = corner - inward * bend;
-    let mut path = PathBuilder::new();
-    path.move_to(seam, y);
-    path.line_to(corner, y);
-    path.cubic_to(control, y, outer, y + radius - bend, outer, y + radius);
-    path.line_to(outer, bottom - radius);
-    path.cubic_to(
-        outer,
-        bottom - radius + bend,
-        control,
-        bottom,
-        corner,
-        bottom,
-    );
-    path.line_to(seam, bottom);
-    path.close();
-    if let Some(path) = path.finish() {
-        pixmap.fill_path(&path, paint, FillRule::Winding, Transform::identity(), None);
+/// Rectángulo lógico de cada pestaña: primero Compartir y después Música.
+fn tab_rect(page: Page) -> [f32; 4] {
+    match page {
+        Page::Share => [PAD, TAB_Y, 106.0, TAB_HEIGHT],
+        Page::Music => [PAD + 110.0, TAB_Y, 90.0, TAB_HEIGHT],
     }
 }
 
-fn regions(width: f32, page: Page, empty_music: bool) -> Vec<(Hit, [f32; 4])> {
-    let tab_y = if page == Page::Share {
-        share_tab_center_y() - TAB_HEIGHT / 2.0
-    } else {
-        tab_center_y(empty_music) - TAB_HEIGHT / 2.0
-    };
+/// Centro lógico de una pestaña, relativo a la esquina de la isla.
+#[cfg(test)]
+pub fn tab_center(page: Page) -> (f32, f32) {
+    let [x, y, w, h] = tab_rect(page);
+    (x + w / 2.0, y + h / 2.0)
+}
+
+/// Centro vertical lógico de la cabecera; ahí van también la batería y la actualización.
+pub const fn header_center_y() -> f32 {
+    TAB_Y + TAB_HEIGHT / 2.0
+}
+
+fn regions(width: f32, page: Page) -> Vec<(Hit, [f32; 4])> {
     let mut regions = vec![
-        (Hit::Tab(Page::Music), [TAB_X, tab_y, TAB_WIDTH, TAB_HEIGHT]),
-        (
-            Hit::Tab(Page::Share),
-            [TAB_X + TAB_WIDTH, tab_y, TAB_WIDTH, TAB_HEIGHT],
-        ),
+        (Hit::Tab(Page::Share), tab_rect(Page::Share)),
+        (Hit::Tab(Page::Music), tab_rect(Page::Music)),
     ];
     if page == Page::Share {
+        let inner = width - 2.0 * PAD;
+        let half = (inner - 8.0) / 2.0;
+        let right = PAD + half + 8.0;
         regions.extend([
             (
                 Hit::Share(ShareAction::Device),
-                [20.0, 34.0, width - 40.0, 30.0],
+                [PAD, DEVICE_Y, inner, DEVICE_H],
             ),
-            (
-                Hit::Share(ShareAction::Files),
-                [20.0, 70.0, width - 40.0, 30.0],
-            ),
+            (Hit::Share(ShareAction::Files), [PAD, CARD_Y, half, CARD_H]),
             (
                 Hit::Share(ShareAction::Clipboard),
-                [20.0, 106.0, width - 40.0, 30.0],
+                [right, CARD_Y, half, CARD_H],
+            ),
+            (Hit::Share(ShareAction::Inbox), [PAD, ROW_Y, half, ROW_H]),
+            (
+                Hit::Share(ShareAction::Receiving),
+                [right, ROW_Y, half, ROW_H],
             ),
         ]);
     }
@@ -109,17 +102,113 @@ pub fn hit_test(
     bounds: (f32, f32, f32, f32, f32),
     scale: f32,
     page: Page,
-    empty_music: bool,
     x: f32,
     y: f32,
 ) -> Option<Hit> {
     let (left, top, width, _, _) = bounds;
     let (x, y) = ((x - left) / scale, (y - top) / scale);
-    regions(width / scale, page, empty_music)
+    regions(width / scale, page)
         .into_iter()
         .find(|(_, [rx, ry, w, h])| x >= *rx && x <= rx + w && y >= *ry && y <= ry + h)
         .map(|(hit, _)| hit)
 }
+
+/// Pinta en píxeles físicos a partir de medidas lógicas relativas a la esquina de la isla.
+struct Canvas<'a> {
+    pixmap: &'a mut Pixmap,
+    left: f32,
+    top: f32,
+    scale: f32,
+    alpha: f32,
+}
+
+impl Canvas<'_> {
+    fn paint(&self, [r, g, b]: [u8; 3], opacity: f32) -> tiny_skia::Paint<'static> {
+        let mut paint = tiny_skia::Paint {
+            anti_alias: true,
+            ..Default::default()
+        };
+        paint.set_color_rgba8(r, g, b, (opacity * self.alpha).clamp(0.0, 255.0) as u8);
+        paint
+    }
+
+    fn fill(&mut self, rgb: [u8; 3], opacity: f32, [x, y, w, h]: [f32; 4], radius: f32) {
+        let paint = self.paint(rgb, opacity);
+        let s = self.scale;
+        island::fill_rounded_rect(
+            self.pixmap,
+            &paint,
+            self.left + x * s,
+            self.top + y * s,
+            w * s,
+            h * s,
+            radius * s,
+        );
+    }
+
+    fn outline(&mut self, rgb: [u8; 3], opacity: f32, [x, y, w, h]: [f32; 4], radius: f32) {
+        let paint = self.paint(rgb, opacity);
+        let s = self.scale;
+        if let Some(path) = island::rounded_rect_path(
+            self.left + x * s + 0.5,
+            self.top + y * s + 0.5,
+            (w * s - 1.0).max(1.0),
+            (h * s - 1.0).max(1.0),
+            (radius * s - 0.5).max(0.0),
+        ) {
+            island::stroke_path(self.pixmap, &paint, &path, s.max(1.0));
+        }
+    }
+
+    fn icon(&mut self, icon: NoticeIcon, rgb: [u8; 3], cx: f32, cy: f32, size: f32) {
+        let paint = self.paint(rgb, 255.0);
+        let s = self.scale;
+        island::draw_notice_icon(
+            self.pixmap,
+            &paint,
+            icon,
+            self.left + cx * s,
+            self.top + cy * s,
+            s * size,
+        );
+    }
+
+    /// Flecha hacia abajo del selector de dispositivo.
+    fn chevron(&mut self, rgb: [u8; 3], cx: f32, cy: f32) {
+        let paint = self.paint(rgb, 220.0);
+        let s = self.scale;
+        let (x, y) = (self.left + cx * s, self.top + cy * s);
+        let mut pb = PathBuilder::new();
+        pb.move_to(x - 4.5 * s, y - 2.2 * s);
+        pb.line_to(x, y + 2.3 * s);
+        pb.line_to(x + 4.5 * s, y - 2.2 * s);
+        island::stroke(self.pixmap, &paint, pb, 1.6 * s);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn label(
+        &self,
+        text: String,
+        [x, y, w, h]: [f32; 4],
+        alpha: f32,
+        strong: bool,
+        scroll: bool,
+    ) -> LabelArea {
+        let s = self.scale;
+        LabelArea {
+            text,
+            x: self.left + x * s,
+            y: self.top + y * s,
+            w: (w * s).max(0.0),
+            h: h * s,
+            alpha: self.alpha * alpha,
+            strong,
+            scroll,
+        }
+    }
+}
+
+const WHITE: [u8; 3] = [255, 255, 255];
 
 #[allow(clippy::too_many_arguments)]
 pub fn draw(
@@ -128,157 +217,220 @@ pub fn draw(
     scale: f32,
     alpha: f32,
     page: Page,
-    empty_music: bool,
     hovered: Option<Hit>,
     state: &ShareState,
     color: crate::settings::IslandColor,
 ) -> Vec<LabelArea> {
-    let (left, top, width, height, _) = bounds;
-    let mut paint = Paint {
-        anti_alias: true,
-        ..Default::default()
+    let (left, top, width, _, _) = bounds;
+    let width = width / scale;
+    let accent = color.light();
+    let mut canvas = Canvas {
+        pixmap,
+        left,
+        top,
+        scale,
+        alpha,
     };
     let mut labels = Vec::new();
-    for (hit, [x, y, w, h]) in regions(width / scale, page, empty_music) {
+
+    // Separador de la cabecera, de borde a borde del contenido.
+    canvas.fill(WHITE, 22.0, [PAD, SEPARATOR_Y, width - 2.0 * PAD, 1.0], 0.5);
+
+    for (hit, rect) in regions(width, page) {
         let hover = hovered == Some(hit);
-        if let Hit::Tab(tab) = hit {
-            let alpha = alpha * ((height / scale - y - h) / 8.0).clamp(0.0, 1.0);
-            let ([r, g, b], opacity) = if tab == page {
-                (color.light(), 52)
-            } else if hover {
-                (color.light(), 36)
-            } else {
-                (color.light(), 16)
-            };
-            paint.set_color_rgba8(r, g, b, (opacity as f32 * alpha) as u8);
-            fill_tab(pixmap, &paint, left, top + y * scale, scale, tab);
-            let [r, g, b] = color.light();
-            paint.set_color_rgba8(r, g, b, (alpha * 255.0) as u8);
-            let icon = match tab {
-                Page::Music => NoticeIcon::Music,
-                Page::Share => NoticeIcon::Share,
-            };
-            island::draw_notice_icon(
-                pixmap,
-                &paint,
-                icon,
-                left + (x + w / 2.0) * scale,
-                top + (y + h / 2.0) * scale,
-                scale * 0.85,
-            );
-            continue;
-        }
-        let ([r, g, b], opacity) = if hover {
-            (color.light(), 40)
-        } else if matches!(
-            hit,
-            Hit::Share(ShareAction::Device | ShareAction::Files | ShareAction::Clipboard)
-        ) {
-            (color.light(), 26)
-        } else {
-            (color.light(), 16)
-        };
-        paint.set_color_rgba8(r, g, b, (opacity as f32 * alpha) as u8);
-        island::fill_rounded_rect(
-            pixmap,
-            &paint,
-            left + x * scale,
-            top + y * scale,
-            w * scale,
-            h * scale,
-            10.0 * scale,
-        );
-        let (label, icon) = match hit {
-            Hit::Share(ShareAction::Device) => {
-                let label = if state.device_name.is_empty() {
-                    "Vincular un dispositivo…".to_string()
-                } else {
-                    format!("Enviar a: {}", state.device_name)
+        let [x, y, w, h] = rect;
+        match hit {
+            Hit::Tab(tab) => {
+                let active = tab == page;
+                if hover && !active {
+                    canvas.fill(WHITE, 14.0, rect, 9.0);
+                }
+                if active {
+                    canvas.fill(
+                        accent,
+                        255.0,
+                        [x + 6.0, SEPARATOR_Y - 2.5, w - 12.0, 2.5],
+                        1.25,
+                    );
+                }
+                let (icon, text) = match tab {
+                    Page::Music => (NoticeIcon::Music, "Música"),
+                    Page::Share => (NoticeIcon::Share, "Compartir"),
                 };
-                (label, Some(NoticeIcon::Wireless))
+                let tone = if active { WHITE } else { accent };
+                canvas.icon(icon, tone, x + 16.0, y + h / 2.0, 0.8);
+                labels.push(canvas.label(
+                    text.to_string(),
+                    [x + 32.0, y + (h - 18.0) / 2.0, w - 34.0, 18.0],
+                    if active { 1.0 } else { 0.62 },
+                    active,
+                    false,
+                ));
             }
-            Hit::Share(ShareAction::Files) => {
-                ("Elegir archivos…".to_string(), Some(NoticeIcon::Usb))
+            Hit::Share(ShareAction::Device) => {
+                canvas.fill(WHITE, if hover { 30.0 } else { 18.0 }, rect, 12.0);
+                canvas.outline(WHITE, 20.0, rect, 12.0);
+                canvas.icon(NoticeIcon::Wireless, WHITE, x + 22.0, y + h / 2.0, 0.72);
+                let text = if !state.status.is_empty() {
+                    state.status.clone()
+                } else if state.busy {
+                    "Solicitud en curso…".to_string()
+                } else if state.device_name.is_empty() {
+                    "Para: vincula un dispositivo…".to_string()
+                } else {
+                    format!("Para: {}", state.device_name)
+                };
+                labels.push(canvas.label(
+                    text,
+                    [x + 42.0, y + (h - 18.0) / 2.0, w - 72.0, 18.0],
+                    1.0,
+                    false,
+                    true,
+                ));
+                canvas.chevron(WHITE, x + w - 18.0, y + h / 2.0);
             }
-            Hit::Share(ShareAction::Clipboard) => (
-                "Enviar portapapeles".to_string(),
-                Some(NoticeIcon::Keyboard),
-            ),
-            _ => continue,
-        };
-        if let Some(icon) = icon {
-            let [r, g, b] = color.light();
-            paint.set_color_rgba8(r, g, b, (alpha * 255.0) as u8);
-            island::draw_notice_icon(
-                pixmap,
-                &paint,
-                icon,
-                left + (x + 18.0) * scale,
-                top + (y + h / 2.0) * scale,
-                scale * 0.7,
-            );
+            Hit::Share(action @ (ShareAction::Files | ShareAction::Clipboard)) => {
+                // Elegir archivos es la acción principal: va teñida con el color de la isla.
+                let primary = action == ShareAction::Files;
+                let (fill, border) = if primary {
+                    (accent, if hover { 150.0 } else { 105.0 })
+                } else {
+                    (WHITE, if hover { 46.0 } else { 26.0 })
+                };
+                canvas.fill(
+                    fill,
+                    match (primary, hover) {
+                        (true, true) => 62.0,
+                        (true, false) => 44.0,
+                        (false, true) => 30.0,
+                        (false, false) => 18.0,
+                    },
+                    rect,
+                    14.0,
+                );
+                canvas.outline(if primary { accent } else { WHITE }, border, rect, 14.0);
+                let icon_box = [x + 12.0, y + (h - 34.0) / 2.0, 34.0, 34.0];
+                canvas.fill(if primary { accent } else { WHITE }, 46.0, icon_box, 10.0);
+                canvas.outline(WHITE, 30.0, icon_box, 10.0);
+                let (icon, first, second) = match action {
+                    ShareAction::Files => (NoticeIcon::Usb, "Elegir", "archivos"),
+                    _ => (NoticeIcon::Keyboard, "Enviar", "portapapeles"),
+                };
+                canvas.icon(icon, WHITE, x + 29.0, y + h / 2.0, 0.72);
+                let text_x = x + 54.0;
+                let text_w = w - 58.0;
+                labels.push(canvas.label(
+                    first.to_string(),
+                    [text_x, y + h / 2.0 - 18.0, text_w, 18.0],
+                    1.0,
+                    true,
+                    false,
+                ));
+                labels.push(canvas.label(
+                    second.to_string(),
+                    [text_x, y + h / 2.0, text_w, 18.0],
+                    1.0,
+                    true,
+                    true,
+                ));
+            }
+            Hit::Share(ShareAction::Inbox) => {
+                canvas.fill(WHITE, if hover { 30.0 } else { 16.0 }, rect, 12.0);
+                canvas.outline(WHITE, 20.0, rect, 12.0);
+                canvas.icon(NoticeIcon::Share, WHITE, x + 18.0, y + h / 2.0, 0.66);
+                let text = match state.unread {
+                    0 => "Mensajes recibidos".to_string(),
+                    1 => "1 mensaje sin leer".to_string(),
+                    n => format!("{n} mensajes sin leer"),
+                };
+                if state.unread > 0 {
+                    canvas.fill(accent, 255.0, [x + 25.0, y + 7.0, 6.0, 6.0], 3.0);
+                }
+                labels.push(canvas.label(
+                    text,
+                    [x + 34.0, y + (h - 18.0) / 2.0, w - 40.0, 18.0],
+                    1.0,
+                    false,
+                    true,
+                ));
+            }
+            Hit::Share(ShareAction::Receiving) => {
+                let on = state.receiving;
+                canvas.fill(WHITE, if hover { 30.0 } else { 16.0 }, rect, 12.0);
+                canvas.outline(
+                    if on { accent } else { WHITE },
+                    if on { 120.0 } else { 20.0 },
+                    rect,
+                    12.0,
+                );
+                canvas.icon(NoticeIcon::Wireless, WHITE, x + 18.0, y + h / 2.0, 0.66);
+                let text = if on {
+                    "Recepción activa"
+                } else {
+                    "No molestar"
+                };
+                if on {
+                    canvas.fill(
+                        accent,
+                        255.0,
+                        [x + w - 18.0, y + h / 2.0 - 4.0, 8.0, 8.0],
+                        4.0,
+                    );
+                }
+                labels.push(canvas.label(
+                    text.to_string(),
+                    [x + 34.0, y + (h - 18.0) / 2.0, w - 58.0, 18.0],
+                    if on { 1.0 } else { 0.7 },
+                    false,
+                    true,
+                ));
+            }
+            _ => {}
         }
-        let inset = if icon.is_some() { 36.0 } else { 14.0 };
-        let text = label;
-        labels.push(LabelArea {
-            text,
-            x: left + (x + inset) * scale,
-            y: top + (y + (h - 18.0) / 2.0) * scale,
-            w: (w - inset - 10.0) * scale,
-            h: 18.0 * scale,
-            alpha,
-            strong: false,
-            scroll: false,
-        });
     }
     if page == Page::Share {
-        let status = if !state.status.is_empty() {
-            &state.status
-        } else if state.busy {
-            "Solicitud en curso…"
-        } else if state.receiving {
-            "~~~"
+        let text = if state.receiving {
+            "Tus equipos vinculados pueden enviarte archivos"
         } else {
-            "Recepción pausada"
+            "Recepción pausada: no se aceptan envíos"
         };
-        labels.push(LabelArea {
-            text: status.to_string(),
-            x: left + 20.0 * scale,
-            y: top + 8.0 * scale,
-            w: width - 92.0 * scale,
-            h: 16.0 * scale,
-            alpha: alpha * 0.7,
-            strong: false,
-            scroll: true,
-        });
+        labels.push(canvas.label(
+            text.to_string(),
+            [PAD + 4.0, STATUS_Y, width - 2.0 * PAD - 8.0, 16.0],
+            0.55,
+            false,
+            true,
+        ));
     }
     labels
 }
 
+/// Nivel de volumen sobre el separador de la cabecera, mientras se cambia.
 pub fn draw_volume(
     pixmap: &mut Pixmap,
     bounds: (f32, f32, f32, f32, f32),
     scale: f32,
     alpha: f32,
     level: f32,
-    empty_music: bool,
     color: crate::settings::IslandColor,
 ) {
-    let (left, top, _, _, _) = bounds;
-    let x = left + (TAB_X + 2.0 * TAB_WIDTH + 12.0) * scale;
-    let y = top + (if empty_music { 44.0 } else { 64.0 }) * scale;
-    let width = 96.0 * scale;
-    let height = 4.0 * scale;
-    let level = level.clamp(0.0, 1.0);
-    let mut paint = Paint {
-        anti_alias: true,
-        ..Default::default()
+    let (left, top, width, _, _) = bounds;
+    let mut canvas = Canvas {
+        pixmap,
+        left,
+        top,
+        scale,
+        alpha,
     };
-    paint.set_color_rgba8(255, 255, 255, (alpha * 55.0) as u8);
-    island::fill_rounded_rect(pixmap, &paint, x, y, width, height, height / 2.0);
-    let [r, g, b] = color.light();
-    paint.set_color_rgba8(r, g, b, (alpha * 255.0) as u8);
-    island::fill_rounded_rect(pixmap, &paint, x, y, width * level, height, height / 2.0);
+    let w = width / scale - 2.0 * PAD;
+    let y = SEPARATOR_Y - 1.0;
+    canvas.fill(WHITE, 55.0, [PAD, y, w, 3.0], 1.5);
+    canvas.fill(
+        color.light(),
+        255.0,
+        [PAD, y, w * level.clamp(0.0, 1.0), 3.0],
+        1.5,
+    );
 }
 
 #[cfg(test)]
@@ -286,49 +438,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn las_pestañas_cubren_la_union_en_ambos_bordes() {
-        for scale in [1.0, 1.25, 1.5, 2.0] {
-            let bounds = (3.3, 4.2, 284.0 * scale, SHARE_HEIGHT * scale, 24.0 * scale);
-            let seam = (bounds.0 + (TAB_X + TAB_WIDTH) * scale).round() as u32;
-            for (page, other, expected) in [
-                (Page::Music, Page::Share, [52, 36]),
-                (Page::Share, Page::Music, [36, 52]),
-            ] {
-                let tab_y = if page == Page::Share {
-                    SHARE_TAB_Y
-                } else {
-                    TAB_Y
-                };
-                let top = (bounds.1 + tab_y * scale).round() as u32;
-                let bottom = (bounds.1 + (tab_y + TAB_HEIGHT) * scale).round() as u32 - 1;
-                let mut image = Pixmap::new(600, 400).unwrap();
-                draw(
-                    &mut image,
-                    bounds,
-                    scale,
-                    1.0,
-                    page,
-                    false,
-                    Some(Hit::Tab(other)),
-                    &ShareState::default(),
-                    crate::settings::IslandColor::default(),
-                );
-                for y in [top, bottom] {
-                    assert_eq!(image.pixel(seam - 1, y).unwrap().alpha(), expected[0]);
-                    assert_eq!(image.pixel(seam, y).unwrap().alpha(), expected[1]);
-                }
-            }
-        }
-    }
-    #[test]
     fn pestañas_y_acciones_coinciden_a_distintos_dpi() {
         for scale in [1.0, 1.25, 1.5, 2.0] {
             let width = island::EXPANDED_COMPACT.0;
             let bounds = (80.0, 8.0, width * scale, SHARE_HEIGHT * scale, 24.0 * scale);
-            let regions = regions(width, Page::Share, false);
+            let regions = regions(width, Page::Share);
             for (index, (_, [x, y, w, h])) in regions.iter().enumerate() {
                 assert!(*x >= 16.0 && x + w <= width - 16.0);
-                assert!(*y >= 10.0 && y + h <= SHARE_HEIGHT - 12.0);
+                assert!(*y >= 8.0 && y + h <= SHARE_HEIGHT - 12.0);
                 for (_, [ox, oy, ow, oh]) in &regions[index + 1..] {
                     assert!(x + w <= *ox || ox + ow <= *x || y + h <= *oy || oy + oh <= *y);
                 }
@@ -339,35 +456,129 @@ mod tests {
                         bounds,
                         scale,
                         Page::Share,
-                        false,
                         bounds.0 + (x + w / 2.0) * scale,
                         bounds.1 + (y + h / 2.0) * scale
                     ) == Some(hit)
                 );
             }
+            // En la música solo responden las pestañas: el resto es del reproductor.
             assert!(hit_test(
                 bounds,
                 scale,
                 Page::Music,
-                false,
                 bounds.0 + 60.0 * scale,
                 bounds.1 + 100.0 * scale
             )
             .is_none());
+            let (mx, my) = tab_center(Page::Music);
+            assert!(
+                hit_test(
+                    bounds,
+                    scale,
+                    Page::Music,
+                    bounds.0 + mx * scale,
+                    bounds.1 + my * scale
+                ) == Some(Hit::Tab(Page::Music))
+            );
             let mut image = Pixmap::new(640, 400).unwrap();
             draw_volume(
                 &mut image,
                 bounds,
                 scale,
                 1.0,
-                0.68,
-                false,
+                0.5,
                 crate::settings::IslandColor::default(),
             );
-            let y = (bounds.1 + 66.0 * scale) as u32;
-            for (x, expected) in [(94.0, 0), (110.0, 255), (185.0, 55), (200.0, 0)] {
+            let y = (bounds.1 + SEPARATOR_Y * scale) as u32;
+            let inner = width - 2.0 * PAD;
+            for (x, expected) in [
+                (PAD - 4.0, 0),
+                (PAD + inner * 0.25, 255),
+                (PAD + inner * 0.75, 55),
+                (width - PAD + 4.0, 0),
+            ] {
                 let x = (bounds.0 + x * scale) as u32;
                 assert_eq!(image.pixel(x, y).unwrap().alpha(), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn compartir_muestra_estado_y_bandeja_legibles() {
+        let mut image = Pixmap::new(400, 260).unwrap();
+        let width = island::EXPANDED_COMPACT.0;
+        let labels = draw(
+            &mut image,
+            (0.0, 0.0, width, SHARE_HEIGHT, 24.0),
+            1.0,
+            1.0,
+            Page::Share,
+            None,
+            &ShareState {
+                receiving: true,
+                unread: 2,
+                device_name: "Portátil".into(),
+                ..Default::default()
+            },
+            crate::settings::IslandColor::default(),
+        );
+        let has = |labels: &[LabelArea], text: &str| labels.iter().any(|label| label.text == text);
+        assert!(has(&labels, "Recepción activa"));
+        assert!(has(&labels, "2 mensajes sin leer"));
+        assert!(has(&labels, "Para: Portátil"));
+        assert!(has(&labels, "Elegir") && has(&labels, "archivos"));
+        assert!(has(&labels, "Enviar") && has(&labels, "portapapeles"));
+        assert!(has(&labels, "Compartir") && has(&labels, "Música"));
+        for label in &labels {
+            assert!(
+                label.x >= 0.0 && label.x + label.w <= width,
+                "{}",
+                label.text
+            );
+            assert!(
+                label.y >= 0.0 && label.y + label.h <= SHARE_HEIGHT,
+                "{}",
+                label.text
+            );
+        }
+
+        let paused = draw(
+            &mut image,
+            (0.0, 0.0, width, SHARE_HEIGHT, 24.0),
+            1.0,
+            1.0,
+            Page::Share,
+            None,
+            &ShareState {
+                status: "Enviando a Portátil…".into(),
+                ..Default::default()
+            },
+            crate::settings::IslandColor::default(),
+        );
+        assert!(has(&paused, "No molestar"));
+        assert!(has(&paused, "Enviando a Portátil…"));
+    }
+
+    #[test]
+    fn la_pestaña_activa_se_subraya() {
+        for page in [Page::Music, Page::Share] {
+            let mut image = Pixmap::new(400, 120).unwrap();
+            let width = island::EXPANDED_COMPACT.0;
+            draw(
+                &mut image,
+                (0.0, 0.0, width, SHARE_HEIGHT, 24.0),
+                1.0,
+                1.0,
+                page,
+                None,
+                &ShareState::default(),
+                crate::settings::IslandColor::default(),
+            );
+            let y = (SEPARATOR_Y - 1.5) as u32;
+            for tab in [Page::Music, Page::Share] {
+                let (cx, _) = tab_center(tab);
+                let alpha = image.pixel(cx as u32, y).unwrap().alpha();
+                assert_eq!(alpha == 255, tab == page, "{tab:?} en {page:?}");
             }
         }
     }
