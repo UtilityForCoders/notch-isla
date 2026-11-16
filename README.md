@@ -24,8 +24,6 @@ Nocho vive arriba, al centro de la pantalla, como una línea delgada que no esto
 
 Es liviana: en reposo no usa CPU y solo se anima mientras la estás usando.
 
-> **¿Usabas Notch Isla?** Nocho es la misma app con nombre e ícono nuevos. Se actualiza sola desde la 0.3.1 en adelante y conserva tus ajustes, el inicio con Windows y tus equipos vinculados.
-
 ## Instalar
 
 1. Descarga **`nocho-setup-x.y.z.exe`** desde la [última versión](https://github.com/UtilityForCoders/Nocho/releases/latest).
