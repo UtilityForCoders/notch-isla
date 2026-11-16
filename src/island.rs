@@ -67,6 +67,11 @@ const OVERSHOOT: f32 = 1.08;
 
 /// Radio lógico de la zona de clic (y del resaltado) de los botones.
 const BUTTON_RADIUS: f32 = 15.0;
+/// Distancia lógica del centro a los botones de aleatorio y repetir: repetir queda entre
+/// "siguiente" y el botón de la letra, sin que se toquen sus zonas de clic.
+const MODE_GAP: f32 = 89.0;
+/// Radio lógico de la zona de clic de aleatorio y repetir, más chica por la cercanía.
+const MODE_RADIUS: f32 = 13.0;
 
 /// Tamaño lógico de la ventana: cabe el cuadro expandido más la separación superior y el rebote.
 pub fn window_size() -> (f32, f32) {
@@ -138,9 +143,11 @@ pub fn draw_edge_strip(
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Button {
     Lyrics,
+    Shuffle,
     Prev,
     PlayPause,
     Next,
+    Repeat,
 }
 
 /// Lo que hay bajo el mouse en la isla expandida.
@@ -313,6 +320,9 @@ pub struct Controls {
     pub lyrics_active: bool,
     /// Hay letra sincronizada confirmada para la canción actual.
     pub lyrics_available: bool,
+    /// Reproducción aleatoria y repetición; `None` = la app no deja cambiarlas (sin botón).
+    pub shuffle: Option<bool>,
+    pub repeat: Option<crate::media::Repeat>,
 }
 
 /// Etiquetas de tiempo reproducido y restante, ya formateadas como minutos y segundos.
@@ -409,6 +419,8 @@ pub enum NoticeIcon {
     /// Salida de audio (audífonos, parlantes).
     Audio,
     Timer,
+    /// Recordatorio de tomar agua.
+    Water,
     /// Esperando la combinación del atajo nuevo.
     Keyboard,
     /// Actualización: instalándose, instalada o fallida.
@@ -614,30 +626,41 @@ fn text_column(g: &Geometry, s: f32) -> (f32, f32) {
     (x, w.max(0.0))
 }
 
-/// Centros de los botones: anterior, reproducir y siguiente al centro del reproductor, y el
-/// de la letra junto al borde derecho.
+/// Centros de los botones: anterior, reproducir y siguiente al centro del reproductor, con
+/// aleatorio y repetir a sus lados, y el de la letra junto al borde derecho.
+/// `modes` = (hay botón de aleatorio, hay botón de repetir): depende de la app que suena.
 fn button_centers(
     g: &Geometry,
     s: f32,
     lyrics_available: bool,
+    modes: (bool, bool),
 ) -> impl Iterator<Item = (Button, f32, f32)> {
     let cy = g.y0 + BUTTONS_Y * s;
     let media_cx = g.x0 + EXPANDED_COMPACT.0 / 2.0 * s;
     let lyrics_cx = g.x0 + (EXPANDED_COMPACT.0 - COVER_PAD_X - 16.0) * s;
     let gap = 54.0 * s;
+    let side = MODE_GAP * s;
     [
         (Button::Lyrics, lyrics_cx, cy),
+        (Button::Shuffle, media_cx - side, cy),
         (Button::Prev, media_cx - gap, cy),
         (Button::PlayPause, media_cx, cy),
         (Button::Next, media_cx + gap, cy),
+        (Button::Repeat, media_cx + side, cy),
     ]
     .into_iter()
-    .filter(move |(button, _, _)| *button != Button::Lyrics || lyrics_available)
+    .filter(move |(button, _, _)| match button {
+        Button::Lyrics => lyrics_available,
+        Button::Shuffle => modes.0,
+        Button::Repeat => modes.1,
+        _ => true,
+    })
 }
 
 /// Qué hay bajo el punto (x, y) de la ventana, solo si el contenido ya se ve por completo.
 /// `seekable` = la barra de progreso está visible; `switchable` = hay otra app a la que cambiar;
-/// `updatable` = se muestra el botón de actualización.
+/// `updatable` = se muestra el botón de actualización; `modes` = hay botón de aleatorio y de
+/// repetir.
 #[allow(clippy::too_many_arguments)]
 pub fn hit_test(
     max_w: f32,
@@ -650,6 +673,7 @@ pub fn hit_test(
     switchable: bool,
     updatable: bool,
     lyrics_available: bool,
+    modes: (bool, bool),
     x: f32,
     y: f32,
 ) -> Option<Hit> {
@@ -688,12 +712,12 @@ pub fn hit_test(
             return Some(Hit::Seek(((x - bx) / bw.max(1.0)).clamp(0.0, 1.0)));
         }
     }
-    button_centers(&g, scale, lyrics_available)
+    button_centers(&g, scale, lyrics_available, modes)
         .find(|&(button, bx, by)| {
-            let r = if button == Button::PlayPause {
-                19.0
-            } else {
-                BUTTON_RADIUS
+            let r = match button {
+                Button::PlayPause => 19.0,
+                Button::Shuffle | Button::Repeat => MODE_RADIUS,
+                _ => BUTTON_RADIUS,
             } * scale;
             (x - bx).powi(2) + (y - by).powi(2) <= r * r
         })
@@ -892,7 +916,8 @@ pub fn draw(
     // Botones de control
     let mut seek = None;
     if let Some(c) = &controls {
-        for (button, cx, cy) in button_centers(&g, s, c.lyrics_available) {
+        let modes = (c.shuffle.is_some(), c.repeat.is_some());
+        for (button, cx, cy) in button_centers(&g, s, c.lyrics_available, modes) {
             let alpha = g.alpha * ((g.y0 + g.h - cy) / s - 19.0).clamp(0.0, 7.0) / 7.0;
             match c.pressed {
                 Some((pressed, t)) if pressed == button => {
@@ -1284,6 +1309,50 @@ pub(crate) fn draw_notice_icon(
             pb.line_to(cx + 2.5 * s, cy - 11.0 * s);
             stroke(pixmap, paint, pb, line);
         }
+        NoticeIcon::Water => {
+            // Gota: punta arriba y base redonda.
+            let mut pb = PathBuilder::new();
+            pb.move_to(cx, cy - 9.5 * s);
+            pb.cubic_to(
+                cx + 2.0 * s,
+                cy - 5.5 * s,
+                cx + 7.0 * s,
+                cy - 1.5 * s,
+                cx + 7.0 * s,
+                cy + 3.0 * s,
+            );
+            pb.cubic_to(
+                cx + 7.0 * s,
+                cy + 7.0 * s,
+                cx + 3.9 * s,
+                cy + 9.5 * s,
+                cx,
+                cy + 9.5 * s,
+            );
+            pb.cubic_to(
+                cx - 3.9 * s,
+                cy + 9.5 * s,
+                cx - 7.0 * s,
+                cy + 7.0 * s,
+                cx - 7.0 * s,
+                cy + 3.0 * s,
+            );
+            pb.cubic_to(
+                cx - 7.0 * s,
+                cy - 1.5 * s,
+                cx - 2.0 * s,
+                cy - 5.5 * s,
+                cx,
+                cy - 9.5 * s,
+            );
+            pb.close();
+            stroke(pixmap, paint, pb, line);
+            // Brillo en la base.
+            let mut pb = PathBuilder::new();
+            pb.move_to(cx - 3.6 * s, cy + 3.4 * s);
+            pb.quad_to(cx - 3.4 * s, cy + 6.0 * s, cx - 0.8 * s, cy + 6.4 * s);
+            stroke(pixmap, paint, pb, 1.4 * s);
+        }
         NoticeIcon::Keyboard => {
             if let Some(body) =
                 rounded_rect_path(cx - 10.0 * s, cy - 7.0 * s, 20.0 * s, 14.0 * s, 3.0 * s)
@@ -1506,8 +1575,12 @@ fn draw_button(
         paint.set_color_rgba8(r, g, b, (alpha * if hovered { 54.0 } else { 34.0 }) as u8);
         fill_circle(pixmap, &paint, cx, cy, 19.0 * s);
     } else if hovered {
+        let radius = match button {
+            Button::Shuffle | Button::Repeat => MODE_RADIUS,
+            _ => BUTTON_RADIUS,
+        };
         paint.set_color_rgba8(255, 255, 255, (alpha * 35.0) as u8);
-        fill_circle(pixmap, &paint, cx, cy, BUTTON_RADIUS * s);
+        fill_circle(pixmap, &paint, cx, cy, radius * s);
     }
 
     let [r, g, b] = color.light();
@@ -1632,7 +1705,65 @@ fn draw_button(
             fill_triangle(pixmap, &paint, cx - 6.25 * s, cy, tri_w, tri_h);
             fill_triangle(pixmap, &paint, cx + 0.25 * s, cy, tri_w, tri_h);
         }
+        // Encendido, con el color pleno y un punto debajo; apagado, tenue.
+        Button::Shuffle => {
+            let active = c.shuffle == Some(true);
+            paint.set_color_rgba8(r, g, b, mode_alpha(active, alpha));
+            // Dos líneas que se cruzan y terminan en punta de flecha a la derecha.
+            for dir in [1.0, -1.0] {
+                let mut pb = PathBuilder::new();
+                pb.move_to(cx - 7.5 * s, cy + dir * 3.6 * s);
+                pb.line_to(cx - 4.2 * s, cy + dir * 3.6 * s);
+                pb.line_to(cx + 2.2 * s, cy - dir * 3.6 * s);
+                pb.line_to(cx + 7.0 * s, cy - dir * 3.6 * s);
+                pb.move_to(cx + 4.8 * s, cy - dir * 3.6 * s - 2.2 * s);
+                pb.line_to(cx + 7.0 * s, cy - dir * 3.6 * s);
+                pb.line_to(cx + 4.8 * s, cy - dir * 3.6 * s + 2.2 * s);
+                stroke(pixmap, &paint, pb, 1.5 * s);
+            }
+            if active {
+                fill_circle(pixmap, &paint, cx, cy + 9.5 * s, 1.2 * s);
+            }
+        }
+        Button::Repeat => {
+            let repeat = c.repeat.unwrap_or(crate::media::Repeat::Off);
+            let active = repeat != crate::media::Repeat::Off;
+            paint.set_color_rgba8(r, g, b, mode_alpha(active, alpha));
+            // Dos medias vueltas con punta de flecha: arriba hacia la derecha, abajo al revés.
+            for dir in [1.0, -1.0] {
+                let mut pb = PathBuilder::new();
+                pb.move_to(cx - dir * 7.5 * s, cy - dir * 0.6 * s);
+                pb.line_to(cx - dir * 7.5 * s, cy - dir * 1.4 * s);
+                pb.quad_to(
+                    cx - dir * 7.5 * s,
+                    cy - dir * 4.2 * s,
+                    cx - dir * 4.6 * s,
+                    cy - dir * 4.2 * s,
+                );
+                pb.line_to(cx + dir * 6.2 * s, cy - dir * 4.2 * s);
+                pb.move_to(cx + dir * 4.0 * s, cy - dir * 4.2 * s - 2.2 * s);
+                pb.line_to(cx + dir * 6.2 * s, cy - dir * 4.2 * s);
+                pb.line_to(cx + dir * 4.0 * s, cy - dir * 4.2 * s + 2.2 * s);
+                stroke(pixmap, &paint, pb, 1.5 * s);
+            }
+            if repeat == crate::media::Repeat::Track {
+                // Un 1 en el centro: se repite solo esta canción.
+                let mut pb = PathBuilder::new();
+                pb.move_to(cx - 1.1 * s, cy - 1.0 * s);
+                pb.line_to(cx + 0.3 * s, cy - 2.0 * s);
+                pb.line_to(cx + 0.3 * s, cy + 2.0 * s);
+                stroke(pixmap, &paint, pb, 1.3 * s);
+            }
+            if active {
+                fill_circle(pixmap, &paint, cx, cy + 9.5 * s, 1.2 * s);
+            }
+        }
     }
+}
+
+/// Opacidad de los botones de aleatorio y repetir: plena si están encendidos.
+fn mode_alpha(active: bool, alpha: f32) -> u8 {
+    (alpha * if active { 255.0 } else { 115.0 }) as u8
 }
 
 fn fill_circle(pixmap: &mut Pixmap, paint: &Paint, cx: f32, cy: f32, r: f32) {
@@ -1789,6 +1920,8 @@ mod tests {
             levels: Some([0.6, 0.4, 0.3, 0.2]),
             lyrics_active: false,
             lyrics_available: false,
+            shuffle: None,
+            repeat: None,
         }
     }
 
@@ -1869,14 +2002,58 @@ mod tests {
     }
 
     #[test]
+    fn aleatorio_y_repetir_solo_aparecen_si_la_app_los_ofrece() {
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            let (w, h) = window_size();
+            let (w, h) = ((w * scale).ceil(), (h * scale).ceil());
+            let g = geometry(w, h, scale, 1.0, 1.0, Shape::default());
+            let hit = |modes, x, y| {
+                hit_test(
+                    w,
+                    h,
+                    scale,
+                    1.0,
+                    1.0,
+                    Shape::default(),
+                    false,
+                    false,
+                    false,
+                    true,
+                    modes,
+                    x,
+                    y,
+                )
+            };
+            let all: Vec<_> = button_centers(&g, scale, true, (true, true)).collect();
+            assert_eq!(all.len(), 6);
+            // Cada botón responde en su centro: las zonas de clic no se pisan.
+            for &(button, x, y) in &all {
+                assert!(hit((true, true), x, y) == Some(Hit::Button(button)));
+            }
+            for (i, &(_, ax, _)) in all.iter().enumerate() {
+                for &(_, bx, _) in &all[i + 1..] {
+                    assert!((ax - bx).abs() >= (MODE_RADIUS + BUTTON_RADIUS) * scale);
+                }
+            }
+            for &(button, x, y) in &all {
+                let expected = !matches!(button, Button::Shuffle | Button::Repeat);
+                assert_eq!(hit((false, false), x, y).is_some(), expected);
+            }
+        }
+    }
+
+    #[test]
     fn letra_solo_se_dibuja_y_recibe_clics_cuando_esta_disponible() {
         for scale in [1.0, 1.25, 1.5, 2.0] {
             let (w, h) = window_size();
             let (w, h) = ((w * scale).ceil() as u32, (h * scale).ceil() as u32);
             let g = geometry(w as f32, h as f32, scale, 1.0, 1.0, Shape::default());
-            let (_, lx, ly) = button_centers(&g, scale, true).next().unwrap();
+            let (_, lx, ly) = button_centers(&g, scale, true, (false, false))
+                .next()
+                .unwrap();
             for available in [false, true] {
-                let buttons: Vec<_> = button_centers(&g, scale, available).collect();
+                let buttons: Vec<_> =
+                    button_centers(&g, scale, available, (false, false)).collect();
                 assert_eq!(buttons.len(), if available { 4 } else { 3 });
                 let mut image = Pixmap::new(w, h).unwrap();
                 let mut c = controls();
@@ -1904,6 +2081,7 @@ mod tests {
                             false,
                             false,
                             available,
+                            (false, false),
                             x,
                             y
                         ) == Some(Hit::Button(button))
@@ -1928,6 +2106,7 @@ mod tests {
                     false,
                     false,
                     available,
+                    (false, false),
                     lx,
                     ly,
                 );

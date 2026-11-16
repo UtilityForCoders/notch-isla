@@ -43,6 +43,7 @@ Requiere Windows 10 (versión 1809 o posterior) u 11, de 64 bits.
 ### Controlar tu música desde cualquier lugar
 
 - **Un clic en la línea** abre el reproductor: carátula, título, artista, tiempo y los botones anterior, play/pausa y siguiente.
+- **Aleatorio y repetir** a los lados de los controles, en las apps que los ofrecen (como Spotify). Repetir alterna entre apagado, toda la lista y solo la canción.
 - **Salta a cualquier parte** de la canción con un clic en la barra de progreso.
 - **Sube o baja el volumen** girando la rueda del mouse sobre la isla: cambia solo el de la app que suena, como el Mezclador de volumen. Con **Ctrl** apretado cambia el volumen general.
 - **Varias apps con música**: unos puntos bajo la carátula lo indican; un clic en la carátula pasa a la siguiente. En la esquina de la carátula ves el ícono de la app que suena.
@@ -77,7 +78,8 @@ Las conexiones van cifradas y solo tus equipos vinculados pueden enviarte cosas.
 - **Batería baja** de tu mouse, teclado, audífonos o mando (Bluetooth, mandos de juego y algunos receptores USB). En **Configuración → Dispositivos** ves el nivel de cada uno.
 - **Dispositivo conectado**: el nombre de los audífonos o el mouse que acabas de conectar.
 - **Cambio de salida de audio**: a qué parlantes o audífonos pasó el sonido.
-- **Temporizador**: de 5 a 60 minutos; al terminar suena y la isla avisa.
+- **Temporizador**: duraciones rápidas de 5 a 60 minutos o la que elijas (hasta 3 horas); al terminar suena y la isla avisa. También hay **cronómetro** y **Pomodoro** (25 minutos de foco y 5 de descanso, con un descanso largo cada cuatro). La cuenta se ve en una píldora bajo la línea de reposo.
+- **Tomar agua**: fija tu meta diaria y cada cuánto quieres que te lo recuerde. Un clic en el aviso anota un vaso; el conteo empieza de cero cada día.
 - **Actualización lista**: un clic y se instala sola, sin ventanas.
 
 ### Se adapta a cómo trabajas
@@ -95,7 +97,7 @@ Las conexiones van cifradas y solo tus equipos vinculados pueden enviarte cosas.
   <img src="docs/img/configuracion.png" alt="La ventana de Configuración de Nocho con las categorías a la izquierda y las opciones de General a la derecha" width="620">
 </p>
 
-Haz clic derecho en el ícono de Nocho en la bandeja del sistema y elige **Configuración**. Las opciones están ordenadas en **General**, **Apariencia**, **Música y letra**, **Dispositivos**, **Temporizador**, **Compartir** y **Actualizaciones**. Los cambios se guardan solos.
+Haz clic derecho en el ícono de Nocho en la bandeja del sistema y elige **Configuración**. Las opciones están ordenadas en **General**, **Apariencia**, **Música y letra**, **Dispositivos**, **Temporizador**, **Hidratación**, **Compartir** y **Actualizaciones**. Los cambios se guardan solos.
 
 ## Preguntas frecuentes
 

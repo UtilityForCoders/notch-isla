@@ -57,6 +57,13 @@ const CMD_SETTINGS: usize = 24;
 const CMD_LINKED_DEVICES: usize = 25;
 const CMD_LYRICS_VOICE: usize = 26;
 const CMD_SHARE_DND: usize = 27;
+const CMD_TIMER_START: usize = 28;
+const CMD_STOPWATCH: usize = 29;
+const CMD_POMODORO: usize = 30;
+const CMD_TIMER_PILL: usize = 31;
+const CMD_WATER: usize = 32;
+const CMD_WATER_GLASS: usize = 33;
+const CMD_WATER_RESET: usize = 34;
 /// Las opciones de los submenús van numeradas a partir de estas bases.
 const CMD_MONITOR: usize = 200;
 const CMD_TIMER: usize = 300;
@@ -65,6 +72,10 @@ const CMD_OUTPUT_DEFAULT: usize = 400;
 const CMD_OUTPUT: usize = 401;
 const CMD_BLUR_RADIUS: usize = 500;
 pub(crate) const CMD_ISLAND_COLOR: usize = 600;
+/// Deslizadores: el comando es la base más el valor (ver `Item::Slider`).
+const CMD_TIMER_MINUTES: usize = 700;
+const CMD_WATER_GOAL: usize = 1000;
+const CMD_WATER_INTERVAL: usize = 1100;
 
 /// Duraciones del temporizador en minutos.
 pub const TIMER_MINUTES: [u32; 6] = [5, 10, 15, 25, 45, 60];
@@ -84,6 +95,21 @@ pub enum Command {
     /// Minutos del temporizador.
     Timer(u32),
     CancelTimer,
+    /// Minutos de la duración libre (deslizador).
+    TimerMinutes(u32),
+    /// Empieza la cuenta con la duración libre.
+    StartCustomTimer,
+    StartStopwatch,
+    StartPomodoro,
+    /// La cuenta se ve en la píldora bajo la línea de reposo.
+    ToggleTimerPill,
+    ToggleWater,
+    /// Meta diaria en mililitros.
+    WaterGoal(u32),
+    /// Minutos entre recordatorios.
+    WaterInterval(u32),
+    WaterGlass,
+    WaterReset,
     ToggleNotices,
     ToggleFullscreen,
     /// Letra dentro de la isla expandida.
@@ -116,8 +142,10 @@ pub struct MenuState<'a> {
     pub update: Option<&'a str>,
     pub settings: Settings,
     pub monitors: &'a [Monitor],
-    /// Minutos que le quedan al temporizador, si hay uno en marcha.
-    pub timer_left: Option<u32>,
+    /// Estado de la cuenta en marcha ("Foco 2 de 4 · quedan 24:13"), si hay una.
+    pub timer: Option<String>,
+    /// Agua anotada hoy, en mililitros.
+    pub water_ml: u32,
 }
 
 /// Mensaje "TaskbarCreated": llega si el Explorador se reinicia y hay que volver a poner el ícono.
@@ -242,19 +270,74 @@ fn build_settings_items(state: &MenuState) -> Vec<Item> {
     }
 
     let mut timer = Vec::new();
-    if let Some(left) = state.timer_left {
+    if let Some(status) = &state.timer {
         timer.push(action(
             CMD_CANCEL_TIMER,
-            &format!("Cancelar (quedan {left} min)"),
+            &format!("Detener · {status}"),
             false,
         ));
     }
     for (i, min) in TIMER_MINUTES.iter().enumerate() {
         timer.push(action(CMD_TIMER + i, &format!("{min} minutos"), false));
     }
+    let custom = crate::timer::minutes_text(settings.timer_minutes);
+    timer.push(Item::Slider {
+        id: CMD_TIMER_MINUTES,
+        label: format!("Duración libre: {custom}"),
+        value: settings.timer_minutes,
+        min: 1,
+        max: crate::timer::MAX_MINUTES,
+    });
+    timer.push(action(CMD_TIMER_START, &format!("Iniciar {custom}"), false));
+    timer.push(action(CMD_STOPWATCH, "Iniciar cronómetro", false));
+    timer.push(action(
+        CMD_POMODORO,
+        &format!("Iniciar Pomodoro ({})", crate::timer::pomodoro_summary()),
+        false,
+    ));
+    timer.push(action(
+        CMD_TIMER_PILL,
+        "Mostrar la cuenta bajo la línea de reposo",
+        settings.timer_pill,
+    ));
     items.push(Item::Group {
         label: "Temporizador".to_string(),
         items: timer,
+    });
+
+    use crate::water;
+    items.push(Item::Group {
+        label: "Hidratación".to_string(),
+        items: vec![
+            Item::Label(format!(
+                "Hoy: {} de {} ml",
+                state.water_ml, settings.water_goal_ml
+            )),
+            action(CMD_WATER, "Recordarme tomar agua", settings.water_reminders),
+            Item::Slider {
+                id: CMD_WATER_GOAL,
+                label: format!("Meta diaria: {} ml", settings.water_goal_ml),
+                value: settings.water_goal_ml / water::GOAL_STEP_ML,
+                min: water::GOAL_MIN_ML / water::GOAL_STEP_ML,
+                max: water::GOAL_MAX_ML / water::GOAL_STEP_ML,
+            },
+            Item::Slider {
+                id: CMD_WATER_INTERVAL,
+                label: format!(
+                    "Recordar cada {}",
+                    crate::timer::minutes_text(settings.water_interval_min)
+                ),
+                value: settings.water_interval_min / water::INTERVAL_STEP_MIN,
+                min: water::INTERVAL_MIN_MIN / water::INTERVAL_STEP_MIN,
+                max: water::INTERVAL_MAX_MIN / water::INTERVAL_STEP_MIN,
+            },
+            action(
+                CMD_WATER_GLASS,
+                &format!("Anotar un vaso ({} ml)", water::GLASS_ML),
+                false,
+            ),
+            action(CMD_WATER_RESET, "Reiniciar el conteo de hoy", false),
+        ],
     });
 
     items.push(Item::Separator);
@@ -389,6 +472,13 @@ fn id_to_command(id: usize, state: &MenuState) -> Option<Command> {
         CMD_NOTICES => Some(Command::ToggleNotices),
         CMD_FULLSCREEN => Some(Command::ToggleFullscreen),
         CMD_CANCEL_TIMER => Some(Command::CancelTimer),
+        CMD_TIMER_START => Some(Command::StartCustomTimer),
+        CMD_STOPWATCH => Some(Command::StartStopwatch),
+        CMD_POMODORO => Some(Command::StartPomodoro),
+        CMD_TIMER_PILL => Some(Command::ToggleTimerPill),
+        CMD_WATER => Some(Command::ToggleWater),
+        CMD_WATER_GLASS => Some(Command::WaterGlass),
+        CMD_WATER_RESET => Some(Command::WaterReset),
         CMD_LYRICS => Some(Command::ToggleLyricsIsland),
         CMD_LYRICS_PROJECTOR => Some(Command::ToggleLyricsProjector),
         CMD_LYRICS_VOICE => Some(Command::ToggleLyricsVoice),
@@ -410,11 +500,37 @@ fn id_to_command(id: usize, state: &MenuState) -> Option<Command> {
                 Some(Command::BlurRadius(i as u32))
             } else if let Some(i) = pick(CMD_MONITOR, state.monitors.len()) {
                 Some(Command::Monitor(i))
+            } else if let Some(minutes) =
+                pick(CMD_TIMER_MINUTES + 1, crate::timer::MAX_MINUTES as usize)
+            {
+                Some(Command::TimerMinutes(minutes as u32 + 1))
+            } else if let Some(steps) = slider_steps(
+                id,
+                CMD_WATER_GOAL,
+                crate::water::GOAL_MIN_ML / crate::water::GOAL_STEP_ML,
+                crate::water::GOAL_MAX_ML / crate::water::GOAL_STEP_ML,
+            ) {
+                Some(Command::WaterGoal(steps * crate::water::GOAL_STEP_ML))
+            } else if let Some(steps) = slider_steps(
+                id,
+                CMD_WATER_INTERVAL,
+                crate::water::INTERVAL_MIN_MIN / crate::water::INTERVAL_STEP_MIN,
+                crate::water::INTERVAL_MAX_MIN / crate::water::INTERVAL_STEP_MIN,
+            ) {
+                Some(Command::WaterInterval(
+                    steps * crate::water::INTERVAL_STEP_MIN,
+                ))
             } else {
                 pick(CMD_TIMER, TIMER_MINUTES.len()).map(|i| Command::Timer(TIMER_MINUTES[i]))
             }
         }
     }
+}
+
+/// Valor de un deslizador a partir de su comando (`base + valor`), si está entre sus límites.
+fn slider_steps(id: usize, base: usize, min: u32, max: u32) -> Option<u32> {
+    let value = u32::try_from(id.checked_sub(base)?).ok()?;
+    (min..=max).contains(&value).then_some(value)
 }
 
 /// No recibe `&Tray` a propósito: el menú corre su propio bucle de mensajes y la ventana
@@ -446,7 +562,8 @@ fn categories(state: &MenuState) -> Vec<crate::settings_ui::Category> {
             "Reproducción y letra sincronizada de LRCLIB",
         ),
         ("Dispositivos", "Batería, conexiones y avisos"),
-        ("Temporizador", "Elige cuándo quieres recibir un aviso"),
+        ("Temporizador", "Cuenta regresiva, cronómetro y Pomodoro"),
+        ("Hidratación", "Meta diaria de agua y recordatorios"),
         ("Compartir", "Archivos y portapapeles entre tus equipos"),
         ("Actualizaciones", "Versión instalada y nuevas versiones"),
     ]
@@ -460,12 +577,13 @@ fn categories(state: &MenuState) -> Vec<crate::settings_ui::Category> {
     for item in build_settings_items(state) {
         let index = match &item {
             Item::Separator => continue,
-            Item::Label(_) => 6,
+            Item::Label(_) => 7,
             Item::Group { label, .. } => match label.as_str() {
                 "Pantalla" | "Desenfoque del fondo" => 1,
                 "Mostrar letra de la canción" => 2,
                 "Dispositivos y batería" => 3,
                 "Temporizador" => 4,
+                "Hidratación" => 5,
                 _ => 0,
             },
             Item::Action { id, .. } => match *id {
@@ -473,8 +591,8 @@ fn categories(state: &MenuState) -> Vec<crate::settings_ui::Category> {
                 CMD_CENTER | CMD_HIGH_REFRESH | CMD_ISLAND_COLOR => 1,
                 CMD_REAL_BARS => 2,
                 CMD_NOTICES => 3,
-                CMD_SHARE | CMD_LINKED_DEVICES | CMD_SHARE_DND => 5,
-                CMD_UPDATE | CMD_CHECK_UPDATES => 6,
+                CMD_SHARE | CMD_LINKED_DEVICES | CMD_SHARE_DND => 6,
+                CMD_UPDATE | CMD_CHECK_UPDATES => 7,
                 _ => 0,
             },
             _ => 0,
@@ -501,6 +619,8 @@ pub(crate) fn is_toggle(id: usize) -> bool {
             | CMD_BATTERY_NOTICES
             | CMD_CONNECTION_NOTICES
             | CMD_SHARE_DND
+            | CMD_TIMER_PILL
+            | CMD_WATER
     )
 }
 
@@ -545,7 +665,8 @@ where
             }
             crate::with_app(|app| {
                 state.settings = app.settings.clone();
-                state.timer_left = app.countdown_left();
+                state.timer = app.timer_status();
+                state.water_ml = app.water.ml;
             });
             (categories(&state), close)
         });
@@ -562,6 +683,8 @@ where
 
 pub enum IslandMenuChoice {
     Share,
+    /// Anotar un vaso de agua.
+    Water,
     Output(Option<usize>),
     Center,
     TogglePinnedExpanded,
@@ -686,6 +809,7 @@ pub fn show_island_menu(
     unavailable: Option<&str>,
     is_centered: bool,
     pinned_expanded: bool,
+    water: Option<&str>,
 ) -> Option<IslandMenuChoice> {
     let mut items = vec![
         Item::Action {
@@ -695,6 +819,15 @@ pub fn show_island_menu(
         },
         Item::Separator,
     ];
+    // Con los recordatorios de agua activados: anotar un vaso sin esperar el aviso.
+    if let Some(label) = water {
+        items.push(Item::Action {
+            id: CMD_WATER_GLASS,
+            label: label.to_string(),
+            checked: false,
+        });
+        items.push(Item::Separator);
+    }
     items.push(Item::Action {
         id: CMD_PIN_EXPANDED,
         label: "Fijar versión extendida".to_string(),
@@ -729,6 +862,7 @@ pub fn show_island_menu(
     });
     match menu::show(items)? {
         CMD_SHARE => Some(IslandMenuChoice::Share),
+        CMD_WATER_GLASS => Some(IslandMenuChoice::Water),
         CMD_PIN_EXPANDED => Some(IslandMenuChoice::TogglePinnedExpanded),
         CMD_CENTER => Some(IslandMenuChoice::Center),
         CMD_OUTPUT_DEFAULT => Some(IslandMenuChoice::Output(None)),
@@ -832,13 +966,14 @@ mod settings_tests {
             update: Some("Instalar nueva versión"),
             settings: Settings::load(),
             monitors: &monitors,
-            timer_left: Some(12),
+            timer: Some("Temporizador · quedan 12:00".into()),
+            water_ml: 750,
         };
         assert_eq!(ids(&build_items(&state)), vec![CMD_SETTINGS, CMD_EXIT]);
         let mut expected = ids(&build_settings_items(&state));
         expected.retain(|id| *id != CMD_EXIT);
         let groups = categories(&state);
-        assert_eq!(groups.len(), 7);
+        assert_eq!(groups.len(), 8);
         let mut actual: Vec<_> = groups
             .iter()
             .flat_map(|category| ids(&category.items))
@@ -849,8 +984,48 @@ mod settings_tests {
         actual.dedup();
         assert_eq!(actual.len(), expected.len());
         for id in actual {
-            assert!(id == CMD_ISLAND_COLOR || id_to_command(id, &state).is_some());
+            // Los deslizadores que no empiezan en 0 se prueban con su valor más bajo.
+            let lowest = match id {
+                CMD_TIMER_MINUTES | CMD_WATER_INTERVAL => 1,
+                CMD_WATER_GOAL => (crate::water::GOAL_MIN_ML / crate::water::GOAL_STEP_ML) as usize,
+                _ => 0,
+            };
+            assert!(id == CMD_ISLAND_COLOR || id_to_command(id + lowest, &state).is_some());
         }
+    }
+
+    #[test]
+    fn deslizadores_devuelven_su_valor_y_respetan_los_limites() {
+        let state = MenuState {
+            update: None,
+            settings: Settings::load(),
+            monitors: &[],
+            timer: None,
+            water_ml: 0,
+        };
+        let command = |id| id_to_command(id, &state);
+        assert!(matches!(
+            command(CMD_TIMER_MINUTES + 1),
+            Some(Command::TimerMinutes(1))
+        ));
+        assert!(matches!(
+            command(CMD_TIMER_MINUTES + 180),
+            Some(Command::TimerMinutes(180))
+        ));
+        assert!(command(CMD_TIMER_MINUTES).is_none());
+        assert!(command(CMD_TIMER_MINUTES + 181).is_none());
+        assert!(matches!(
+            command(CMD_WATER_GOAL + 8),
+            Some(Command::WaterGoal(2000))
+        ));
+        assert!(command(CMD_WATER_GOAL + 3).is_none());
+        assert!(command(CMD_WATER_GOAL + 17).is_none());
+        assert!(matches!(
+            command(CMD_WATER_INTERVAL + 4),
+            Some(Command::WaterInterval(60))
+        ));
+        assert!(command(CMD_WATER_INTERVAL).is_none());
+        assert!(command(CMD_WATER_INTERVAL + 9).is_none());
     }
 
     #[test]
@@ -869,7 +1044,8 @@ mod settings_tests {
             update: None,
             settings: Settings::load(),
             monitors: &monitors,
-            timer_left: None,
+            timer: None,
+            water_ml: 0,
         };
         use crate::settings_ui::Change;
         crate::settings_ui::show(categories(&state), state.settings.island_color, |change| {
@@ -886,8 +1062,17 @@ mod settings_tests {
                     Some(Command::ToggleLyricsProjector) => state.settings.lyrics_projector ^= true,
                     Some(Command::ToggleLyricsVoice) => state.settings.lyrics_voice ^= true,
                     Some(Command::BlurRadius(value)) => state.settings.blur_radius = value,
-                    Some(Command::Timer(minutes)) => state.timer_left = Some(minutes),
-                    Some(Command::CancelTimer) => state.timer_left = None,
+                    Some(Command::Timer(minutes)) => {
+                        state.timer = Some(format!("Temporizador · quedan {minutes}:00"))
+                    }
+                    Some(Command::CancelTimer) => state.timer = None,
+                    Some(Command::TimerMinutes(minutes)) => state.settings.timer_minutes = minutes,
+                    Some(Command::ToggleTimerPill) => state.settings.timer_pill ^= true,
+                    Some(Command::ToggleWater) => state.settings.water_reminders ^= true,
+                    Some(Command::WaterGoal(ml)) => state.settings.water_goal_ml = ml,
+                    Some(Command::WaterInterval(min)) => state.settings.water_interval_min = min,
+                    Some(Command::WaterGlass) => state.water_ml += crate::water::GLASS_ML,
+                    Some(Command::WaterReset) => state.water_ml = 0,
                     _ => {}
                 }
             }
