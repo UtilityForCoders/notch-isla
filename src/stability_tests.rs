@@ -81,6 +81,8 @@ fn isla_con_desenfoque_sigue_ocultandose_y_recibiendo_clics() {
             app_icon: None,
             app_id: String::new(),
             sessions: (0, 1),
+            shuffle: None,
+            repeat: None,
         });
         if animation_bench {
             let monitor = monitors::find("");
@@ -684,6 +686,8 @@ fn isla_entra_y_sale_de_pantalla_completa(abierta: bool) {
             app_icon: None,
             app_id: String::new(),
             sessions: (0, 1),
+            shuffle: None,
+            repeat: None,
         });
         app.lyrics.insert(
             lyrics::key("Prueba local", "Sin sesión multimedia real"),

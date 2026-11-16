@@ -33,8 +33,26 @@ pub fn run() {
     run_at_startup();
 }
 
-/// Hay una Notch Isla (0.8 o anterior) abierta: dos islas a la vez se pisarían.
-pub fn legacy_running() -> bool {
+/// Cuánto se espera a que se cierre una Notch Isla abierta.
+const LEGACY_WAIT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Espera a que no haya una Notch Isla (0.8 o anterior) abierta, porque dos islas a la vez se
+/// pisarían. Al actualizarse, la Notch Isla vieja se cierra mientras el instalador ya abre Nocho:
+/// si Nocho se cerrara al verla, nadie la volvería a abrir (el ayudante de la 0.8 solo busca su
+/// propia isla). `false` si después de `LEGACY_WAIT` sigue abierta.
+pub fn wait_for_legacy() -> bool {
+    let until = std::time::Instant::now() + LEGACY_WAIT;
+    while legacy_running() {
+        if std::time::Instant::now() >= until {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    true
+}
+
+/// Hay una Notch Isla (0.8 o anterior) abierta.
+fn legacy_running() -> bool {
     unsafe {
         match OpenMutexW(SYNCHRONIZATION_SYNCHRONIZE, false, LEGACY_MUTEX) {
             Ok(handle) => {
@@ -64,17 +82,21 @@ fn open(path: PCWSTR) -> Option<Key> {
 
 /// Copia `HKCU\Software\NotchIsla` en la clave nueva y borra la vieja.
 fn registry() {
-    if open(settings::KEY).is_some() {
+    move_key(LEGACY_KEY, settings::KEY);
+}
+
+fn move_key(legacy: PCWSTR, current: PCWSTR) {
+    if open(current).is_some() {
         return;
     }
-    let Some(old) = open(LEGACY_KEY) else {
+    let Some(old) = open(legacy) else {
         return;
     };
     let mut new = HKEY::default();
     let created = unsafe {
         RegCreateKeyExW(
             HKEY_CURRENT_USER,
-            settings::KEY,
+            current,
             None,
             None,
             REG_OPTION_NON_VOLATILE,
@@ -92,7 +114,7 @@ fn registry() {
     drop(old);
     if copied {
         unsafe {
-            let _ = RegDeleteTreeW(HKEY_CURRENT_USER, LEGACY_KEY);
+            let _ = RegDeleteTreeW(HKEY_CURRENT_USER, legacy);
         }
     }
 }
@@ -224,5 +246,41 @@ mod tests {
 
         assert_eq!(std::fs::read(new.join("share.dat")).unwrap(), b"nueva");
         assert!(old.exists());
+    }
+
+    #[test]
+    fn mueve_la_clave_de_registro_con_sus_valores() {
+        use windows::Win32::System::Registry::{RegSetKeyValueW, REG_DWORD};
+        let (old, new) = (
+            w!(r"Software\NochoPruebaMigracionVieja"),
+            w!(r"Software\NochoPruebaMigracionNueva"),
+        );
+        unsafe {
+            let _ = RegDeleteTreeW(HKEY_CURRENT_USER, old);
+            let _ = RegDeleteTreeW(HKEY_CURRENT_USER, new);
+            let value = 1u32.to_le_bytes();
+            assert_eq!(
+                RegSetKeyValueW(
+                    HKEY_CURRENT_USER,
+                    old,
+                    w!("LyricsIsland"),
+                    REG_DWORD.0,
+                    Some(value.as_ptr().cast()),
+                    4,
+                ),
+                ERROR_SUCCESS
+            );
+        }
+
+        move_key(old, new);
+
+        let moved = open(new).is_some();
+        let left = open(old).is_some();
+        unsafe {
+            let _ = RegDeleteTreeW(HKEY_CURRENT_USER, old);
+            let _ = RegDeleteTreeW(HKEY_CURRENT_USER, new);
+        }
+        assert!(moved, "la clave nueva debe existir");
+        assert!(!left, "la clave vieja debe borrarse");
     }
 }

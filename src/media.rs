@@ -21,6 +21,7 @@ use windows::Media::Control::{
     GlobalSystemMediaTransportControlsSessionMediaProperties as Properties,
     GlobalSystemMediaTransportControlsSessionPlaybackStatus as Status,
 };
+use windows::Media::MediaPlaybackAutoRepeatMode as RepeatMode;
 use windows::Win32::Foundation::{E_FAIL, HWND, LPARAM, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_APP};
 
@@ -50,6 +51,47 @@ pub struct NowPlaying {
     /// (posición de la sesión mostrada, cantidad de apps con música). Con 2 o más, un clic en
     /// la carátula pasa a la siguiente.
     pub sessions: (usize, usize),
+    /// Reproducción aleatoria; `None` si la app no deja cambiarla (no se dibuja el botón).
+    pub shuffle: Option<bool>,
+    /// Repetición; `None` si la app no deja cambiarla.
+    pub repeat: Option<Repeat>,
+}
+
+/// Modo de repetición de la app que suena.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Repeat {
+    Off,
+    /// Repite la lista completa.
+    List,
+    /// Repite la canción actual.
+    Track,
+}
+
+impl Repeat {
+    /// El modo que sigue al pulsar el botón: apagado, lista, canción y de vuelta.
+    pub fn next(self) -> Self {
+        match self {
+            Repeat::Off => Repeat::List,
+            Repeat::List => Repeat::Track,
+            Repeat::Track => Repeat::Off,
+        }
+    }
+
+    fn from_mode(mode: RepeatMode) -> Self {
+        match mode {
+            RepeatMode::Track => Repeat::Track,
+            RepeatMode::List => Repeat::List,
+            _ => Repeat::Off,
+        }
+    }
+
+    fn mode(self) -> RepeatMode {
+        match self {
+            Repeat::Off => RepeatMode::None,
+            Repeat::List => RepeatMode::List,
+            Repeat::Track => RepeatMode::Track,
+        }
+    }
 }
 
 /// Ícono de una app en RGBA premultiplicado. Se compara por identidad, como `Cover`.
@@ -383,9 +425,41 @@ pub fn press(button: Button) {
             Button::Prev => s.TrySkipPreviousAsync(),
             Button::PlayPause => s.TryTogglePlayPauseAsync(),
             Button::Next => s.TrySkipNextAsync(),
+            // Se lee el estado en el momento: el de la isla puede ir un evento atrasado.
+            Button::Shuffle => match read_modes(&s).0 {
+                Some(active) => s.TryChangeShuffleActiveAsync(!active),
+                None => return,
+            },
+            Button::Repeat => match read_modes(&s).1 {
+                Some(repeat) => s.TryChangeAutoRepeatModeAsync(repeat.next().mode()),
+                None => return,
+            },
             Button::Lyrics => return,
         };
     }
+}
+
+/// Aleatorio y repetición de la sesión, cada uno solo si la app permite cambiarlo. Algunas
+/// apps (los navegadores) no informan ninguno de los dos.
+fn read_modes(session: &Session) -> (Option<bool>, Option<Repeat>) {
+    let Ok(info) = session.GetPlaybackInfo() else {
+        return (None, None);
+    };
+    let Ok(controls) = info.Controls() else {
+        return (None, None);
+    };
+    let shuffle = controls
+        .IsShuffleEnabled()
+        .unwrap_or(false)
+        .then(|| info.IsShuffleActive().and_then(|v| v.Value()).ok())
+        .flatten();
+    let repeat = controls
+        .IsRepeatEnabled()
+        .unwrap_or(false)
+        .then(|| info.AutoRepeatMode().and_then(|v| v.Value()).ok())
+        .flatten()
+        .map(Repeat::from_mode);
+    (shuffle, repeat)
 }
 
 /// Salta a una fracción (0 a 1) de la canción. Como `press`, no espera la respuesta.
@@ -563,6 +637,7 @@ fn read(
     let title = props.Title()?.to_string_lossy();
     let artist = props.Artist()?.to_string_lossy();
     let song = format!("{title}\u{1}{artist}");
+    let (shuffle, repeat) = read_modes(session);
     let same_song = cached
         .as_ref()
         .filter(|(cached_song, _)| *cached_song == song)
@@ -583,6 +658,8 @@ fn read(
         app_icon: None,
         app_id: String::new(),
         sessions: (0, 0),
+        shuffle,
+        repeat,
     })
 }
 
@@ -683,6 +760,20 @@ pub unsafe fn take(lparam: LPARAM) -> Option<NowPlaying> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repetir_recorre_los_tres_modos() {
+        let mut repeat = Repeat::Off;
+        let mut seen = Vec::new();
+        for _ in 0..3 {
+            repeat = repeat.next();
+            seen.push(repeat);
+        }
+        assert_eq!(seen, [Repeat::List, Repeat::Track, Repeat::Off]);
+        for repeat in [Repeat::Off, Repeat::List, Repeat::Track] {
+            assert_eq!(Repeat::from_mode(repeat.mode()), repeat);
+        }
+    }
 
     /// Diagnóstico (ignorado por defecto): lee 30 veces seguidas la carátula de lo que suena
     /// y cuenta cuántas lecturas fallan sin que cambie la canción.

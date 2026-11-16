@@ -30,10 +30,12 @@ mod spring;
 mod stability_tests;
 mod system;
 mod text;
+mod timer;
 mod tray;
 mod ui;
 mod update;
 mod visualizer;
+mod water;
 mod workspace;
 
 use std::cell::{OnceCell, RefCell};
@@ -118,6 +120,8 @@ const NOTICE_CARD_TIMER: usize = 9;
 /// Muestra la batería al mantener el puntero sobre el icono, sin abrirla por un roce accidental.
 const BATTERY_HOVER_TIMER: usize = 10;
 const BATTERY_HOVER_MS: u32 = 450;
+/// Recordatorio de tomar agua, cada tantos minutos como diga el ajuste.
+const WATER_TIMER: usize = 11;
 
 /// Resorte de la expansión (rigidez, amortiguación): rápido, con un pequeño rebote.
 const EXPAND_SPRING: (f32, f32) = (260.0, 22.0);
@@ -129,6 +133,7 @@ const COLLAPSE_SPRING: (f32, f32) = (110.0, 21.0);
 const NOTICE_MS: u32 = 2500;
 const NOTICE_TIMER_DONE_MS: u32 = 8000;
 const NOTICE_UPDATE_MS: u32 = 6000;
+const NOTICE_WATER_MS: u32 = 10_000;
 const MAX_CACHED_LYRICS: usize = 64;
 
 /// Colores de los avisos: salida de audio e instalación, temporizador, actualización lista y
@@ -256,7 +261,31 @@ fn slide_shift(slide: &mut Option<LyricSlide>, key: &str, index: isize) -> f32 {
     slide.as_ref().map_or(0.0, |s| s.shift(now))
 }
 
+/// Deja constancia de un fallo interno en `%LOCALAPPDATA%\Nocho\fallo.log`. La app no tiene
+/// consola: sin esto, un fallo solo se ve como que la isla desapareció.
+fn log_panics() {
+    std::panic::set_hook(Box::new(|info| {
+        use std::io::Write;
+        let Some(base) = std::env::var_os("LOCALAPPDATA") else {
+            return;
+        };
+        let directory = std::path::PathBuf::from(base).join(settings::DATA_DIR);
+        let _ = std::fs::create_dir_all(&directory);
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(directory.join("fallo.log"))
+        {
+            let when = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |elapsed| elapsed.as_secs());
+            let _ = writeln!(file, "[{when}] Nocho {}: {info}", env!("CARGO_PKG_VERSION"));
+        }
+    }));
+}
+
 fn main() -> Result<()> {
+    log_panics();
     unsafe {
         // Copia temporal lanzada para actualizar: espera al instalador y vuelve a abrir la isla.
         let args: Vec<String> = std::env::args().collect();
@@ -272,7 +301,7 @@ fn main() -> Result<()> {
         // Una sola isla: si ya hay otra abierta, esta se cierra sin hacer nada.
         // El mutex vive mientras `_instance` exista, es decir, hasta que termine `main`.
         let _instance = CreateMutexW(None, false, w!("Local\\Nocho.Instancia"))?;
-        if GetLastError() == ERROR_ALREADY_EXISTS || migration::legacy_running() {
+        if GetLastError() == ERROR_ALREADY_EXISTS || !migration::wait_for_legacy() {
             return Ok(());
         }
         // Antes de leer ajustes o datos: trae lo que dejó Notch Isla (0.8 o anterior).
@@ -336,6 +365,7 @@ fn main() -> Result<()> {
                 hwnd,
                 app.settings.connection_notices,
             ));
+            app.sync_water_timer();
         });
         // Si se acaba de instalar una actualización desde la isla, se avisa cómo salió.
         if let Some((ok, version)) = update::take_install_result() {
@@ -584,8 +614,12 @@ struct App {
     tray_menu_open: bool,
     /// Nombre de la salida de audio actual, para avisar solo cuando de verdad cambia.
     audio_device: Option<String>,
-    /// Temporizador en marcha: cuándo termina y de cuántos minutos es.
-    countdown: Option<(Instant, u32)>,
+    /// Cuenta en marcha: temporizador, cronómetro o fase del Pomodoro.
+    timer: Option<timer::Timer>,
+    /// Agua anotada hoy.
+    water: water::Water,
+    /// El aviso en pantalla es el recordatorio de agua: un clic anota un vaso.
+    water_notice: bool,
     /// Actualización a instalar en cuanto termine el aviso "Instalando".
     installing: Option<update::Update>,
     preparing_update: bool,
@@ -683,7 +717,9 @@ impl App {
             share_notice_pending: None,
             tray_menu_open: false,
             audio_device: None,
-            countdown: None,
+            timer: None,
+            water: water::Water::load(),
+            water_notice: false,
             installing: None,
             preparing_update: false,
             lingering: false,
@@ -791,6 +827,7 @@ impl App {
     /// Muestra un aviso del sistema durante `ms`: la isla baja (aunque no haya música o se
     /// haya ocultado sola) y se expande con el aviso. Un aviso nuevo reemplaza al anterior.
     fn show_notice(&mut self, view: Notice, title: &str, subtitle: &str, ms: u32) {
+        self.water_notice = false;
         self.notice = Some(ActiveNotice {
             view,
             title: title.to_string(),
@@ -808,6 +845,7 @@ impl App {
         unsafe {
             let _ = KillTimer(Some(self.hwnd), NOTICE_TIMER);
         }
+        self.water_notice = false;
         let Some(notice) = self.notice.take() else {
             return;
         };
@@ -1105,32 +1143,63 @@ impl App {
         );
     }
 
-    /// Pone en marcha el temporizador de la bandeja (reemplaza al anterior).
-    fn start_countdown(&mut self, minutes: u32) {
-        self.countdown = Some((
-            Instant::now() + Duration::from_secs(minutes as u64 * 60),
-            minutes,
-        ));
-        unsafe {
-            SetTimer(Some(self.hwnd), COUNTDOWN_TIMER, minutes * 60_000, None);
-        }
+    /// Pone en marcha una cuenta (reemplaza a la anterior) y la anuncia.
+    fn start_timer(&mut self, timer: timer::Timer) {
+        let now = Instant::now();
+        self.arm_timer(timer, now);
+        let (title, subtitle) = match (timer.kind, timer.remaining(now)) {
+            (timer::Kind::Countdown, Some(left)) => (
+                "Temporizador",
+                timer::minutes_text((left.as_secs() / 60) as u32),
+            ),
+            (timer::Kind::Pomodoro { .. }, _) => ("Pomodoro", timer::pomodoro_summary()),
+            _ => ("Cronómetro", "En marcha".to_string()),
+        };
         let view = Notice {
             icon: NoticeIcon::Timer,
             color: ORANGE,
         };
-        self.show_notice(
-            view,
-            "Temporizador",
-            &format!("{minutes} minutos"),
-            NOTICE_MS,
-        );
+        self.announce(view, title, &subtitle, NOTICE_MS);
     }
 
-    fn cancel_countdown(&mut self) {
+    /// Guarda la cuenta y programa el aviso de su final (el cronómetro no tiene).
+    fn arm_timer(&mut self, timer: timer::Timer, now: Instant) {
+        unsafe {
+            match timer.remaining(now) {
+                Some(left) => {
+                    let ms = left.as_millis().clamp(1, u32::MAX as u128) as u32;
+                    SetTimer(Some(self.hwnd), COUNTDOWN_TIMER, ms, None);
+                }
+                None => {
+                    let _ = KillTimer(Some(self.hwnd), COUNTDOWN_TIMER);
+                }
+            }
+        }
+        self.timer = Some(timer);
+    }
+
+    fn cancel_timer(&mut self) {
         unsafe {
             let _ = KillTimer(Some(self.hwnd), COUNTDOWN_TIMER);
         }
-        self.countdown = None;
+        if self.timer.take().is_some() {
+            // Quita la cuenta de la píldora bajo la línea.
+            self.redraw();
+        }
+    }
+
+    /// "Detener" en el menú: el cronómetro avisa cuánto llevaba.
+    fn stop_timer(&mut self) {
+        let Some(timer) = self.timer else { return };
+        self.cancel_timer();
+        if timer.is_stopwatch() {
+            let view = Notice {
+                icon: NoticeIcon::Timer,
+                color: ORANGE,
+            };
+            let elapsed = timer::clock(timer.elapsed(Instant::now()));
+            self.announce(view, "Cronómetro detenido", &elapsed, NOTICE_UPDATE_MS);
+        }
     }
 
     /// Clic en "Instalar": avisa que empieza y, tras un momento para leerlo, se cierra para
@@ -1247,32 +1316,104 @@ impl App {
         }
     }
 
-    /// Se acabó el tiempo: suena y avisa. Si la isla no puede mostrarse (pantalla completa),
-    /// el aviso va como notificación de Windows.
-    fn countdown_done(&mut self) {
-        let minutes = self.countdown.map_or(0, |(_, m)| m);
-        self.cancel_countdown();
+    /// La cuenta llegó a cero: suena y avisa (si la isla no puede mostrarse, como
+    /// notificación de Windows). En Pomodoro empieza sola la fase siguiente.
+    fn timer_done(&mut self) {
+        let Some(timer) = self.timer else {
+            self.cancel_timer();
+            return;
+        };
+        let now = Instant::now();
+        let finished = timer.finished(now);
+        self.cancel_timer();
+        if let Some(next) = finished.next {
+            self.arm_timer(next, now);
+        }
         unsafe {
             let _ = MessageBeep(MB_ICONASTERISK);
-        }
-        let subtitle = format!("Temporizador de {minutes} minutos");
-        if self.hidden_by_fullscreen() {
-            self.tray.notify("Se acabó el tiempo", &subtitle);
-            return;
         }
         let view = Notice {
             icon: NoticeIcon::Timer,
             color: ORANGE,
         };
-        self.show_notice(view, "Se acabó el tiempo", &subtitle, NOTICE_TIMER_DONE_MS);
+        self.announce(
+            view,
+            finished.title,
+            &finished.subtitle,
+            NOTICE_TIMER_DONE_MS,
+        );
     }
 
-    /// Minutos que le quedan al temporizador (redondeando hacia arriba), si hay uno.
-    fn countdown_left(&self) -> Option<u32> {
-        self.countdown.map(|(end, _)| {
-            let secs = end.saturating_duration_since(Instant::now()).as_secs();
-            secs.div_ceil(60) as u32
-        })
+    /// Estado de la cuenta en marcha para el menú, si hay una.
+    fn timer_status(&self) -> Option<String> {
+        self.timer.map(|timer| timer.status(Instant::now()))
+    }
+
+    /// Enciende o apaga los recordatorios de agua según los ajustes. Reinicia la espera.
+    fn sync_water_timer(&mut self) {
+        unsafe {
+            if self.settings.water_reminders {
+                let ms = self.settings.water_interval_min * 60_000;
+                SetTimer(Some(self.hwnd), WATER_TIMER, ms, None);
+            } else {
+                let _ = KillTimer(Some(self.hwnd), WATER_TIMER);
+            }
+        }
+    }
+
+    /// Toca recordar: avisa si todavía no se llegó a la meta del día.
+    fn water_tick(&mut self) {
+        self.water.refresh();
+        let goal = self.settings.water_goal_ml;
+        if !self.settings.water_reminders || self.water.ml >= goal {
+            return;
+        }
+        let progress = self.water.progress(goal);
+        if self.hidden_by_fullscreen() {
+            self.tray
+                .notify("Hora de tomar agua", &format!("Llevas {progress}"));
+            return;
+        }
+        let view = Notice {
+            icon: NoticeIcon::Water,
+            color: BLUE,
+        };
+        self.show_notice(
+            view,
+            "Hora de tomar agua",
+            &format!("{progress} · clic para anotar un vaso"),
+            NOTICE_WATER_MS,
+        );
+        self.water_notice = true;
+    }
+
+    /// Anota un vaso y muestra cuánto se lleva; al llegar a la meta, lo celebra.
+    fn drink(&mut self) {
+        let goal = self.settings.water_goal_ml;
+        let reached = self.water.add_glass(goal);
+        let progress = self.water.progress(goal);
+        if reached {
+            let view = Notice {
+                icon: NoticeIcon::Done,
+                color: GREEN,
+            };
+            self.announce(view, "Meta de agua cumplida", &progress, NOTICE_UPDATE_MS);
+        } else {
+            let view = Notice {
+                icon: NoticeIcon::Water,
+                color: BLUE,
+            };
+            self.announce(view, "Vaso anotado", &progress, NOTICE_MS);
+        }
+    }
+
+    /// Clic sobre un aviso: lo cierra; en el recordatorio de agua, además anota un vaso.
+    fn notice_clicked(&mut self) {
+        if self.water_notice {
+            self.drink();
+        } else {
+            self.end_notice();
+        }
     }
 
     /// Ctrl + Alt + N: si la isla está, se oculta en el borde; si estaba oculta, vuelve.
@@ -1815,6 +1956,7 @@ impl App {
             media.sessions.1 > 1,
             self.update.is_some(),
             self.has_current_lyrics(),
+            (media.shuffle.is_some(), media.repeat.is_some()),
             x,
             y,
         )
@@ -2294,6 +2436,8 @@ impl App {
             cover_hovered: self.cover_hovered,
             lyrics_active: self.settings.lyrics_island && self.has_current_lyrics(),
             lyrics_available: self.has_current_lyrics(),
+            shuffle: m.shuffle,
+            repeat: m.repeat,
         });
         // El contenido expandido (y con él la barra) se ve a partir de ~55 % de la expansión.
         // Mientras se muestra el volumen también hace falta redibujar: para quitarlo a tiempo.
@@ -2609,6 +2753,24 @@ impl App {
         } else {
             None
         };
+        // Sin verso que mostrar, la píldora lleva la cuenta del temporizador. Cambia una vez
+        // por minuto: hasta entonces no hace falta ningún cuadro.
+        let timer_text = self
+            .timer
+            .filter(|_| {
+                lyric.is_none()
+                    && self.settings.timer_pill
+                    && self.notice.is_none()
+                    && self.spring.value < 0.4
+                    && !self.hidden_by_fullscreen()
+            })
+            .map(|timer| {
+                let now = Instant::now();
+                let wake = (timer.next_change(now).as_millis() as u32).clamp(frame_ms, 60_000);
+                lyric_ms = Some(lyric_ms.map_or(wake, |ms: u32| ms.min(wake)));
+                timer.pill(now)
+            });
+        let lyric = lyric.or(timer_text.as_deref());
         let mut projecting = false;
         if lyric.is_some() && self.projector.is_none() {
             self.projector = Projector::new(self.scale).ok();
@@ -2641,6 +2803,7 @@ impl App {
             }
         }
         if !projecting
+            && timer_text.is_none()
             && (!self.settings.lyrics_projector || self.media.as_ref().is_none_or(|m| !m.playing))
         {
             // Se conserva durante la transición, y se libera cuando termina de salir.
@@ -3074,7 +3237,13 @@ fn finish_install(hwnd: HWND) {
 
 /// Menú contextual sobre la isla: opciones de salida de audio y centrar en la pantalla.
 /// Va fuera de `with_app`: el menú corre su propio bucle de mensajes.
-fn open_island_menu(hwnd: HWND, app_id: Option<&str>, is_centered: bool, pinned_expanded: bool) {
+fn open_island_menu(
+    hwnd: HWND,
+    app_id: Option<&str>,
+    is_centered: bool,
+    pinned_expanded: bool,
+    water: Option<&str>,
+) {
     let (label, pids, outputs, unavailable) = if let Some(app_id) = app_id {
         let label = audio::app_label(app_id);
         let pids = audio::app_pids(app_id);
@@ -3109,11 +3278,15 @@ fn open_island_menu(hwnd: HWND, app_id: Option<&str>, is_centered: bool, pinned_
         unavailable,
         is_centered,
         pinned_expanded,
+        water,
     ) else {
         return;
     };
     match choice {
         tray::IslandMenuChoice::Share => share_ui::open(hwnd),
+        tray::IslandMenuChoice::Water => {
+            with_app(|app| app.drink());
+        }
         tray::IslandMenuChoice::TogglePinnedExpanded => {
             with_app(|app| {
                 app.set_pinned_expanded(!app.settings.pinned_expanded);
@@ -3318,7 +3491,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                         return;
                     }
                     if app.notice.is_some() {
-                        app.end_notice();
+                        app.notice_clicked();
                         return;
                     }
                     // Un clic en la línea abre directamente los controles.
@@ -3345,7 +3518,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                     return;
                 }
                 if app.notice.is_some() {
-                    app.end_notice();
+                    app.notice_clicked();
                     return;
                 }
                 match app.hit_at(x, y) {
@@ -3372,14 +3545,26 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             let mut app_id = None;
             let mut is_centered = true;
             let mut pinned_expanded = false;
+            let mut water = None;
             with_app(|app| {
                 if (app.visible || app.edge_strip()) && app.notice.is_none() {
                     app_id = app.media.as_ref().map(|m| m.app_id.clone());
                     is_centered = app.settings.offset_x == 0;
                     pinned_expanded = app.settings.pinned_expanded;
                 }
+                if app.settings.water_reminders {
+                    app.water.refresh();
+                    let progress = app.water.progress(app.settings.water_goal_ml);
+                    water = Some(format!("Anotar vaso de agua · {progress}"));
+                }
             });
-            open_island_menu(hwnd, app_id.as_deref(), is_centered, pinned_expanded);
+            open_island_menu(
+                hwnd,
+                app_id.as_deref(),
+                is_centered,
+                pinned_expanded,
+                water.as_deref(),
+            );
             LRESULT(0)
         }
         WM_ANIM_TICK => {
@@ -3431,7 +3616,11 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             LRESULT(0)
         }
         WM_TIMER if wparam.0 == COUNTDOWN_TIMER => {
-            with_app(|app| app.countdown_done());
+            with_app(|app| app.timer_done());
+            LRESULT(0)
+        }
+        WM_TIMER if wparam.0 == WATER_TIMER => {
+            with_app(|app| app.water_tick());
             LRESULT(0)
         }
         WM_TIMER if wparam.0 == INSTALL_TIMER => {
@@ -3600,12 +3789,15 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             // Se copia antes de actuar: mientras el menú está abierto no debe haber préstamo de la app.
             let mut pending = None;
             let mut settings = None;
-            let mut timer_left = None;
+            let mut timer_status = None;
+            let mut water_ml = 0;
             let mut menu_open = false;
             with_app(|app| {
                 pending = app.update.clone();
                 settings = Some(app.settings.clone());
-                timer_left = app.countdown_left();
+                timer_status = app.timer_status();
+                app.water.refresh();
+                water_ml = app.water.ml;
                 menu_open = app.tray_menu_open;
             });
             if event == NIN_BALLOONUSERCLICK {
@@ -3620,7 +3812,8 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                     update: label.as_deref(),
                     settings,
                     monitors: &monitors,
-                    timer_left,
+                    timer: timer_status,
+                    water_ml,
                 };
                 use tray::Command;
                 with_app(|app| {
@@ -3693,12 +3886,73 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                         false
                     }
                     Command::Timer(minutes) => {
-                        with_app(|app| app.start_countdown(minutes));
+                        with_app(|app| {
+                            app.start_timer(timer::Timer::countdown(minutes, Instant::now()))
+                        });
+                        false
+                    }
+                    Command::StartCustomTimer => {
+                        let minutes = settings.timer_minutes;
+                        with_app(|app| {
+                            app.start_timer(timer::Timer::countdown(minutes, Instant::now()))
+                        });
+                        false
+                    }
+                    Command::StartStopwatch => {
+                        with_app(|app| app.start_timer(timer::Timer::stopwatch(Instant::now())));
+                        false
+                    }
+                    Command::StartPomodoro => {
+                        with_app(|app| app.start_timer(timer::Timer::pomodoro(Instant::now())));
                         false
                     }
                     Command::CancelTimer => {
-                        with_app(|app| app.cancel_countdown());
+                        with_app(|app| app.stop_timer());
                         false
+                    }
+                    Command::TimerMinutes(minutes) => {
+                        settings.timer_minutes = minutes;
+                        settings.save();
+                        with_app(|app| app.settings.timer_minutes = minutes);
+                        true
+                    }
+                    Command::ToggleTimerPill => {
+                        settings.timer_pill = !settings.timer_pill;
+                        settings.save();
+                        with_app(|app| app.apply_settings(settings.clone()));
+                        true
+                    }
+                    Command::ToggleWater => {
+                        settings.water_reminders = !settings.water_reminders;
+                        settings.save();
+                        with_app(|app| {
+                            app.settings.water_reminders = settings.water_reminders;
+                            app.sync_water_timer();
+                        });
+                        true
+                    }
+                    Command::WaterGoal(ml) => {
+                        settings.water_goal_ml = ml;
+                        settings.save();
+                        with_app(|app| app.settings.water_goal_ml = ml);
+                        true
+                    }
+                    Command::WaterInterval(minutes) => {
+                        settings.water_interval_min = minutes;
+                        settings.save();
+                        with_app(|app| {
+                            app.settings.water_interval_min = minutes;
+                            app.sync_water_timer();
+                        });
+                        true
+                    }
+                    Command::WaterGlass => {
+                        with_app(|app| app.drink());
+                        true
+                    }
+                    Command::WaterReset => {
+                        with_app(|app| app.water.reset());
+                        true
                     }
                     Command::ChangeHotkey => {
                         with_app(|app| app.begin_hotkey_capture());
@@ -3917,6 +4171,8 @@ mod tests {
                     app_icon: None,
                     app_id: String::new(),
                     sessions: (0, 1),
+                    shuffle: None,
+                    repeat: None,
                 }));
             }
             app.presence.reset(1.0);
@@ -4037,6 +4293,8 @@ mod tests {
                 app_icon: None,
                 app_id: String::new(),
                 sessions: (0, 1),
+                shuffle: None,
+                repeat: None,
             };
             let key = lyrics::key(&media.title, &media.artist);
             app.lyrics.insert(key.clone(), Vec::new());
@@ -4603,6 +4861,8 @@ mod tests {
                     levels: None,
                     lyrics_active: true,
                     lyrics_available: true,
+                    shuffle: None,
+                    repeat: None,
                 }),
                 island::Indicators::default(),
                 None,

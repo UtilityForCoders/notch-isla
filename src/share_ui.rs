@@ -8,7 +8,7 @@ use std::ffi::OsString;
 use std::os::windows::ffi::OsStringExt;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Sender};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -180,6 +180,7 @@ impl Drop for PanelModal {
 }
 
 pub fn panel_state() -> crate::workspace::ShareState {
+    want_discovery();
     let devices = store().map_or_else(Vec::new, |store| store.devices());
     UI.with_borrow_mut(|ui| {
         let selected_exists = ui
@@ -527,21 +528,57 @@ fn start_search(hwnd: HWND, search: Search) {
     });
 }
 
+/// Hasta cuándo hace falta la lista de equipos cercanos. La renueva `panel_state`, que solo se
+/// consulta al dibujar la página de compartir.
+static DISCOVERY_UNTIL: Mutex<Option<Instant>> = Mutex::new(None);
+static DISCOVERY_THREAD: OnceLock<thread::Thread> = OnceLock::new();
+/// Margen tras el último dibujo de la página: cubre una búsqueda (3 s) y su pausa (5 s).
+const DISCOVERY_KEEP: Duration = Duration::from_secs(20);
+
+/// La página de compartir está a la vista: la búsqueda de equipos sigue (o se reanuda).
+fn want_discovery() {
+    *DISCOVERY_UNTIL.lock().unwrap_or_else(|e| e.into_inner()) =
+        Some(Instant::now() + DISCOVERY_KEEP);
+    if let Some(thread) = DISCOVERY_THREAD.get() {
+        thread.unpark();
+    }
+}
+
+fn discovery_wanted() -> bool {
+    DISCOVERY_UNTIL
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .is_some_and(|until| Instant::now() < until)
+}
+
+/// Busca equipos cercanos solo mientras la página de compartir está a la vista. Cada resultado
+/// redibuja la isla; si la página sigue abierta, ese dibujo renueva el plazo y la búsqueda
+/// continúa. Con la página cerrada el hilo duerme: antes buscaba por la red cada 5 s durante
+/// toda la vida de la app, aunque nadie mirase la lista.
 fn start_discovery(hwnd: HWND) {
     let Some(store) = store() else {
         return;
     };
     let report = reporter(hwnd);
-    thread::spawn(move || loop {
-        // Solo se envía a equipos vinculados: sin ninguno, buscar en la red es trabajo perdido
-        // (un hilo y sockets nuevos cada pocos segundos). Al vincular uno, la búsqueda sigue sola.
-        if !store.devices().is_empty() {
-            report(Event::Discovery(
-                share::discover(&store).map_err(|error| error.to_string()),
-            ));
-        }
-        thread::sleep(std::time::Duration::from_secs(5));
-    });
+    let spawned = thread::Builder::new()
+        .name("nocho-discovery".into())
+        .spawn(move || loop {
+            while !discovery_wanted() {
+                thread::park();
+            }
+            // Solo se envía a equipos vinculados: sin ninguno, buscar en la red es trabajo
+            // perdido (un hilo y sockets nuevos cada pocos segundos). Al vincular uno, la
+            // búsqueda sigue sola.
+            if !store.devices().is_empty() {
+                report(Event::Discovery(
+                    share::discover(&store).map_err(|error| error.to_string()),
+                ));
+            }
+            thread::park_timeout(Duration::from_secs(5));
+        });
+    if let Ok(handle) = spawned {
+        let _ = DISCOVERY_THREAD.set(handle.thread().clone());
+    }
 }
 
 pub fn receiving_enabled() -> bool {
@@ -755,12 +792,7 @@ fn confirm_pair(hwnd: HWND, name: String, code: String, decision: Sender<bool>) 
 }
 
 fn inbox_path() -> Option<PathBuf> {
-    std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .map(|path| {
-            path.join(crate::settings::DATA_DIR)
-                .join("share-inbox.json")
-        })
+    crate::settings::data_dir().map(|path| path.join("share-inbox.json"))
 }
 
 fn load_inbox() -> VecDeque<PendingMessage> {
