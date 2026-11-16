@@ -111,6 +111,14 @@ pub struct Settings {
     pub pinned_expanded: bool,
     /// Desviación del desenfoque gaussiano en píxeles lógicos (0 a 40).
     pub blur_radius: u32,
+    /// Minutos de la duración libre del temporizador.
+    pub timer_minutes: u32,
+    /// Muestra la cuenta del temporizador en la píldora bajo la línea de reposo.
+    pub timer_pill: bool,
+    /// Recuerda tomar agua cada `water_interval_min` hasta llegar a `water_goal_ml` en el día.
+    pub water_reminders: bool,
+    pub water_goal_ml: u32,
+    pub water_interval_min: u32,
 }
 
 impl Settings {
@@ -144,6 +152,18 @@ impl Settings {
             expand_on_hover: read_dword(w!("ExpandOnHover")).is_some_and(|v| v != 0),
             pinned_expanded: read_dword(w!("PinnedExpanded")).is_some_and(|v| v != 0),
             blur_radius: read_dword(w!("BlurRadius")).unwrap_or(16).min(40),
+            timer_minutes: read_dword(w!("TimerMinutes"))
+                .unwrap_or(20)
+                .clamp(1, crate::timer::MAX_MINUTES),
+            timer_pill: read_dword(w!("TimerPill")).is_none_or(|v| v != 0),
+            water_reminders: read_dword(w!("WaterReminders")).is_some_and(|v| v != 0),
+            water_goal_ml: read_dword(w!("WaterGoalMl"))
+                .unwrap_or(2000)
+                .clamp(crate::water::GOAL_MIN_ML, crate::water::GOAL_MAX_ML),
+            water_interval_min: read_dword(w!("WaterIntervalMin")).unwrap_or(60).clamp(
+                crate::water::INTERVAL_MIN_MIN,
+                crate::water::INTERVAL_MAX_MIN,
+            ),
         }
     }
 
@@ -166,6 +186,11 @@ impl Settings {
         write_dword(w!("ExpandOnHover"), self.expand_on_hover as u32);
         write_dword(w!("PinnedExpanded"), self.pinned_expanded as u32);
         write_dword(w!("BlurRadius"), self.blur_radius);
+        write_dword(w!("TimerMinutes"), self.timer_minutes);
+        write_dword(w!("TimerPill"), self.timer_pill as u32);
+        write_dword(w!("WaterReminders"), self.water_reminders as u32);
+        write_dword(w!("WaterGoalMl"), self.water_goal_ml);
+        write_dword(w!("WaterIntervalMin"), self.water_interval_min);
     }
 
     /// Guarda la vista previa del deslizador al cerrar el menú, sin reescribir todo.
@@ -209,7 +234,7 @@ pub fn take_pending_update() -> Option<String> {
     version
 }
 
-fn read_dword(name: PCWSTR) -> Option<u32> {
+pub(crate) fn read_dword(name: PCWSTR) -> Option<u32> {
     let mut value = 0u32;
     let mut size = std::mem::size_of::<u32>() as u32;
     let status = unsafe {
@@ -247,7 +272,7 @@ fn read_string(name: PCWSTR) -> Option<String> {
     Some(String::from_utf16_lossy(&buf[..len]))
 }
 
-fn write_dword(name: PCWSTR, value: u32) {
+pub(crate) fn write_dword(name: PCWSTR, value: u32) {
     unsafe {
         let _ = RegSetKeyValueW(
             HKEY_CURRENT_USER,

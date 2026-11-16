@@ -61,7 +61,7 @@ El script centra el logo, lo agranda hasta ocupar casi todo el cuadro y guarda l
 
 ## Dónde guarda las cosas
 
-- Ajustes: `HKEY_CURRENT_USER\Software\Nocho`.
+- Ajustes: `HKEY_CURRENT_USER\Software\Nocho`. Ahí va también el agua anotada en el día (`WaterDay` y `WaterMl`).
 - Iniciar con Windows: el valor `Nocho` en `HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run`.
 - Compartir cerca: identidad y equipos vinculados cifrados con DPAPI en `%LOCALAPPDATA%\Nocho\share.dat`; mensajes recibidos pendientes en `%LOCALAPPDATA%\Nocho\share-inbox.json`.
 
@@ -110,6 +110,8 @@ src/
 ├─ routing.rs        salida de audio por app
 ├─ battery.rs        baterías de periféricos Bluetooth, mandos y receptores USB
 ├─ share*.rs         Compartir cerca: red local, vinculación, envíos y vistas previas
+├─ timer.rs          temporizador, cronómetro y Pomodoro (solo las cuentas)
+├─ water.rs          meta diaria de agua y conteo del día
 ├─ autostart.rs      iniciar con Windows
 ├─ update.rs         actualizaciones desde GitHub (WinHTTP)
 └─ fullscreen.rs     ocultar la isla cuando una app está a pantalla completa
