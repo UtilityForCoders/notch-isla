@@ -356,7 +356,7 @@ fn download(title: &str, artist: &str, album: &str, duration: Option<f32>) -> Op
 }
 
 fn get_json(path: &str) -> Option<String> {
-    String::from_utf8(update::get(HOST, path, false)?).ok()
+    String::from_utf8(update::get(HOST, path)?).ok()
 }
 
 /// El primer `"syncedLyrics"` con texto del JSON (en la búsqueda llegan varios resultados y

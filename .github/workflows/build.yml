@@ -300,6 +300,10 @@ jobs:
           # Notch Isla 0.8 y anteriores buscan el instalador con su nombre viejo: una copia
           # idéntica con ese nombre les permite actualizarse solas a Nocho.
           cp "dist/nocho-setup-$VERSION.exe" "dist/notch-isla-setup-$VERSION.exe"
+          # Huella del instalador: el actualizador la descarga de aquí (no de la API de GitHub,
+          # que limita las consultas por IP) y no instala nada que no coincida.
+          (cd dist && sha256sum "nocho-setup-$VERSION.exe" > "nocho-setup-$VERSION.exe.sha256")
+          cat "dist/nocho-setup-$VERSION.exe.sha256"
           ls -l dist
 
       - name: Armar las notas
@@ -324,5 +328,6 @@ jobs:
             --notes-file notas.md \
             --latest \
             "dist/nocho-setup-$VERSION.exe" \
+            "dist/nocho-setup-$VERSION.exe.sha256" \
             dist/nocho.exe \
             "dist/notch-isla-setup-$VERSION.exe"
