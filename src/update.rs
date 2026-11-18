@@ -3,8 +3,13 @@
 //!
 //! Corre en un hilo aparte que pasa casi todo el tiempo dormido (0 % de CPU): revisa al minuto
 //! de abrir la app y luego cada 6 horas. No envía ningún dato: son GET sin cookies ni
-//! identificadores. El instalador se verifica (tamaño y SHA-256 publicados por GitHub) antes de
+//! identificadores. El instalador se verifica (SHA-256 publicado en el mismo release) antes de
 //! ofrecerlo. Si la app es la versión portable (no instalada), solo se avisa y se abre la página.
+//!
+//! No se usa la API de GitHub: sin autenticar admite 60 consultas por hora y por IP, y en redes
+//! que comparten IP (operadoras, oficinas) se agota y la app no podía buscar ni descargar. La
+//! versión sale de la redirección de `releases/latest` y la huella, del archivo `.sha256` que
+//! publica el CI junto al instalador; ninguna de las dos tiene ese límite.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -13,9 +18,10 @@ use windows::core::{w, HSTRING, PCWSTR};
 use windows::Win32::Foundation::{CloseHandle, ERROR_SUCCESS, HWND, LPARAM, WPARAM};
 use windows::Win32::Networking::WinHttp::{
     WinHttpCloseHandle, WinHttpConnect, WinHttpOpen, WinHttpOpenRequest, WinHttpQueryHeaders,
-    WinHttpReadData, WinHttpReceiveResponse, WinHttpSendRequest, WinHttpSetTimeouts,
-    WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_FLAG_SECURE, WINHTTP_QUERY_FLAG_NUMBER,
-    WINHTTP_QUERY_STATUS_CODE,
+    WinHttpReadData, WinHttpReceiveResponse, WinHttpSendRequest, WinHttpSetOption,
+    WinHttpSetTimeouts, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_FLAG_SECURE,
+    WINHTTP_OPTION_REDIRECT_POLICY, WINHTTP_OPTION_REDIRECT_POLICY_NEVER,
+    WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_LOCATION, WINHTTP_QUERY_STATUS_CODE,
 };
 use windows::Win32::Security::Cryptography::{BCryptHash, BCRYPT_SHA256_ALG_HANDLE};
 use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_SZ};
@@ -31,10 +37,10 @@ pub const WM_UPDATE: u32 = WM_APP + 4;
 /// Página de descarga, para la versión portable o si la descarga falló.
 pub const DOWNLOAD_URL: &str = "https://github.com/UtilityForCoders/Nocho/releases/latest";
 
-const API_HOST: &str = "api.github.com";
-const API_PATH: &str = "/repos/UtilityForCoders/Nocho/releases/latest";
 const DOWNLOAD_HOST: &str = "github.com";
 const REPO_PATH: &str = "/UtilityForCoders/Nocho";
+/// `releases/latest` redirige aquí, seguido de la etiqueta del último release.
+const TAG_URL: &str = "https://github.com/UtilityForCoders/Nocho/releases/tag/";
 
 /// Entrada del desinstalador que crea Inno Setup (el AppId de installer/nocho.iss + "_is1").
 const UNINSTALL_KEY: PCWSTR = w!(
@@ -112,19 +118,19 @@ fn check(current: &str, notified: Option<&str>) -> Option<Update> {
 /// instalador descargado si la app está instalada), `Ok(None)` si ya es la última, `Err` si
 /// no se pudo consultar (sin internet, GitHub no responde...).
 fn lookup(current: &str) -> std::result::Result<Option<Update>, ()> {
-    let json = get(API_HOST, API_PATH, true)
-        .and_then(|body| String::from_utf8(body).ok())
-        .ok_or(())?;
-    lookup_release(current, &json, is_installed(), download_installer)
+    let location =
+        redirect_location(DOWNLOAD_HOST, &format!("{REPO_PATH}/releases/latest")).ok_or(())?;
+    lookup_release(current, &location, is_installed(), download_installer)
 }
 
+/// `location` es adonde redirige `releases/latest`: `TAG_URL` seguido de la etiqueta.
 fn lookup_release(
     current: &str,
-    json: &str,
+    location: &str,
     installed: bool,
-    download: impl FnOnce(&str, &str, &str) -> Option<(PathBuf, String)>,
+    download: impl FnOnce(&str, &str) -> Option<(PathBuf, String)>,
 ) -> std::result::Result<Option<Update>, ()> {
-    let tag = json_string(json, "tag_name").ok_or(())?;
+    let tag = location.strip_prefix(TAG_URL).ok_or(())?;
     let version = tag.trim_start_matches('v').to_string();
     // La versión se usa en el nombre del archivo y en la dirección: solo números y puntos.
     if !is_plain_version(&version) || tag != format!("v{version}") {
@@ -134,7 +140,7 @@ fn lookup_release(
         return Ok(None);
     }
     // La versión portable no descarga nada: solo avisa y abre la página.
-    let downloaded = installed.then(|| download(json, tag, &version)).flatten();
+    let downloaded = installed.then(|| download(tag, &version)).flatten();
     let (installer, digest) = match downloaded {
         Some((path, digest)) => (Some(path), digest),
         None => (None, String::new()),
@@ -463,37 +469,38 @@ fn is_installed() -> bool {
     }
 }
 
-/// Descarga el instalador de `version` a la carpeta temporal y lo verifica contra el tamaño y
-/// la huella SHA-256 que informa GitHub. Si ya estaba descargado y es correcto, lo reutiliza.
-/// Devuelve dónde quedó y su huella.
-fn download_installer(json: &str, tag: &str, version: &str) -> Option<(PathBuf, String)> {
+/// Descarga el instalador de `version` a la carpeta temporal y lo verifica contra la huella
+/// SHA-256 que el CI publica en el mismo release (`nocho-setup-x.y.z.exe.sha256`). Si ya estaba
+/// descargado y es correcto, lo reutiliza. Devuelve dónde quedó y su huella.
+fn download_installer(tag: &str, version: &str) -> Option<(PathBuf, String)> {
     let name = format!("nocho-setup-{version}.exe");
-    // Datos del archivo en la lista de "assets": vienen después de su nombre.
-    let asset = &json[json.find(&format!("\"{name}\""))?..];
-    let size = json_number(asset, "size")?;
-    let digest = json_string(asset, "digest")?
-        .strip_prefix("sha256:")?
-        .to_ascii_lowercase();
-
-    let path = std::env::temp_dir().join(&name);
-    let valid = |data: &[u8]| {
-        data.len() as u64 == size && sha256_hex(data).as_deref() == Some(digest.as_str())
-    };
-    if std::fs::read(&path).is_ok_and(|data| valid(&data)) {
-        return Some((path, digest));
-    }
     // Siempre desde github.com y la ruta del repo; la redirección al almacenamiento de GitHub
     // la sigue WinHTTP.
-    let data = get(
-        DOWNLOAD_HOST,
-        &format!("{REPO_PATH}/releases/download/{tag}/{name}"),
-        false,
-    )?;
-    if !valid(&data) {
+    let release = format!("{REPO_PATH}/releases/download/{tag}");
+    let checksum = get(DOWNLOAD_HOST, &format!("{release}/{name}.sha256"))?;
+    let digest = parse_checksum(&String::from_utf8(checksum).ok()?, &name)?;
+
+    let path = std::env::temp_dir().join(&name);
+    if file_matches(&path, &digest) {
+        return Some((path, digest));
+    }
+    let data = get(DOWNLOAD_HOST, &format!("{release}/{name}"))?;
+    if sha256_hex(&data).as_deref() != Some(digest.as_str()) {
         return None;
     }
     std::fs::write(&path, &data).ok()?;
     Some((path, digest))
+}
+
+/// Huella de un archivo `.sha256` con el formato de `sha256sum`: `<64 hex>  <nombre>`. El
+/// nombre, si viene, debe ser `name`. Devuelve la huella en minúsculas.
+fn parse_checksum(text: &str, name: &str) -> Option<String> {
+    let mut parts = text.split_whitespace();
+    let digest = parts.next()?;
+    let file = parts.next().map(|f| f.trim_start_matches('*'));
+    let valid = digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_hexdigit());
+    (valid && file.is_none_or(|f| f == name) && parts.next().is_none())
+        .then(|| digest.to_ascii_lowercase())
 }
 
 /// Huella SHA-256 en hexadecimal (minúsculas).
@@ -508,8 +515,17 @@ fn sha256_hex(data: &[u8]) -> Option<String> {
 /// Tamaño máximo de una descarga: el instalador pesa unos 2,5 MB y las respuestas JSON, pocos KB.
 const MAX_DOWNLOAD: usize = 32 * 1024 * 1024;
 
-/// GET por HTTPS. `json` = pedir la respuesta de la API de GitHub. Lo usa también la letra.
-pub(crate) fn get(host: &str, path: &str, json: bool) -> Option<Vec<u8>> {
+/// Petición GET por HTTPS ya respondida, con su código de estado.
+struct Response {
+    request: Handle,
+    status: u32,
+    // Se cierran después de la petición (los campos se liberan en orden).
+    _connect: Handle,
+    _session: Handle,
+}
+
+/// Envía un GET por HTTPS. `follow` = seguir las redirecciones.
+fn send(host: &str, path: &str, follow: bool) -> Option<Response> {
     unsafe {
         let agent = HSTRING::from(format!("nocho/{}", env!("CARGO_PKG_VERSION")));
         let session = Handle(WinHttpOpen(
@@ -541,15 +557,16 @@ pub(crate) fn get(host: &str, path: &str, json: bool) -> Option<Vec<u8>> {
         if request.0.is_null() {
             return None;
         }
-        let headers: Vec<u16> = if json {
-            "Accept: application/vnd.github+json"
-                .encode_utf16()
-                .collect()
-        } else {
-            Vec::new()
-        };
-        let headers = (!headers.is_empty()).then_some(headers.as_slice());
-        WinHttpSendRequest(request.0, headers, None, 0, 0, 0).ok()?;
+        if !follow {
+            let never = WINHTTP_OPTION_REDIRECT_POLICY_NEVER.to_ne_bytes();
+            WinHttpSetOption(
+                Some(request.0),
+                WINHTTP_OPTION_REDIRECT_POLICY,
+                Some(&never),
+            )
+            .ok()?;
+        }
+        WinHttpSendRequest(request.0, None, None, 0, 0, 0).ok()?;
         WinHttpReceiveResponse(request.0, std::ptr::null_mut()).ok()?;
 
         let mut status = 0u32;
@@ -563,53 +580,68 @@ pub(crate) fn get(host: &str, path: &str, json: bool) -> Option<Vec<u8>> {
             std::ptr::null_mut(),
         )
         .ok()?;
-        if status != 200 {
-            return None;
-        }
+        Some(Response {
+            request,
+            status,
+            _connect: connect,
+            _session: session,
+        })
+    }
+}
 
-        let mut body = Vec::new();
-        let mut chunk = vec![0u8; 64 * 1024];
-        loop {
-            let mut read = 0u32;
+/// GET por HTTPS: el cuerpo de la respuesta si es 200. Lo usa también la letra.
+pub(crate) fn get(host: &str, path: &str) -> Option<Vec<u8>> {
+    let response = send(host, path, true)?;
+    if response.status != 200 {
+        return None;
+    }
+    let mut body = Vec::new();
+    let mut chunk = vec![0u8; 64 * 1024];
+    loop {
+        let mut read = 0u32;
+        unsafe {
             WinHttpReadData(
-                request.0,
+                response.request.0,
                 chunk.as_mut_ptr().cast(),
                 chunk.len() as u32,
                 &mut read,
             )
-            .ok()?;
-            if read == 0 {
-                break;
-            }
-            body.extend_from_slice(&chunk[..read as usize]);
-            // Un servidor que manda de más (por error o a propósito) no llena la memoria.
-            if body.len() > MAX_DOWNLOAD {
-                return None;
-            }
         }
-        Some(body)
+        .ok()?;
+        if read == 0 {
+            break;
+        }
+        body.extend_from_slice(&chunk[..read as usize]);
+        // Un servidor que manda de más (por error o a propósito) no llena la memoria.
+        if body.len() > MAX_DOWNLOAD {
+            return None;
+        }
     }
+    Some(body)
 }
 
-/// Lo que sigue a `"clave":` en un JSON (sin espacios delante), sin cargar un parser completo.
-fn json_value<'a>(json: &'a str, key: &str) -> Option<&'a str> {
-    let after_key = &json[json.find(&format!("\"{key}\""))? + key.len() + 2..];
-    Some(after_key.trim_start().strip_prefix(':')?.trim_start())
-}
-
-/// Valor de texto de `"clave": "valor"`.
-fn json_string<'a>(json: &'a str, key: &str) -> Option<&'a str> {
-    let value = json_value(json, key)?.strip_prefix('"')?;
-    Some(&value[..value.find('"')?])
-}
-
-/// Valor numérico de `"clave": 123`.
-fn json_number(json: &str, key: &str) -> Option<u64> {
-    let value = json_value(json, key)?;
-    let end = value
-        .find(|c: char| !c.is_ascii_digit())
-        .unwrap_or(value.len());
-    value[..end].parse().ok()
+/// Adonde redirige un GET por HTTPS (la cabecera `Location`), sin seguir la redirección.
+fn redirect_location(host: &str, path: &str) -> Option<String> {
+    let response = send(host, path, false)?;
+    if !matches!(response.status, 301 | 302 | 303 | 307 | 308) {
+        return None;
+    }
+    let mut buf = [0u16; 512];
+    let mut len = std::mem::size_of_val(&buf) as u32;
+    unsafe {
+        WinHttpQueryHeaders(
+            response.request.0,
+            WINHTTP_QUERY_LOCATION,
+            None,
+            Some(buf.as_mut_ptr().cast()),
+            &mut len,
+            std::ptr::null_mut(),
+        )
+    }
+    .ok()?;
+    // `len` sale en bytes, sin contar el cero final.
+    let chars = (len as usize / 2).min(buf.len());
+    String::from_utf16(&buf[..chars]).ok()
 }
 
 /// `true` si `candidate` (p. ej. "0.3.0") es mayor que `current`, comparando número a número.
@@ -625,25 +657,22 @@ fn is_newer(candidate: &str, current: &str) -> bool {
 mod tests {
     use super::*;
 
+    fn tag(t: &str) -> String {
+        format!("{TAG_URL}{t}")
+    }
+
     #[test]
     fn vuelve_a_consultar_y_descarga_la_version_reciente_sin_pasos_intermedios() {
-        let cached = lookup_release(
-            "0.4.0",
-            r#"{"tag_name":"v0.5.0"}"#,
-            true,
-            |_, _, version| {
-                Some((
-                    PathBuf::from(format!("nocho-setup-{version}.exe")),
-                    "anterior".into(),
-                ))
-            },
-        )
+        let cached = lookup_release("0.4.0", &tag("v0.5.0"), true, |_, version| {
+            Some((
+                PathBuf::from(format!("nocho-setup-{version}.exe")),
+                "anterior".into(),
+            ))
+        })
         .unwrap()
         .unwrap();
         assert_eq!(cached.version, "0.5.0");
-        let fresh_json = r#"{"tag_name":"v0.5.2"}"#;
-        let latest = lookup_release("0.4.0", fresh_json, true, |json, tag, version| {
-            assert_eq!(json, fresh_json);
+        let latest = lookup_release("0.4.0", &tag("v0.5.2"), true, |tag, version| {
             assert_eq!(tag, "v0.5.2");
             assert_eq!(version, "0.5.2");
             Some((PathBuf::from("nocho-setup-0.5.2.exe"), "reciente".into()))
@@ -660,7 +689,7 @@ mod tests {
 
     #[test]
     fn no_reutiliza_un_instalador_anterior_si_falla_la_descarga_reciente() {
-        let latest = lookup_release("0.4.0", r#"{"tag_name":"v0.5.2"}"#, true, |_, _, _| None)
+        let latest = lookup_release("0.4.0", &tag("v0.5.2"), true, |_, _| None)
             .unwrap()
             .unwrap();
         assert_eq!(latest.version, "0.5.2");
@@ -670,19 +699,30 @@ mod tests {
 
     #[test]
     fn no_descarga_si_ya_esta_al_dia_o_el_release_es_invalido() {
-        let no_download = |_: &str, _: &str, _: &str| -> Option<(PathBuf, String)> {
+        let no_download = |_: &str, _: &str| -> Option<(PathBuf, String)> {
             panic!("no debe descargar este release")
         };
-        assert!(
-            lookup_release("0.5.2", r#"{"tag_name":"v0.5.2"}"#, true, no_download)
-                .unwrap()
-                .is_none()
-        );
-        assert!(
-            lookup_release("0.4.0", r#"{"tag_name":"v0.5.2-beta"}"#, true, no_download).is_err()
-        );
-        assert!(lookup_release("0.4.0", "respuesta inválida", true, no_download).is_err());
-        let portable = lookup_release("0.4.0", r#"{"tag_name":"v0.5.2"}"#, false, no_download)
+        assert!(lookup_release("0.5.2", &tag("v0.5.2"), true, no_download)
+            .unwrap()
+            .is_none());
+        assert!(lookup_release("0.4.0", &tag("v0.5.2-beta"), true, no_download).is_err());
+        assert!(lookup_release("0.4.0", &tag("v0.5.2/../x"), true, no_download).is_err());
+        // Otra redirección (p. ej. a la página de inicio de sesión) no cuenta como release.
+        assert!(lookup_release(
+            "0.4.0",
+            "https://github.com/login?return_to=v9.9.9",
+            true,
+            no_download
+        )
+        .is_err());
+        assert!(lookup_release(
+            "0.4.0",
+            "https://github.com/otro/repo/releases/tag/v9.9.9",
+            true,
+            no_download
+        )
+        .is_err());
+        let portable = lookup_release("0.4.0", &tag("v0.5.2"), false, no_download)
             .unwrap()
             .unwrap();
         assert!(portable.installer.is_none());
@@ -737,14 +777,18 @@ mod tests {
     }
 
     #[test]
-    fn lee_json() {
-        let json = r#"{"url":"x","tag_name" : "v0.3.0","assets":[{"name":"a.exe","size":10,
-            "digest":"sha256:AB"},{"name":"b.exe","size": 2368450,"digest":"sha256:cd"}]}"#;
-        assert_eq!(json_string(json, "tag_name"), Some("v0.3.0"));
-        assert_eq!(json_string(json, "falta"), None);
-        let b = &json[json.find("\"b.exe\"").unwrap()..];
-        assert_eq!(json_number(b, "size"), Some(2368450));
-        assert_eq!(json_string(b, "digest"), Some("sha256:cd"));
+    fn lee_la_huella_publicada() {
+        let hex = "940F75DF1C8C4B3F441D0C44E2C69B2B9B0CFAB50A5905DA6AB21A6992B49E60";
+        let name = "nocho-setup-0.10.1.exe";
+        let lower = Some(hex.to_ascii_lowercase());
+        assert_eq!(parse_checksum(&format!("{hex}  {name}\n"), name), lower);
+        assert_eq!(parse_checksum(&format!("{hex} *{name}\r\n"), name), lower);
+        assert_eq!(parse_checksum(&format!("{hex}\n"), name), lower);
+        assert_eq!(parse_checksum(&format!("{hex}  otro.exe"), name), None);
+        assert_eq!(parse_checksum(&format!("{hex}  {name} extra"), name), None);
+        assert_eq!(parse_checksum("abc  nocho-setup-0.10.1.exe", name), None);
+        assert_eq!(parse_checksum("<html>Not Found</html>", name), None);
+        assert_eq!(parse_checksum("", name), None);
     }
 
     #[test]
@@ -755,18 +799,33 @@ mod tests {
         );
     }
 
-    /// Usa la red: `cargo test -- --ignored`. Descarga el instalador del último release y lo
-    /// verifica como lo hace la app.
+    /// Usa la red: `cargo test -- --ignored`. Lee el último release como la app, sin la API.
     #[test]
     #[ignore]
-    fn consulta_y_descarga_de_github() {
-        let json = String::from_utf8(get(API_HOST, API_PATH, true).unwrap()).unwrap();
-        let tag = json_string(&json, "tag_name").unwrap();
+    fn consulta_el_ultimo_release_de_github() {
+        let location =
+            redirect_location(DOWNLOAD_HOST, &format!("{REPO_PATH}/releases/latest")).unwrap();
+        let tag = location.strip_prefix(TAG_URL).expect(&location);
         let version = tag.trim_start_matches('v');
         assert!(is_newer(version, "0.0.0"), "versión rara: {version}");
         assert!(is_plain_version(version));
+        let update = lookup_release("0.0.0", &location, false, |_, _| None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(update.version, version);
+    }
+
+    /// Usa la red y necesita un release con `.sha256` (desde 0.10.1): descarga el instalador y
+    /// lo verifica como lo hace la app.
+    #[test]
+    #[ignore]
+    fn descarga_y_verifica_el_instalador() {
+        let location =
+            redirect_location(DOWNLOAD_HOST, &format!("{REPO_PATH}/releases/latest")).unwrap();
+        let tag = location.strip_prefix(TAG_URL).unwrap();
+        let version = tag.trim_start_matches('v');
         let (path, digest) =
-            download_installer(&json, tag, version).expect("descarga o verificación fallida");
+            download_installer(tag, version).expect("descarga o verificación fallida");
         // Lo mismo que comprueba la isla justo antes de ejecutarlo.
         assert!(file_matches(&path, &digest));
     }

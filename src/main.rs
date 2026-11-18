@@ -3725,7 +3725,12 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                         app.update = None;
                         app.update_checked(false);
                     }
-                    Err(()) => app.update_checked(true),
+                    // No se pudo volver a consultar, pero el instalador del aviso ya está
+                    // descargado: se instala ese (`install` comprueba otra vez su huella).
+                    Err(()) => match app.update.clone() {
+                        Some(cached) if cached.installer.is_some() => app.begin_install(cached),
+                        _ => app.update_checked(true),
+                    },
                 }
             });
             if let Some(latest) = download {
